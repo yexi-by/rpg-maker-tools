@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from typing import Literal
 
 from rich.panel import Panel
@@ -36,18 +35,11 @@ MENU_ACTIONS: list[tuple[ActionId, str]] = [
 class CliApp:
     """管理交互式命令行会话。"""
 
-    def __init__(
-        self,
-        *,
-        provider_factory: Callable[[], TranslationProvider] | None = None,
-        input_func: Callable[[str], str] | None = None,
-    ) -> None:
+    def __init__(self) -> None:
         self.setting_path = resolve_setting_path()
-        self._provider_factory = provider_factory or TranslationProvider
-        self._input = input_func or console.input
 
     async def run(self) -> None:
-        provider = self._provider_factory()
+        provider = TranslationProvider()
         handler = await TranslationHandler.create(provider)
         self._render_banner()
 
@@ -79,7 +71,7 @@ class CliApp:
                 table.add_row(str(index), label)
 
             console.print(table)
-            raw_choice = self._input(
+            raw_choice = console.input(
                 "[tag.menu.prompt]请输入序号[/tag.menu.prompt]: "
             ).strip()
             if not raw_choice.isdigit():

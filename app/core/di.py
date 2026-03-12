@@ -8,7 +8,7 @@ from app.extraction import DataTextExtraction, GlossaryExtraction, PluginTextExt
 from app.models.loaders import load_game_data
 from app.models.schemas import GameData
 from app.services.llm import LLMHandler, LLMSettings
-from app.translation import GlossaryTranslation, TextTranslation
+from app.translation import GlossaryTranslation, TextTranslation, TranslationCache
 
 
 def _build_llm_settings(name: str, service_setting: LLMServiceSetting) -> LLMSettings:
@@ -84,6 +84,11 @@ class TranslationProvider(Provider):
     def get_text_translation(self, setting: Setting) -> TextTranslation:
         """创建请求级正文翻译器。"""
         return TextTranslation(setting)
+
+    @provide(scope=Scope.REQUEST)
+    def get_translation_cache(self) -> TranslationCache:
+        """创建单次正文翻译使用的请求级去重缓存。"""
+        return TranslationCache()
 
 
 __all__: list[str] = ["TranslationProvider"]

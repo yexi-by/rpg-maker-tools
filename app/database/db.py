@@ -7,11 +7,12 @@
 1. 这里负责初始化主翻译表、错误表查询能力以及术语表静态表。
 2. 这里负责把数据库行转换为业务层可消费的结构化对象。
 3. 这里不负责术语提取、翻译编排和游戏文件回写。
+4. 当前实现只接受现行数据库契约，不兼容旧版本数据库或脏数据。
 """
 
 import json
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 import aiosqlite
 
@@ -29,9 +30,9 @@ from app.models.schemas import (
 
 from .sql import (
     CREATE_ERROR_TABLE,
+    CREATE_GLOSSARY_STATE_TABLE,
     CREATE_PLACE_GLOSSARY_TABLE,
     CREATE_ROLE_GLOSSARY_TABLE,
-    CREATE_GLOSSARY_STATE_TABLE,
     CREATE_TRANSLATION_TABLE,
     DELETE_ALL_ROWS,
     INSERT_ERROR,
@@ -39,13 +40,149 @@ from .sql import (
     INSERT_ROLE_GLOSSARY_ITEM,
     INSERT_TRANSLATION,
     SELECT_ALL,
-    SELECT_PLACE_GLOSSARY_ITEMS,
-    SELECT_ROLE_GLOSSARY_ITEMS,
     SELECT_GLOSSARY_STATE,
     SELECT_LATEST_TABLE_NAME_BY_PREFIX,
+    SELECT_PLACE_GLOSSARY_ITEMS,
+    SELECT_ROLE_GLOSSARY_ITEMS,
+    SELECT_TRANSLATED_ITEMS,
     SELECT_TRANSLATION_PATHS,
     UPSERT_GLOSSARY_STATE,
 )
+
+type RoleGender = Literal["男", "女", "未知"]
+
+
+def _parse_json_lines(raw_value: object, field_name: str) -> list[str]:
+    """
+    把数据库中的 JSON 文本字段严格反序列化为 `list[str]`。
+
+    Args:
+        raw_value: 原始数据库字段值。
+        field_name: 当前字段名，用于构造清晰的错误信息。
+
+    Returns:
+        反序列化后的字符串列表。
+
+    Raises:
+        TypeError: 字段不是字符串，或解析结果不是 `list[str]`。
+        json.JSONDecodeError: 字段内容不是合法 JSON。
+    """
+    if not isinstance(raw_value, str):
+        raise TypeError(f"{field_name} 必须是 JSON 字符串")
+
+    parsed: Any = json.loads(raw_value)
+    if not isinstance(parsed, list):
+        raise TypeError(f"{field_name} 反序列化后必须是 list[str]")
+    if any(not isinstance(item, str) for item in parsed):
+        raise TypeError(f"{field_name} 反序列化后必须是 list[str]")
+    return list(parsed)
+
+
+def _parse_item_type(raw_value: object) -> ItemType:
+    """
+    严格校验数据库中的正文条目类型。
+
+    Args:
+        raw_value: 原始字段值。
+
+    Returns:
+        合法的 `ItemType`。
+
+    Raises:
+        ValueError: 值不属于当前支持的正文类型。
+    """
+    if raw_value == "long_text":
+        return "long_text"
+    if raw_value == "array":
+        return "array"
+    if raw_value == "short_text":
+        return "short_text"
+    raise ValueError(f"非法 item_type: {raw_value}")
+
+
+def _parse_error_type(raw_value: object) -> ErrorType:
+    """
+    严格校验数据库中的错误类型。
+
+    Args:
+        raw_value: 原始字段值。
+
+    Returns:
+        合法的 `ErrorType`。
+
+    Raises:
+        ValueError: 值不属于当前支持的错误类型。
+    """
+    if raw_value == "AI漏翻":
+        return "AI漏翻"
+    if raw_value == "控制符不匹配":
+        return "控制符不匹配"
+    if raw_value == "日文残留":
+        return "日文残留"
+    raise ValueError(f"非法 error_type: {raw_value}")
+
+
+def _parse_role(raw_value: object) -> str | None:
+    """
+    严格校验数据库中的角色字段。
+
+    Args:
+        raw_value: 原始字段值。
+
+    Returns:
+        合法的角色名或 `None`。
+
+    Raises:
+        TypeError: 值既不是字符串，也不是 `None`。
+    """
+    if raw_value is None:
+        return None
+    if not isinstance(raw_value, str):
+        raise TypeError("role 必须是字符串或 None")
+    return raw_value
+
+
+def _parse_role_gender(raw_value: object) -> RoleGender:
+    """
+    严格校验数据库中的角色性别字段。
+
+    Args:
+        raw_value: 原始字段值。
+
+    Returns:
+        合法的角色性别字面量。
+
+    Raises:
+        ValueError: 值不属于当前支持的角色性别集合。
+    """
+    if raw_value == "男":
+        return "男"
+    if raw_value == "女":
+        return "女"
+    if raw_value == "未知":
+        return "未知"
+    raise ValueError(f"非法 gender: {raw_value}")
+
+
+def _parse_glossary_ready(raw_value: object) -> bool:
+    """
+    严格校验术语表就绪标记。
+
+    Args:
+        raw_value: 数据库中的 `is_ready` 字段值。
+
+    Returns:
+        术语表是否就绪。
+
+    Raises:
+        TypeError: 值不是整数。
+        ValueError: 值不是 0 或 1。
+    """
+    if type(raw_value) is not int:
+        raise TypeError("glossary_state.is_ready 必须是整数 0 或 1")
+    if raw_value not in (0, 1):
+        raise ValueError("glossary_state.is_ready 只能是 0 或 1")
+    return raw_value == 1
 
 
 class TranslationDB:
@@ -71,8 +208,8 @@ class TranslationDB:
         初始化 TranslationDB 实例。
 
         Args:
-            db: 已建立的异步数据库连接
-            setting: 全局配置对象
+            db: 已建立的异步数据库连接。
+            setting: 全局配置对象。
         """
         self.db: aiosqlite.Connection = db
         self.setting: Setting = setting
@@ -92,19 +229,12 @@ class TranslationDB:
         Returns:
             已建立连接并完成初始化的 TranslationDB 实例。
         """
-        # 步骤 1: 拼接数据库文件路径
         db_path: Path = setting.project.work_path / setting.project.db_name
-
-        # 步骤 2: 确保工作目录存在
-        # 为什么这样做: 如果直接连接不存在的目录会报系统找不到路径的错误，这里做一次兜底创建。
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # 步骤 3: 建立异步数据库连接，设置 row_factory 以支持字典式访问
         db: aiosqlite.Connection = await aiosqlite.connect(db_path)
         db.row_factory = aiosqlite.Row
 
-        # 步骤 4: 初始化主翻译表与术语表静态表
-        # 这里统一执行建表操作，保证项目一启动数据库就绪
         _ = await db.execute(
             CREATE_TRANSLATION_TABLE.format(
                 table_name=setting.project.translation_table_name
@@ -130,23 +260,17 @@ class TranslationDB:
         """
         批量写入已完成的译文到主翻译表。
 
-        主翻译表在 `new(...)` 阶段已经完成初始化，
-        此方法不再承担建表职责，而是将内存中的译文通过 UPSERT 策略同步至数据库，
-        避免重复路径抛出主键冲突。
-
         Args:
             items: 待写入的已完成翻译数据列表。每个元组包含:
-                - location_path: 定位路径 (str)
-                - item_type: 条目类型 (ItemType)
-                - role: 角色名 (str | None)
-                - original_lines: 原文行列表 (list[str])
-                - translation_lines: 译文行列表 (list[str])
+                - location_path: 定位路径。
+                - item_type: 条目类型。
+                - role: 角色名。
+                - original_lines: 原文行列表。
+                - translation_lines: 译文行列表。
         """
         table_name: str = self.translation_table_name
 
         if items:
-            # 步骤 1: 将列表形式的原文和译文序列化为 JSON 字符串
-            # 为什么这样做: SQLite 原生不支持存储数组，JSON 序列化是存储文本列表的最轻量做法。
             serialized_items: list[tuple[str, str, str | None, str, str]] = [
                 (
                     location_path,
@@ -157,23 +281,16 @@ class TranslationDB:
                 )
                 for location_path, item_type, role, original_lines, translation_lines in items
             ]
-            
-            # 步骤 2: 批量插入或替换
             _ = await self.db.executemany(
                 INSERT_TRANSLATION.format(table_name=table_name),
                 serialized_items,
             )
 
-        # 步骤 3: 统一提交事务
         await self.db.commit()
 
     async def read_glossary(self) -> Glossary | None:
         """
         读取当前有效术语表。
-
-        为什么这里返回 `None`：
-        1. 项目刚初始化但尚未执行过术语构建时，数据库中不应伪造一张空术语表。
-        2. “已构建空术语表”和“从未构建术语表”需要在语义上区分开。
 
         Returns:
             已存在时返回结构化术语表；从未构建时返回 `None`。
@@ -190,13 +307,9 @@ class TranslationDB:
         """
         用新的术语表内容整表替换当前数据库中的术语表快照。
 
-        该操作是破坏性的替换操作，会清空旧的术语表数据并写入新数据，
-        并在完成后更新“当前术语表已建立”的状态标记。
-
         Args:
             glossary: 待写入数据库的完整结构化术语表。
         """
-        # 步骤 1: 清空已有的角色名与地图显示名术语表。
         _ = await self.db.execute(
             DELETE_ALL_ROWS.format(table_name=self.GLOSSARY_ROLE_TABLE)
         )
@@ -204,7 +317,6 @@ class TranslationDB:
             DELETE_ALL_ROWS.format(table_name=self.GLOSSARY_PLACE_TABLE)
         )
 
-        # 步骤 2: 将角色模型元组化并批量插入
         if glossary.roles:
             role_items: list[tuple[str, str, str]] = [
                 (role.name, role.translated_name, role.gender)
@@ -215,7 +327,6 @@ class TranslationDB:
                 role_items,
             )
 
-        # 步骤 3: 将地点模型元组化并批量插入
         if glossary.places:
             place_items: list[tuple[str, str]] = [
                 (place.name, place.translated_name) for place in glossary.places
@@ -225,25 +336,21 @@ class TranslationDB:
                 place_items,
             )
 
-        # 步骤 4: 写入/更新术语表就绪状态，使得下次启动能够识别到有效的术语表
         _ = await self.db.execute(
             UPSERT_GLOSSARY_STATE.format(table_name=self.GLOSSARY_STATE_TABLE),
             (self.GLOSSARY_STATE_KEY, 1),
         )
-        
-        # 步骤 5: 提交所有替换事务
         await self.db.commit()
 
     async def read_translation_location_paths(self) -> set[str]:
         """
-        读取主翻译表中“已完成译文”的路径集合。
-
-        为什么这里仍要解析 `translation_lines`：
-        1. 旧版本数据库可能残留空译文行。
-        2. 当前新语义虽然只保存完成译文，但读取时仍要兼容历史数据。
+        读取主翻译表中全部已写入路径。
 
         Returns:
-            所有已完成译文对应的 `location_path` 集合。
+            主翻译表中的 `location_path` 集合。
+
+        Raises:
+            TypeError: 某条记录的 `location_path` 不是字符串。
         """
         translated_paths: set[str] = set()
         async with self.db.execute(
@@ -253,32 +360,65 @@ class TranslationDB:
 
         for row in rows:
             location_path = row["location_path"]
-            translation_lines_raw = row["translation_lines"]
             if not isinstance(location_path, str):
-                continue
-            if not isinstance(translation_lines_raw, str):
-                continue
-
-            try:
-                translation_lines = json.loads(translation_lines_raw)
-            except json.JSONDecodeError:
-                continue
-
-            if not isinstance(translation_lines, list):
-                continue
-
-            if any(isinstance(line, str) and line.strip() for line in translation_lines):
-                translated_paths.add(location_path)
+                raise TypeError("translation.location_path 必须是字符串")
+            translated_paths.add(location_path)
 
         return translated_paths
+
+    async def read_translated_items(self) -> list[TranslationItem]:
+        """
+        严格读取主翻译表中的全部正文译文。
+
+        Returns:
+            供回写层直接消费的 `TranslationItem` 列表。
+
+        Raises:
+            TypeError: 数据库字段类型与当前契约不一致。
+            ValueError: 枚举字段值与当前契约不一致。
+            json.JSONDecodeError: JSON 字段内容非法。
+        """
+        translated_items: list[TranslationItem] = []
+        async with self.db.execute(
+            SELECT_TRANSLATED_ITEMS.format(table_name=self.translation_table_name)
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        for row in rows:
+            location_path = row["location_path"]
+            if not isinstance(location_path, str):
+                raise TypeError("translation.location_path 必须是字符串")
+
+            translated_items.append(
+                TranslationItem(
+                    location_path=location_path,
+                    item_type=_parse_item_type(row["item_type"]),
+                    role=_parse_role(row["role"]),
+                    original_lines=_parse_json_lines(
+                        row["original_lines"],
+                        "translation.original_lines",
+                    ),
+                    translation_lines=_parse_json_lines(
+                        row["translation_lines"],
+                        "translation.translation_lines",
+                    ),
+                )
+            )
+
+        return translated_items
 
     async def read_latest_error_table_name(self, prefix: str) -> str | None:
         """
         读取指定前缀下按名称排序最新的一张错误表。
+
         Args:
             prefix: 错误表名前缀。
+
         Returns:
             最新错误表名；不存在时返回 `None`。
+
+        Raises:
+            TypeError: SQLite 返回的表名字段不是字符串。
         """
         async with self.db.execute(
             SELECT_LATEST_TABLE_NAME_BY_PREFIX,
@@ -291,14 +431,16 @@ class TranslationDB:
 
         table_name = row["name"]
         if not isinstance(table_name, str):
-            return None
+            raise TypeError("sqlite_master.name 必须是字符串")
         return table_name
 
     async def read_error_retry_items(self, table_name: str) -> list[ErrorRetryItem]:
         """
-        读取指定错误表，并反序列化为错误重翻译条目列表。
+        严格读取指定错误表，并反序列化为错误重翻译条目列表。
+
         Args:
             table_name: 目标错误表名。
+
         Returns:
             结构化后的错误重翻译条目列表。
         """
@@ -306,28 +448,30 @@ class TranslationDB:
         retry_items: list[ErrorRetryItem] = []
 
         for row in rows:
-            location_path = row.get("location_path")
-            item_type = self._normalize_item_type(row.get("item_type"))
-            error_type = self._normalize_error_type(row.get("error_type"))
-
+            location_path = row["location_path"]
             if not isinstance(location_path, str):
-                continue
-            if item_type is None or error_type is None:
-                continue
+                raise TypeError(f"{table_name}.location_path 必须是字符串")
 
             retry_items.append(
                 ErrorRetryItem(
                     translation_item=TranslationItem(
                         location_path=location_path,
-                        item_type=item_type,
-                        role=row.get("role") if isinstance(row.get("role"), str) else None,
-                        original_lines=self._deserialize_lines(row.get("original_lines")),
+                        item_type=_parse_item_type(row["item_type"]),
+                        role=_parse_role(row["role"]),
+                        original_lines=_parse_json_lines(
+                            row["original_lines"],
+                            f"{table_name}.original_lines",
+                        ),
                     ),
-                    previous_translation_lines=self._deserialize_lines(
-                        row.get("translation_lines")
+                    previous_translation_lines=_parse_json_lines(
+                        row["translation_lines"],
+                        f"{table_name}.translation_lines",
                     ),
-                    error_type=error_type,
-                    error_detail=self._deserialize_lines(row.get("error_detail")),
+                    error_type=_parse_error_type(row["error_type"]),
+                    error_detail=_parse_json_lines(
+                        row["error_detail"],
+                        f"{table_name}.error_detail",
+                    ),
                 )
             )
 
@@ -342,22 +486,13 @@ class TranslationDB:
         """
         根据动态表名创建错误数据表，并批量插入错误数据。
 
-        每次正文翻译或重翻任务都会根据时间戳生成唯一的错误表名，
-        这个方法负责初始化这类的临时错误表，并把翻译失败的条目入库保存，
-        方便后续用户追溯或进行自动重翻。
-
         Args:
             table_name: 动态生成的错误表名。
             items: 包含错误上下文和错误详情的条目列表。
         """
-        # 步骤 1: 执行动态建表 SQL，如果表已存在则忽略
-        await self.db.execute(
-            CREATE_ERROR_TABLE.format(table_name=table_name)
-        )
+        await self.db.execute(CREATE_ERROR_TABLE.format(table_name=table_name))
 
         if items:
-            # 步骤 2: 将包含多行文本及列表的字段序列化为 JSON
-            # 为什么这样做: 错误详情及原文同样是列表，必须序列化才能写入 SQLite 文本字段。
             serialized_items: list[tuple[str, str, str | None, str, str, str, str]] = [
                 (
                     location_path,
@@ -370,21 +505,16 @@ class TranslationDB:
                 )
                 for location_path, item_type, role, original_lines, translation_lines, error_type, error_detail in items
             ]
-            
-            # 步骤 3: 批量插入错误记录
             await self.db.executemany(
                 INSERT_ERROR.format(table_name=table_name),
                 serialized_items,
             )
 
-        # 步骤 4: 统一提交事务
         await self.db.commit()
 
     async def read_table(self, table_name: str) -> list[dict[str, Any]]:
         """
         读取指定表的所有数据，并将其转化为原生字典列表返回。
-
-        此方法提供通用的表读取能力，通常用于拉取需要做后续业务映射的基础数据。
 
         Args:
             table_name: 目标读取的表名。
@@ -392,15 +522,9 @@ class TranslationDB:
         Returns:
             包含所有行数据的字典列表。字典的键对应数据表列名。
         """
-        # 步骤 1: 执行全表查询
         async with self.db.execute(SELECT_ALL.format(table_name=table_name)) as cursor:
-            # 步骤 2: 获取所有的 Row 对象
             rows = await cursor.fetchall()
-
-            # 步骤 3: 利用 aiosqlite.Row 的特性，直接转换为标准字典
-            result: list[dict[str, Any]] = [dict(row) for row in rows]
-
-        return result
+            return [dict(row) for row in rows]
 
     async def _is_glossary_ready(self) -> bool:
         """
@@ -418,12 +542,11 @@ class TranslationDB:
         if row is None:
             return False
 
-        is_ready = row["is_ready"]
-        return is_ready == 1
+        return _parse_glossary_ready(row["is_ready"])
 
     async def _read_roles(self) -> list[Role]:
         """
-        读取角色术语表并转换为结构化角色对象列表。
+        严格读取角色术语表并转换为结构化角色对象列表。
 
         Returns:
             角色术语对象列表。
@@ -437,18 +560,16 @@ class TranslationDB:
         for row in rows:
             name = row["name"]
             translated_name = row["translated_name"]
-            gender = row["gender"]
             if not isinstance(name, str):
-                continue
+                raise TypeError("glossary_roles.name 必须是字符串")
             if not isinstance(translated_name, str):
-                continue
-            if gender not in ("男", "女", "未知"):
-                continue
+                raise TypeError("glossary_roles.translated_name 必须是字符串")
+
             roles.append(
                 Role(
                     name=name,
                     translated_name=translated_name,
-                    gender=gender,
+                    gender=_parse_role_gender(row["gender"]),
                 )
             )
 
@@ -456,7 +577,7 @@ class TranslationDB:
 
     async def _read_places(self) -> list[Place]:
         """
-        读取地点术语表并转换为结构化地点对象列表。
+        严格读取地点术语表并转换为结构化地点对象列表。
 
         Returns:
             地点术语对象列表。
@@ -471,72 +592,12 @@ class TranslationDB:
             name = row["name"]
             translated_name = row["translated_name"]
             if not isinstance(name, str):
-                continue
+                raise TypeError("glossary_places.name 必须是字符串")
             if not isinstance(translated_name, str):
-                continue
+                raise TypeError("glossary_places.translated_name 必须是字符串")
             places.append(Place(name=name, translated_name=translated_name))
 
         return places
 
-    def _deserialize_lines(self, raw_value: Any) -> list[str]:
-        """
-        把数据库中的 JSON 文本字段反序列化为字符串列表。
-        Args:
-            raw_value: 原始字段值。
-        Returns:
-            归一化后的字符串列表。
-        """
-        if isinstance(raw_value, list):
-            return [item for item in raw_value if isinstance(item, str)]
 
-        if not isinstance(raw_value, str):
-            return []
-
-        try:
-            parsed = json.loads(raw_value)
-        except json.JSONDecodeError:
-            return []
-
-        if not isinstance(parsed, list):
-            return []
-        return [item for item in parsed if isinstance(item, str)]
-
-    def _normalize_item_type(self, raw_value: Any) -> ItemType | None:
-        """
-        把外部输入归一化为合法的 `ItemType`。
-        Args:
-            raw_value: 原始输入值。
-        Returns:
-            合法时返回 `ItemType`，否则返回 `None`。
-        """
-        if raw_value == "long_text":
-            return "long_text"
-        if raw_value == "array":
-            return "array"
-        if raw_value == "short_text":
-            return "short_text"
-        return None
-
-    def _normalize_error_type(self, raw_value: Any) -> ErrorType | None:
-        """
-        把外部输入归一化为合法的错误类型。
-        Args:
-            raw_value: 原始输入值。
-        Returns:
-            合法时返回错误类型，否则返回 `None`。
-        """
-        if raw_value == "AI漏翻":
-            return "AI漏翻"
-        if raw_value == "控制符不匹配":
-            return "控制符不匹配"
-        if raw_value == "日文残留":
-            return "日文残留"
-        return None
-
-    async def close(self) -> None:
-        """
-        关闭数据库连接。
-
-        释放底层 SQLite 连接资源。
-        """
-        await self.db.close()
+__all__: list[str] = ["TranslationDB"]

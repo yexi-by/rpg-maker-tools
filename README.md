@@ -48,7 +48,6 @@ rpg-maker-tools/
 │  └─ write_back/      # 术语与正文回写
 ├─ cli/                # 交互式 CLI 入口
 ├─ prompts/            # 系统提示词文件
-├─ tests/              # 回归测试
 ├─ main.py             # CLI 入口
 └─ setting.toml        # 配置样例
 ```
@@ -127,18 +126,3 @@ CLI 会提供以下动作：
 - 若干错误表
 
 主翻译表、术语表和错误表统一由 [`TranslationDB`](/c:/Users/夜袭/Desktop/translation%20tools/rpg-maker-tools/app/database/db.py) 管理。
-
-## 测试
-
-运行全部测试：
-
-```bash
-uv run python -m unittest
-```
-
-当前重点覆盖：
-
-- CLI 入口与动作分发
-- 配置加载
-- 术语流式构建
-- 数据库读写与 Handler 编排

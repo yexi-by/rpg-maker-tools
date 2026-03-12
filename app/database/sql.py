@@ -151,10 +151,20 @@ SELECT_GLOSSARY_STATE: str = """
 ;
 """
 
-# 查询翻译表中的路径与译文字段
+# 查询翻译表中的全部已写入路径
 SELECT_TRANSLATION_PATHS: str = """
 --sql
-    SELECT location_path, translation_lines FROM [{table_name}]
+    SELECT location_path
+    FROM [{table_name}]
+;
+"""
+
+# 查询翻译表中的全部正文译文
+SELECT_TRANSLATED_ITEMS: str = """
+--sql
+    SELECT location_path, item_type, role, original_lines, translation_lines
+    FROM [{table_name}]
+    ORDER BY location_path
 ;
 """
 

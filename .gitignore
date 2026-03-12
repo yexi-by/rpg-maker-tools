@@ -28,3 +28,5 @@ data/*.sqlite3
 data/*.db-*
 data/*.sqlite-*
 data/*.sqlite3-*
+
+AGENTS.md

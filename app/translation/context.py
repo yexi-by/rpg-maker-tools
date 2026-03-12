@@ -16,20 +16,39 @@ from app.models.schemas import ErrorRetryItem, Glossary, Place, Role, Translatio
 from app.services.llm.schemas import ChatMessage
 
 USER_PROMPT_TEMPLATE: str = (
-    "[[术语表-角色]]\n{role_glossary}\n"
-    "[[术语表-地点]]\n{place_glossary}\n"
-    "[[地图名]]\n{display_name}\n"
+    "[[术语表-角色]]\n{role_glossary}\n\n"
+    "[[术语表-地点]]\n{place_glossary}\n\n"
+    "[[地图名]]\n{display_name}\n\n"
     "[[需要翻译的正文]]\n{unit_text}"
 )
-LONG_TEXT_CONTEXT_TEMPLATE: str = "[ID]{id}\n[类型]{item_type}\n[角色]{role}\n[建议换行数]{line_count}\n[台词]\n{lines}\n\n"
-ARRAY_CONTEXT_TEMPLATE: str = (
-    "[ID]{id}\n[类型]{item_type}\n[输出行数]{line_count}\n[选项列表]{lines}\n\n"
+LONG_TEXT_CONTEXT_TEMPLATE: str = (
+    "[ID]{id}\n"
+    "[类型]{item_type}\n"
+    "[角色]{role}\n"
+    "[建议换行数]{line_count}\n"
+    "\n"
+    "[台词]\n"
+    "{lines}\n\n"
 )
-SHORT_TEXT_CONTEXT_TEMPLATE: str = "[ID]{id}\n[类型]{item_type}\n[游戏文本]{lines}\n\n"
+ARRAY_CONTEXT_TEMPLATE: str = (
+    "[ID]{id}\n"
+    "[类型]{item_type}\n"
+    "[输出行数]{line_count}\n"
+    "\n"
+    "[选项列表]\n"
+    "{lines}\n\n"
+)
+SHORT_TEXT_CONTEXT_TEMPLATE: str = (
+    "[ID]{id}\n"
+    "[类型]{item_type}\n"
+    "\n"
+    "[游戏文本]\n"
+    "{lines}\n\n"
+)
 
 ERROR_RETRY_USER_PROMPT_TEMPLATE: str = (
-    "[[术语表-角色]]\n{role_glossary}\n"
-    "[[术语表-地点]]\n{place_glossary}\n"
+    "[[术语表-角色]]\n{role_glossary}\n\n"
+    "[[术语表-地点]]\n{place_glossary}\n\n"
     "[[需要重翻译的错误正文]]\n{unit_text}"
 )
 ERROR_RETRY_CONTEXT_TEMPLATE: str = (
@@ -37,11 +56,16 @@ ERROR_RETRY_CONTEXT_TEMPLATE: str = (
     "[类型]{item_type}\n"
     "[角色]{role}\n"
     "[建议输出行数]{line_count}\n"
-    "[原文]{original_lines}\n"
-    "[上次失败译文]{previous_translation}\n"
+    "\n"
+    "[原文]\n{original_lines}\n"
+    "\n"
+    "[上次失败译文]\n{previous_translation}\n"
+    "\n"
     "[错误类型]{error_type}\n"
-    "[错误详情]{error_detail}\n\n"
+    "\n"
+    "[错误详情]\n{error_detail}\n\n"
 )
+NARRATION_ROLE: str = "旁白"
 
 
 def iter_translation_context_batches(
@@ -107,7 +131,7 @@ def iter_translation_context_batches(
         if estimated_tokens < token_size:
             continue
 
-        if item.role is None or item.role == "":
+        if item.role is None or item.role == NARRATION_ROLE:
             yield _build_translation_batch(
                 system_message=system_message,
                 current_items=current_items,
@@ -121,11 +145,17 @@ def iter_translation_context_batches(
             main_bodies = []
             continue
 
+        assert item.role is not None
+        assert item.role != NARRATION_ROLE
         anchor_role: str = item.role
         appended_command_items: int = 0
         while index < len(items) and appended_command_items < max_command_items:
             next_item: TranslationItem = items[index]
-            if next_item.role not in ("", anchor_role):
+            if not (
+                next_item.role is None
+                or next_item.role == NARRATION_ROLE
+                or next_item.role == anchor_role
+            ):
                 break
 
             current_length += _append_item_to_batch(
@@ -417,7 +447,7 @@ def _collect_hit_glossary(
         return
 
     texts_for_roles: list[str] = [masked_text]
-    if item.role:
+    if item.role is not None and item.role != NARRATION_ROLE:
         texts_for_roles.append(item.role)
 
     texts_for_places: list[str] = [masked_text]
@@ -598,8 +628,6 @@ def _mask_previous_translation_lines(
         masked_lines.append(masked_line)
 
     return masked_lines
-
-
 __all__: list[str] = [
     "iter_error_retry_context_batches",
     "iter_translation_context_batches",

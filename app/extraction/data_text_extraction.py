@@ -35,6 +35,7 @@ PLUGIN_COMMAND_EXCLUDED_KEYS: set[str] = {
     "filename",
     "fontname",
 }
+NARRATION_ROLE: str = "旁白"
 
 
 class DataTextExtraction:
@@ -279,11 +280,13 @@ class DataTextExtraction:
             items: 当前正在构建的所在文件的翻译项列表（原地追加）。
             location_path: 当前指令的精确定位路径。
         """
-        role: str = ""
+        role: str = NARRATION_ROLE
         if len(command.parameters) >= 5:
             role_value = command.parameters[4]
-            if isinstance(role_value, str) and role_value:
-                role = role_value.strip()
+            if isinstance(role_value, str):
+                stripped_role: str = role_value.strip()
+                if stripped_role:
+                    role = stripped_role
 
         items.append(
             TranslationItem(
@@ -349,7 +352,7 @@ class DataTextExtraction:
 
         items.append(
             TranslationItem(
-                role="",
+                role=NARRATION_ROLE,
                 location_path=location_path,
                 item_type="array",
                 original_lines=original_lines,
@@ -376,7 +379,7 @@ class DataTextExtraction:
 
         items.append(
             TranslationItem(
-                role="",
+                role=NARRATION_ROLE,
                 location_path=location_path,
                 item_type="long_text",
                 original_lines=[text],

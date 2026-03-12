@@ -11,9 +11,7 @@ import json
 from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
-import aiosqlite
 from dishka import AsyncContainer, make_async_container
 from rich.progress import Progress, TaskID
 
@@ -38,6 +36,7 @@ from app.services.llm.schemas import ChatMessage
 from app.translation import (
     GlossaryTranslation,
     TextTranslation,
+    TranslationCache,
     iter_error_retry_context_batches,
     iter_translation_context_batches,
 )
@@ -59,7 +58,7 @@ class TranslationHandler:
 
     def __init__(
         self,
-        provider: TranslationProvider,
+        container: AsyncContainer,
         setting: Setting,
         game_data: GameData,
         llm_handler: LLMHandler,
@@ -69,31 +68,29 @@ class TranslationHandler:
         初始化总编排器。
 
         参数:
-            provider: 统一依赖提供器，请求级依赖仍经由它创建。
+            container: 已初始化完成的 Dishka 根容器，请求级依赖经由它派生。
             setting: 已解析完成的运行时配置。
             game_data: 已加载完成的游戏数据。
             llm_handler: 已注册服务的大模型门面。
             translation_db: 已初始化完成的翻译数据库门面。
         """
-        self.provider: TranslationProvider = provider
+        self._container: AsyncContainer = container
         self.setting: Setting = setting
         self.game_data: GameData = game_data
         self.llm_handler: LLMHandler = llm_handler
         self.translation_db: TranslationDB = translation_db
-        self._app_container: AsyncContainer | None = None
 
     @classmethod
     async def create(cls, provider: TranslationProvider) -> "TranslationHandler":
-        """通过提供器构造编排器，并缓存进程级容器。"""
-        app_container: AsyncContainer = make_async_container(provider)
+        """通过提供器构造编排器，并缓存 Dishka 根容器。"""
+        container: AsyncContainer = make_async_container(provider)
         handler = cls(
-            provider=provider,
-            setting=await app_container.get(Setting),
-            game_data=await app_container.get(GameData),
-            llm_handler=await app_container.get(LLMHandler),
-            translation_db=await app_container.get(TranslationDB),
+            container=container,
+            setting=await container.get(Setting),
+            game_data=await container.get(GameData),
+            llm_handler=await container.get(LLMHandler),
+            translation_db=await container.get(TranslationDB),
         )
-        handler._app_container = app_container
         return handler
 
     async def build_glossary(self) -> AsyncIterator[GlossaryBuildChunk]:
@@ -106,7 +103,7 @@ class TranslationHandler:
         产出:
             术语分块对象，包含当前批次翻译完成的角色术语或地点术语。
         """
-        async with self._open_request_scope() as request_container:
+        async with self._container() as request_container:
             glossary_extraction: GlossaryExtraction = await request_container.get(
                 GlossaryExtraction
             )
@@ -158,9 +155,7 @@ class TranslationHandler:
                     expected_role_names=expected_role_names,
                     expected_display_names=expected_display_names,
                 ):
-                    logger.info(
-                        "[tag.skip]术语表已完整存在，跳过构建[/tag.skip]"
-                    )
+                    logger.info("[tag.skip]术语表已完整存在，跳过构建[/tag.skip]")
                     self._finish_progress_task(
                         progress=progress,
                         task_id=progress_task_id,
@@ -223,7 +218,9 @@ class TranslationHandler:
                 progress.update(progress_task_id, description="术语表写入数据库中")
                 glossary: Glossary = Glossary(roles=roles, places=places)
                 await self.translation_db.replace_glossary(glossary)
-                logger.success("[tag.success]术语表构建完成并已写入数据库[/tag.success]")
+                logger.success(
+                    "[tag.success]术语表构建完成并已写入数据库[/tag.success]"
+                )
                 progress.advance(progress_task_id, 1)
                 progress.update(progress_task_id, description="术语表构建完成")
 
@@ -238,7 +235,7 @@ class TranslationHandler:
         4. 批次构造：基于令牌限制、段落连续性要求及已完成的术语表，构造请求上下文。
         5. 并发调度：将任务委托给多个后台协程并发执行，编排器自身负责收集结果、更新进度条、写入主数据库或错误表。
         """
-        async with self._open_request_scope() as request_container:
+        async with self._container() as request_container:
             glossary_extraction: GlossaryExtraction = await request_container.get(
                 GlossaryExtraction
             )
@@ -250,6 +247,9 @@ class TranslationHandler:
             )
             text_translation: TextTranslation = await request_container.get(
                 TextTranslation
+            )
+            translation_cache: TranslationCache = await request_container.get(
+                TranslationCache
             )
 
             # 步骤 2: 正文翻译前必须重新校验术语表完整性，避免基于过期术语继续翻译正文。
@@ -314,10 +314,30 @@ class TranslationHandler:
                 f"[tag.phase]正文过滤[/tag.phase] 剩余 [tag.count]{pending_count}[/tag.count] 条待翻译正文"
             )
 
-            # 步骤 6: 把待翻译正文构造成“条目列表 + 消息上下文”的批次，交给正文翻译器调度。
+            deduplicated_translation_data: dict[str, TranslationData] = (
+                self._deduplicate_translation_data(
+                    translation_data_map=pending_translation_data,
+                    translation_cache=translation_cache,
+                )
+            )
+            deduplicated_count: int = self._count_translation_items(
+                deduplicated_translation_data
+            )
+            saved_count: int = pending_count - deduplicated_count
+            saved_ratio: float = 0.0
+            if pending_count > 0:
+                saved_ratio = saved_count / pending_count
+
+            logger.info(
+                f"[tag.phase]正文缓存[/tag.phase] 过滤后 [tag.count]{pending_count}[/tag.count] 条，"
+                f"实际送模 [tag.count]{deduplicated_count}[/tag.count] 条，"
+                f"节省 [tag.count]{saved_count}[/tag.count] 条 ({saved_ratio:.2%})"
+            )
+
+            # 步骤 6: 把去重后的待翻译正文构造成“条目列表 + 消息上下文”的批次，交给正文翻译器调度。
             batches: list[tuple[list[TranslationItem], list[ChatMessage]]] = (
                 self._build_translation_batches(
-                    translation_data_map=pending_translation_data,
+                    translation_data_map=deduplicated_translation_data,
                     glossary=glossary,
                 )
             )
@@ -337,6 +357,7 @@ class TranslationHandler:
                 completed_description=f"正文翻译完成，共处理 {pending_count} 条",
                 start_log_message="正文翻译任务已启动",
                 finish_log_message="正文翻译流程结束",
+                translation_cache=translation_cache,
             )
 
     async def retry_error_table(self) -> None:
@@ -347,7 +368,7 @@ class TranslationHandler:
         此工作流会读取最新的错误表，将错误详情连同原文一起发给大模型强制纠错。
         如果本次纠错成功，则存入主库；如果再次失败，则会生成一张基于当前时间戳的新错误表。
         """
-        async with self._open_request_scope() as request_container:
+        async with self._container() as request_container:
             glossary_extraction: GlossaryExtraction = await request_container.get(
                 GlossaryExtraction
             )
@@ -405,7 +426,9 @@ class TranslationHandler:
                 )
             )
             if not batches:
-                logger.warning("[tag.warning]没有构建出可用的错误重翻译批次[/tag.warning]")
+                logger.warning(
+                    "[tag.warning]没有构建出可用的错误重翻译批次[/tag.warning]"
+                )
                 return
 
             logger.info(
@@ -439,7 +462,7 @@ class TranslationHandler:
             glossary: Glossary | None = await self.translation_db.read_glossary()
             translated_items: list[
                 TranslationItem
-            ] = await self._load_translated_items()
+            ] = await self.translation_db.read_translated_items()
             progress.advance(progress_task_id, 1)
 
             if glossary is None and not translated_items:
@@ -482,7 +505,9 @@ class TranslationHandler:
                     f"[tag.success]正文回写完成[/tag.success] 共处理 [tag.count]{len(translated_items)}[/tag.count] 条已翻译数据"
                 )
             else:
-                logger.warning("[tag.warning]数据库中没有可回写的正文译文[/tag.warning]")
+                logger.warning(
+                    "[tag.warning]数据库中没有可回写的正文译文[/tag.warning]"
+                )
             progress.advance(progress_task_id, 1)
 
             # 步骤 5: 最后才统一把可写副本真正落到游戏目录，避免中途写出半更新状态。
@@ -491,17 +516,6 @@ class TranslationHandler:
             logger.success("[tag.success]游戏文件已写回原始目录[/tag.success]")
             progress.advance(progress_task_id, 1)
             progress.update(progress_task_id, description="回写完成")
-
-    def _open_request_scope(self) -> Any:
-        """从已缓存的进程级容器或测试替身中打开一次请求作用域。"""
-        if self._app_container is not None:
-            return self._app_container()
-
-        open_request_scope = getattr(self.provider, "open_request_scope", None)
-        if callable(open_request_scope):
-            return open_request_scope()
-
-        raise RuntimeError("总编排器必须通过异步工厂方法创建")
 
     @staticmethod
     def _finish_progress_task(
@@ -550,25 +564,6 @@ class TranslationHandler:
             return False
         return True
 
-    async def _read_table_safe(self, table_name: str) -> list[dict[str, Any]]:
-        """
-        安全读取数据库表。
-
-        当表尚不存在时，这里直接返回空列表，避免把“首次运行未建表”当成异常分支。
-
-        参数:
-            table_name: 目标表名。
-
-        返回:
-            表中全部原始字典行。
-        """
-        try:
-            return await self.translation_db.read_table(table_name)
-        except aiosqlite.OperationalError as error:
-            if "no such table" in str(error).lower():
-                return []
-            raise
-
     def _filter_pending_translation_data(
         self,
         translation_data_map: dict[str, TranslationData],
@@ -607,61 +602,38 @@ class TranslationHandler:
 
         return pending_translation_data
 
-    def _deserialize_lines(self, raw_value: Any) -> list[str]:
+    def _deduplicate_translation_data(
+        self,
+        translation_data_map: dict[str, TranslationData],
+        translation_cache: TranslationCache,
+    ) -> dict[str, TranslationData]:
         """
-        把数据库中的序列化文本或其他输入转换成字符串列表。
+        使用请求级缓存过滤本轮正文中的重复条目。
 
         参数:
-            raw_value: 数据库字段原值。
+            translation_data_map: 已经过路径断点过滤的待翻译正文。
+            translation_cache: 单轮正文翻译使用的请求级去重缓存。
 
         返回:
-            归一化后的字符串列表。
+            去重后的待翻译正文数据。
         """
-        if isinstance(raw_value, list):
-            return [item for item in raw_value if isinstance(item, str)]
+        deduplicated_translation_data: dict[str, TranslationData] = {}
 
-        if not isinstance(raw_value, str):
-            return []
+        for file_name, translation_data in translation_data_map.items():
+            deduplicated_items: list[TranslationItem] = []
 
-        try:
-            parsed: Any = json.loads(raw_value)
-        except json.JSONDecodeError:
-            return []
+            for item in translation_data.translation_items:
+                if not translation_cache.remember_or_defer(item):
+                    continue
+                deduplicated_items.append(item)
 
-        if not isinstance(parsed, list):
-            return []
+            if deduplicated_items:
+                deduplicated_translation_data[file_name] = TranslationData(
+                    display_name=translation_data.display_name,
+                    translation_items=deduplicated_items,
+                )
 
-        return [item for item in parsed if isinstance(item, str)]
-
-    def _normalize_item_type(self, raw_value: Any) -> ItemType | None:
-        """
-        将外部输入归一化为合法的 `ItemType`。
-
-        参数:
-            raw_value: 原始输入值。
-
-        返回:
-            合法时返回 `ItemType`，否则返回 `None`。
-        """
-        if raw_value == "long_text":
-            return "long_text"
-        if raw_value == "array":
-            return "array"
-        if raw_value == "short_text":
-            return "short_text"
-        return None
-
-    def _has_completed_translation(self, translation_lines: list[str]) -> bool:
-        """
-        判断一条数据库记录是否已经包含有效译文。
-
-        参数:
-            translation_lines: 数据库中的译文行列表。
-
-        返回:
-            只要存在至少一行非空译文，就视为已翻译。
-        """
-        return any(line.strip() for line in translation_lines)
+        return deduplicated_translation_data
 
     def _count_translation_items(
         self,
@@ -745,6 +717,7 @@ class TranslationHandler:
         completed_description: str,
         start_log_message: str,
         finish_log_message: str,
+        translation_cache: TranslationCache | None = None,
     ) -> None:
         """
         统一执行一轮正文类翻译任务。
@@ -785,6 +758,7 @@ class TranslationHandler:
                         db_write_lock=db_write_lock,
                         progress=progress,
                         progress_task_id=progress_task_id,
+                        translation_cache=translation_cache,
                     )
                 ),
                 asyncio.create_task(
@@ -833,6 +807,7 @@ class TranslationHandler:
         db_write_lock: asyncio.Lock,
         progress: Progress,
         progress_task_id: TaskID,
+        translation_cache: TranslationCache | None,
     ) -> None:
         """
         持续消费正确队列并写入翻译主表。
@@ -844,6 +819,11 @@ class TranslationHandler:
             progress_task_id: 正文翻译对应的进度任务编号。
         """
         async for items in text_translation.iter_right_items():
+            expanded_items: list[TranslationItem] = self._expand_cached_translation_items(
+                items=items,
+                translation_cache=translation_cache,
+            )
+
             # 队列里是结构化模型，入库前先转成数据库层要求的扁平元组。
             serialized_items: list[
                 tuple[str, ItemType, str | None, list[str], list[str]]
@@ -855,16 +835,16 @@ class TranslationHandler:
                     list(item.original_lines),
                     list(item.translation_lines),
                 )
-                for item in items
+                for item in expanded_items
             ]
 
             # 正确队列和错误队列共用一个数据库连接，所以这里必须串行写入。
             async with db_write_lock:
                 await self.translation_db.write_translation_items(serialized_items)
 
-            progress.advance(progress_task_id, len(items))
+            progress.advance(progress_task_id, len(expanded_items))
             logger.success(
-                f"[tag.success]已写入正文翻译结果[/tag.success] [tag.count]{len(items)}[/tag.count] 条"
+                f"[tag.success]已写入正文翻译结果[/tag.success] [tag.count]{len(expanded_items)}[/tag.count] 条"
             )
 
     async def _consume_error_items(
@@ -898,46 +878,35 @@ class TranslationHandler:
                 f"[tag.failure]已写入错误记录[/tag.failure] [tag.count]{len(error_items)}[/tag.count] 条"
             )
 
-    async def _load_translated_items(self) -> list[TranslationItem]:
+    def _expand_cached_translation_items(
+        self,
+        items: list[TranslationItem],
+        translation_cache: TranslationCache | None,
+    ) -> list[TranslationItem]:
         """
-        从数据库中读取所有已经有译文的条目。
+        在成功写库前展开与首条正文同键的重复条目。
+
+        参数:
+            items: 当前批次已经通过校验的成功正文条目。
+            translation_cache: 单轮正文翻译使用的请求级去重缓存；为空时表示本轮不启用正文缓存。
 
         返回:
-            可直接交给写回层的 `TranslationItem` 列表。
+            已经把重复条目复用译文后的完整写库列表。
         """
-        table_name: str = self.setting.project.translation_table_name
-        rows: list[dict[str, Any]] = await self._read_table_safe(table_name)
-        translated_items: list[TranslationItem] = []
+        if translation_cache is None:
+            return items
 
-        for row in rows:
-            location_path = row.get("location_path")
-            item_type: ItemType | None = self._normalize_item_type(row.get("item_type"))
-
-            # 先过滤掉关键字段异常的数据行，避免把脏数据继续带到回写层。
-            if not isinstance(location_path, str):
-                continue
-            if item_type is None:
-                continue
-
-            translation_lines: list[str] = self._deserialize_lines(
-                row.get("translation_lines")
+        expanded_items: list[TranslationItem] = []
+        for item in items:
+            expanded_items.append(item)
+            duplicate_items: list[TranslationItem] = translation_cache.pop_duplicate_items(
+                item
             )
-            if not self._has_completed_translation(translation_lines):
-                continue
+            for duplicate_item in duplicate_items:
+                duplicate_item.translation_lines = list(item.translation_lines)
+                expanded_items.append(duplicate_item)
 
-            translated_items.append(
-                TranslationItem(
-                    location_path=location_path,
-                    item_type=item_type,
-                    role=row.get("role") if isinstance(row.get("role"), str) else None,
-                    original_lines=self._deserialize_lines(row.get("original_lines")),
-                    translation_lines=translation_lines,
-                )
-            )
-
-        # 回写前按路径排序，是为了让相同输入在重复运行时尽量保持稳定处理顺序。
-        translated_items.sort(key=lambda item: item.location_path)
-        return translated_items
+        return expanded_items
 
     def _reset_writable_copies(self) -> None:
         """

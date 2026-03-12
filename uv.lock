@@ -660,7 +660,7 @@ wheels = [
 
 [[package]]
 name = "volcengine-python-sdk"
-version = "5.0.13"
+version = "5.0.16"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "certifi" },
@@ -668,9 +668,9 @@ dependencies = [
     { name = "six" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/20/83/f60e4e1fb82a4c45bc7353cb9abd742efeb37e5a27bff4c33eb366e104eb/volcengine_python_sdk-5.0.13.tar.gz", hash = "sha256:58d444618b50b0ee573572c63f8d5cf8335234ae96b701f6c06789b6a53285ca", size = 7786741, upload-time = "2026-03-02T13:32:54.995Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/91/6b/eca2dfb73c57889928b242e1fdecb5f901e2981a694ed82c314d61829b1b/volcengine_python_sdk-5.0.16.tar.gz", hash = "sha256:e8d0cf3a83e7ef4526dc8a0d2df946b4072afd09647d8bac67769c899af59ebf", size = 8119233, upload-time = "2026-03-12T12:20:59.902Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8a/2c/38df87249e7181a8f120bc1cec84b6f7ebe3ab94ee65d7d82307117ad889/volcengine_python_sdk-5.0.13-py2.py3-none-any.whl", hash = "sha256:53fc6edc86c7665b3d0b871e8ef2db9a7c81fbce03ce2c93bf5f7a98fa6d5dbd", size = 30611404, upload-time = "2026-03-02T13:32:50.256Z" },
+    { url = "https://files.pythonhosted.org/packages/87/f2/ebafb985b6bce5ecef36367be985e80dcd7f3f73d1fdd54c16a25a4a3d88/volcengine_python_sdk-5.0.16-py2.py3-none-any.whl", hash = "sha256:8a85563f3a48dc51a243fe97835e0de596e15ed67d3bc0f0e3e952f5305151fb", size = 31829170, upload-time = "2026-03-12T12:20:53.81Z" },
 ]
 
 [package.optional-dependencies]

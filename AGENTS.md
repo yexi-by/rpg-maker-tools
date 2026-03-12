@@ -15,7 +15,7 @@
 - 新增、升级、删除依赖使用 `uv add`、`uv remove`，并同步更新 `uv.lock`。
 - 运行脚本统一使用 `uv run python <脚本路径>`。
 - 启动主程序使用 `uv run python main.py`。
-- 运行测试使用 `uv run python -m unittest`；只验证局部改动时，也优先从 `tests/` 中挑对应用例执行。
+- 当前仓库暂不维护自动化测试目录；需要验证时优先使用最小范围的冒烟检查。
 
 ## 3. 项目约束
 
