@@ -1,0 +1,21 @@
+[project]
+name = "rpg-maker-tools"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "aiofiles>=25.1.0",
+    "aiosqlite>=0.22.1",
+    "demjson3>=3.0.6",
+    "dishka>=1.9.1",
+    "filetype>=1.2.0",
+    "google-genai>=1.66.0",
+    "json-repair>=0.58.5",
+    "loguru>=0.7.3",
+    "openai>=2.26.0",
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.13.1",
+    "rich>=14.3.3",
+    "volcengine-python-sdk[ark]>=5.0.13",
+]

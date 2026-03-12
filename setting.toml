@@ -1,0 +1,53 @@
+[project]
+file_path = "D:\\h-game\\copy\\のっとめあ! -翻译工具测试\\测试1"
+work_path = "data"
+db_name = "translation.db"
+translation_table_name = "translation_items"
+
+[llm_services.glossary]
+provider_type = "openai"
+base_url = "http://192.168.31.158:8800/v1"
+api_key = "yexi12345"
+model = "gemini-3.1-pro"
+timeout = 600
+
+[llm_services.text]
+provider_type = "openai"
+base_url = "http://192.168.31.158:8800/v1"
+api_key = "yexi12345"
+model = "gemini-3.1-pro"
+timeout = 600
+
+[glossary_extraction]
+role_chunk_blocks = 6
+role_chunk_lines = 3
+
+[glossary_translation.role_name]
+chunk_size = 60
+retry_count = 3
+retry_delay = 1
+response_retry_count = 3
+system_prompt_file = "prompts/glossary_role_name_system.txt"
+
+[glossary_translation.display_name]
+chunk_size = 60
+retry_count = 3
+retry_delay = 1
+response_retry_count = 3
+system_prompt_file = "prompts/glossary_display_name_system.txt"
+
+[translation_context]
+token_size = 512
+factor = 3.5
+max_command_items = 2
+
+[error_translation]
+chunk_size = 10
+system_prompt_file = "prompts/error_retry_system.txt"
+
+[text_translation]
+worker_count = 60
+rpm = 60
+retry_count = 3
+retry_delay = 2
+system_prompt_file = "prompts/text_translation_system.txt"

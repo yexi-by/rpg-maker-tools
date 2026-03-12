@@ -1,0 +1,30 @@
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+
+# Test and tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Runtime logs and generated scripts
+logs/
+scripts/
+
+# Runtime databases and SQLite artifacts
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/*.db-*
+data/*.sqlite-*
+data/*.sqlite3-*
