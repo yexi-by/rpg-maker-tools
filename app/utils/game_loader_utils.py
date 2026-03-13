@@ -1,8 +1,9 @@
 """
-游戏数据加载模块。
+游戏数据加载工具模块。
 
 负责从游戏目录读取 `data/` 与 `js/plugins.js`，
 并将原始文件内容转换为 `GameData` 纯数据对象。
+这是对 `app/models/loaders.py` 的独立复制版本，供新路径直接使用。
 """
 
 import asyncio
@@ -15,10 +16,8 @@ import aiofiles
 import demjson3
 from pydantic import TypeAdapter
 
-from app.utils import run_dialogue_probe
-
-from .game_data import BaseItem, CommonEvent, MapData, System, Troop
-from .schemas import (
+from app.models.game_data import BaseItem, CommonEvent, MapData, System, Troop
+from app.models.schemas import (
     COMMON_EVENTS_FILE_NAME,
     FIXED_FILE_NAMES,
     GameData,
@@ -28,6 +27,7 @@ from .schemas import (
     SYSTEM_FILE_NAME,
     TROOPS_FILE_NAME,
 )
+from app.utils import run_dialogue_probe
 
 
 async def load_game_data(game_path: str | Path) -> GameData:
@@ -51,7 +51,6 @@ async def load_game_data(game_path: str | Path) -> GameData:
     game_root: Path = Path(game_path)
     data_dir: Path = game_root / "data"
 
-    # 步骤 1: 扫描有效数据文件。
     if not data_dir.exists():
         raise FileNotFoundError(f"数据目录不存在: {data_dir}")
 
@@ -64,12 +63,10 @@ async def load_game_data(game_path: str | Path) -> GameData:
         key=lambda file_path: file_path.name,
     )
 
-    # 步骤 2: 异步读取所有 JSON 文件内容。
     file_contents: list[str] = await asyncio.gather(
         *(_read_text_file(file_path) for file_path in valid_files)
     )
 
-    # 步骤 3: 分类解析 JSON 数据。
     data: dict[str, Any] = {}
     map_data: dict[str, MapData] = {}
     system: System | None = None
@@ -96,7 +93,6 @@ async def load_game_data(game_path: str | Path) -> GameData:
             map_data[file_name] = MapData.model_validate_json(content)
             continue
 
-        # 步骤 3.1: 这里是普通文件名分发，直接使用 if/elif 更直白。
         if file_name == SYSTEM_FILE_NAME:
             system = System.model_validate_json(content)
         elif file_name == COMMON_EVENTS_FILE_NAME:
@@ -106,25 +102,21 @@ async def load_game_data(game_path: str | Path) -> GameData:
         else:
             base_data[file_name] = base_data_adapter.validate_json(content)
 
-    # 步骤 4: 读取 plugins.js。
     plugins_path: Path = game_root / "js" / PLUGINS_FILE_NAME
     if plugins_path.exists():
         plugins_content: str = await _read_text_file(plugins_path)
         data[PLUGINS_FILE_NAME] = plugins_content
         plugins_js = _parse_plugins_js_text(plugins_content)
 
-    # 步骤 5: 构造纯数据对象。
     if system is None or common_events is None or troops is None:
         raise ValueError("游戏缺少必要文件，禁止启动")
 
-    # 步骤 5: 对话探针不通过时，直接阻断启动，避免后续提取阶段遇到错位的对话结构。
     run_dialogue_probe(
         map_data=map_data,
         common_events=common_events,
         troops=troops,
     )
 
-    # 步骤 6: 只有基础文件与探针都通过后，才构造可供上层长期持有的 `GameData`。
     return GameData(
         data=data,
         writable_data=copy.deepcopy(data),

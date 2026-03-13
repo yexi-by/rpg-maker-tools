@@ -40,6 +40,10 @@ class LLMHandler:
         """初始化空的服务注册表，等待外部注入配置进行注册。"""
         self.services: dict[str, LLMProvider] = {}
 
+    def clean(self):
+        """清空服务注册表"""
+        self.services: dict[str, LLMProvider] = {}
+
     def register_service(self, *, llm_setting: LLMSettings) -> None:
         """
         根据传入的配置参数，实例化对应的 LLM 客户端并注册到内部字典中。

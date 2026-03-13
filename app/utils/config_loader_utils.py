@@ -1,8 +1,9 @@
 """
-运行配置加载模块。
+配置加载工具模块。
 
-默认只识别项目根目录下的 `setting.toml`。
-本模块负责统一路径解析、提示词正文注入以及最终配置校验。
+本模块服务于当前多游戏主线，默认读取项目根目录下的 `setting.toml`。
+这里不再解析或依赖 `[project]` 配置段，
+只负责提示词注入、最终校验以及输出一份便于排查的配置摘要。
 """
 
 import copy
@@ -10,9 +11,8 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from app.config.schemas import Setting
 from app.utils.log_utils import logger
-
-from .schemas import Setting
 
 DEFAULT_SETTING_FILE_NAME: str = "setting.toml"
 
@@ -21,29 +21,33 @@ def resolve_setting_path(setting_path: str | Path | None = None) -> Path:
     """
     解析 `setting.toml` 的绝对路径。
 
-    当未显式传入路径时，始终使用项目根目录下的 `setting.toml`。
+    Args:
+        setting_path: 用户显式传入的配置文件路径；为空时使用项目根目录默认文件。
+
+    Returns:
+        最终生效的绝对配置文件路径。
     """
     if setting_path is None:
-        resolved_path: Path = (
-            Path(__file__).resolve().parents[2] / DEFAULT_SETTING_FILE_NAME
-        )
-        return resolved_path
-
-    resolved_path = Path(setting_path).resolve()
-    return resolved_path
+        return Path(__file__).resolve().parents[2] / DEFAULT_SETTING_FILE_NAME
+    return Path(setting_path).resolve()
 
 
 def load_setting(setting_path: str | Path | None = None) -> Setting:
-    """加载并校验运行配置。"""
-    resolved_setting_path: Path = resolve_setting_path(setting_path)
-    raw_config: dict[str, Any] = _read_toml_data(resolved_setting_path)
-    raw_config_snapshot: dict[str, Any] = copy.deepcopy(raw_config)
+    """
+    加载并校验当前主线配置。
 
-    _resolve_project_paths(raw_config=raw_config, base_dir=resolved_setting_path.parent)
+    Args:
+        setting_path: 可选的配置文件路径。
+
+    Returns:
+        完成提示词注入后的最终运行时配置对象。
+    """
+    resolved_setting_path = resolve_setting_path(setting_path)
+    raw_config = _read_toml_data(resolved_setting_path)
+    raw_config_snapshot = copy.deepcopy(raw_config)
     _inject_prompt_texts(raw_config=raw_config, base_dir=resolved_setting_path.parent)
 
-    setting: Setting = Setting.model_validate(raw_config)
-    setting.project.work_path.mkdir(parents=True, exist_ok=True)
+    setting = Setting.model_validate(raw_config)
     logger.info(
         _build_setting_summary(
             setting=setting,
@@ -55,39 +59,46 @@ def load_setting(setting_path: str | Path | None = None) -> Setting:
 
 
 def _read_toml_data(setting_path: Path) -> dict[str, Any]:
+    """
+    读取原始 TOML 数据。
+
+    Args:
+        setting_path: 待读取的配置文件路径。
+
+    Returns:
+        TOML 反序列化后的原始字典。
+    """
     if not setting_path.exists():
         logger.error(
             f"[tag.failure]配置文件未找到[/tag.failure] [tag.path]{setting_path}[/tag.path]"
         )
         raise FileNotFoundError(f"配置文件未找到: {setting_path}")
 
-    raw_setting: str = setting_path.read_text(encoding="utf-8-sig")
+    raw_setting = setting_path.read_text(encoding="utf-8-sig")
     return tomllib.loads(raw_setting)
 
 
-def _resolve_project_paths(raw_config: dict[str, Any], base_dir: Path) -> None:
-    project_config = raw_config.get("project")
-    if not isinstance(project_config, dict):
-        raise ValueError("配置文件中缺少 project 配置段")
-
-    work_path = project_config.get("work_path")
-    if not isinstance(work_path, str) or not work_path.strip():
-        raise ValueError("配置文件中缺少 project.work_path 配置项")
-
-    work_path_obj = Path(work_path)
-    if work_path_obj.is_absolute():
-        raise ValueError("project.work_path 必须是相对 setting.toml 的路径")
-
-    project_config["work_path"] = str((base_dir / work_path_obj).resolve())
-
-
 def _inject_prompt_texts(raw_config: dict[str, Any], base_dir: Path) -> None:
+    """
+    把提示词文件内容注入配置字典。
+
+    Args:
+        raw_config: TOML 原始字典。
+        base_dir: 配置文件所在目录，用于解析相对提示词路径。
+    """
     _inject_glossary_prompt_texts(raw_config=raw_config, base_dir=base_dir)
     _inject_text_translation_prompt_text(raw_config=raw_config, base_dir=base_dir)
     _inject_error_translation_prompt_text(raw_config=raw_config, base_dir=base_dir)
 
 
 def _inject_glossary_prompt_texts(raw_config: dict[str, Any], base_dir: Path) -> None:
+    """
+    注入术语翻译提示词文本。
+
+    Args:
+        raw_config: TOML 原始字典。
+        base_dir: 配置文件所在目录。
+    """
     glossary_translation = raw_config.get("glossary_translation")
     if not isinstance(glossary_translation, dict):
         raise ValueError("配置文件中缺少 glossary_translation 配置段")
@@ -112,6 +123,13 @@ def _inject_text_translation_prompt_text(
     raw_config: dict[str, Any],
     base_dir: Path,
 ) -> None:
+    """
+    注入正文翻译提示词文本。
+
+    Args:
+        raw_config: TOML 原始字典。
+        base_dir: 配置文件所在目录。
+    """
     text_translation = raw_config.get("text_translation")
     if not isinstance(text_translation, dict):
         raise ValueError("配置文件中缺少 text_translation 配置段")
@@ -127,6 +145,13 @@ def _inject_error_translation_prompt_text(
     raw_config: dict[str, Any],
     base_dir: Path,
 ) -> None:
+    """
+    注入错误重翻提示词文本。
+
+    Args:
+        raw_config: TOML 原始字典。
+        base_dir: 配置文件所在目录。
+    """
     error_translation = raw_config.get("error_translation")
     if not isinstance(error_translation, dict):
         raise ValueError("配置文件中缺少 error_translation 配置段")
@@ -139,7 +164,17 @@ def _inject_error_translation_prompt_text(
 
 
 def _read_prompt_text(base_dir: Path, prompt_file: str) -> str:
-    prompt_path: Path = Path(prompt_file)
+    """
+    读取提示词文件文本。
+
+    Args:
+        base_dir: 配置文件所在目录。
+        prompt_file: 提示词文件路径，可为相对或绝对路径。
+
+    Returns:
+        读取到的完整提示词文本。
+    """
+    prompt_path = Path(prompt_file)
     if not prompt_path.is_absolute():
         prompt_path = base_dir / prompt_path
 
@@ -156,48 +191,39 @@ def _build_setting_summary(
     raw_config: dict[str, Any],
 ) -> str:
     """
-    构造“说人话”的当前配置摘要。
-
-    设计意图：
-    1. 用户真正关心的是“现在会按什么规则跑”，而不是内部拿到了哪个路径对象。
-    2. 这里统一把核心配置翻译成人能快速扫读的摘要，避免终端只剩技术黑话。
+    构造适合直接输出到日志的配置摘要。
 
     Args:
-        setting: 已完成校验的运行时配置对象。
+        setting: 已完成校验的配置对象。
         setting_path: 实际生效的配置文件路径。
-        raw_config: 注入提示词前的原始 TOML 字典，用于保留提示词文件名信息。
+        raw_config: 注入提示词前的原始 TOML 字典。
 
     Returns:
-        适合直接输出到终端 logger 的多行摘要文本。
+        多行文本形式的配置摘要。
     """
     glossary_service = setting.llm_services.glossary
     text_service = setting.llm_services.text
-    db_path: Path = setting.project.work_path / setting.project.db_name
 
-    role_prompt_file: str = _read_prompt_file_name(
+    role_prompt_file = _read_prompt_file_name(
         raw_config=raw_config,
         section_path=["glossary_translation", "role_name"],
     )
-    display_prompt_file: str = _read_prompt_file_name(
+    display_prompt_file = _read_prompt_file_name(
         raw_config=raw_config,
         section_path=["glossary_translation", "display_name"],
     )
-    text_prompt_file: str = _read_prompt_file_name(
+    text_prompt_file = _read_prompt_file_name(
         raw_config=raw_config,
         section_path=["text_translation"],
     )
-    error_prompt_file: str = _read_prompt_file_name(
+    error_prompt_file = _read_prompt_file_name(
         raw_config=raw_config,
         section_path=["error_translation"],
     )
 
-    lines: list[str] = [
+    lines = [
         "[tag.phase]当前正在使用的配置[/tag.phase]",
         f"配置文件: [tag.path]{setting_path}[/tag.path]",
-        f"游戏目录: [tag.path]{setting.project.file_path}[/tag.path]",
-        f"工作目录: [tag.path]{setting.project.work_path}[/tag.path]",
-        f"数据库文件: [tag.path]{db_path}[/tag.path]",
-        f"译文表名: [tag.count]{setting.project.translation_table_name}[/tag.count]",
         (
             "术语接口: "
             f"{_describe_provider(glossary_service.provider_type)} / "
@@ -215,7 +241,7 @@ def _build_setting_summary(
         (
             "术语采样: "
             f"切 [tag.count]{setting.glossary_extraction.role_chunk_blocks}[/tag.count] 块，"
-            f"每块取 [tag.count]{setting.glossary_extraction.role_chunk_lines}[/tag.count] 行"
+            f"每块 [tag.count]{setting.glossary_extraction.role_chunk_lines}[/tag.count] 行"
         ),
         (
             "术语翻译: "
@@ -225,12 +251,12 @@ def _build_setting_summary(
         (
             "正文切块: "
             f"目标 [tag.count]{setting.translation_context.token_size}[/tag.count] token，"
-            f"估算系数 [tag.count]{setting.translation_context.factor}[/tag.count]，"
-            f"同角色最多顺延 [tag.count]{setting.translation_context.max_command_items}[/tag.count] 条"
+            f"换算系数 [tag.count]{setting.translation_context.factor}[/tag.count]，"
+            f"同角色最多连续 [tag.count]{setting.translation_context.max_command_items}[/tag.count] 条"
         ),
         (
             "正文翻译: "
-            f"[tag.count]{setting.text_translation.worker_count}[/tag.count] 个并发 worker，"
+            f"[tag.count]{setting.text_translation.worker_count}[/tag.count] 个 worker，"
             f"RPM [tag.count]{setting.text_translation.rpm or '不限'}[/tag.count]，"
             f"失败重试 [tag.count]{setting.text_translation.retry_count}[/tag.count] 次，"
             f"间隔 [tag.count]{setting.text_translation.retry_delay}[/tag.count] 秒"
@@ -256,14 +282,14 @@ def _read_prompt_file_name(
     section_path: list[str],
 ) -> str:
     """
-    从原始配置字典中读取提示词文件名。
+    从原始配置里读取提示词文件名。
 
     Args:
         raw_config: 原始 TOML 字典。
-        section_path: 到目标配置段的路径。
+        section_path: 目标配置段路径。
 
     Returns:
-        `system_prompt_file` 的字符串值；缺失时返回“未配置”。
+        对应的 `system_prompt_file` 文件名，缺失时返回“未配置”。
     """
     current: Any = raw_config
     for key in section_path:
@@ -282,13 +308,13 @@ def _read_prompt_file_name(
 
 def _describe_provider(provider_type: str) -> str:
     """
-    将服务提供商类型转成人类可读文本。
+    将服务提供商类型转成中文可读文本。
 
     Args:
-        provider_type: 原始 provider_type 值。
+        provider_type: 原始提供商类型值。
 
     Returns:
-        便于终端展示的中文描述。
+        用于日志展示的中文文本。
     """
     if provider_type == "openai":
         return "OpenAI 兼容接口"
