@@ -1,8 +1,8 @@
 [llm_services.glossary]
 provider_type = "openai"
-base_url = "http://192.168.31.158:8800/v1"
-api_key = "yexi12345"
-model = "gemini-3.1-pro"
+base_url = "https://api.deepseek.com"
+api_key = "sk-ecf9eb26acb64177beedfaafc109fd75"
+model = "deepseek-reasoner"
 timeout = 600
 
 [llm_services.text]
@@ -14,7 +14,7 @@ timeout = 600
 
 [glossary_extraction]
 role_chunk_blocks = 6
-role_chunk_lines = 3
+role_chunk_lines = 20
 
 [glossary_translation.role_name]
 chunk_size = 60

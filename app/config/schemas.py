@@ -67,8 +67,14 @@ class LLMServicesSetting(StrictBaseModel):
         text: 正文翻译服务配置。
     """
 
-    glossary: LLMServiceSetting
-    text: LLMServiceSetting
+    glossary: LLMServiceSetting = Field(
+        title="术语服务",
+        description="构建和翻译术语时使用的模型服务配置。",
+    )
+    text: LLMServiceSetting = Field(
+        title="正文服务",
+        description="正文翻译和错误重翻时使用的模型服务配置。",
+    )
 
 
 class GlossaryExtractionSetting(StrictBaseModel):
@@ -104,11 +110,34 @@ class GlossaryTranslationTaskSetting(StrictBaseModel):
         system_prompt: 当前任务的完整系统提示词。
     """
 
-    chunk_size: int = Field(gt=0)
-    retry_count: int = Field(ge=0)
-    retry_delay: int = Field(ge=0)
-    response_retry_count: int = Field(gt=0)
-    system_prompt: str
+    chunk_size: int = Field(
+        gt=0,
+        title="每批条目数",
+        description="每轮发送给模型处理的术语条目数量。",
+    )
+    retry_count: int = Field(
+        ge=0,
+        title="网络重试次数",
+        description="请求失败后允许自动重试的次数。",
+    )
+    retry_delay: int = Field(
+        ge=0,
+        title="重试间隔秒数",
+        description="网络请求失败后两次重试之间的等待秒数。",
+    )
+    response_retry_count: int = Field(
+        gt=0,
+        title="响应纠错轮数",
+        description="模型返回结构不合法时允许自动纠错的最大轮数。",
+    )
+    system_prompt_file: str = Field(
+        title="提示词文件",
+        description="当前术语任务使用的系统提示词文件路径。",
+    )
+    system_prompt: str = Field(
+        title="提示词正文",
+        description="运行时注入后的完整系统提示词文本。",
+    )
 
 
 class GlossaryTranslationSetting(StrictBaseModel):
@@ -120,8 +149,14 @@ class GlossaryTranslationSetting(StrictBaseModel):
         display_name: 地图显示名翻译配置。
     """
 
-    role_name: GlossaryTranslationTaskSetting
-    display_name: GlossaryTranslationTaskSetting
+    role_name: GlossaryTranslationTaskSetting = Field(
+        title="角色名翻译",
+        description="角色名术语翻译阶段的运行参数。",
+    )
+    display_name: GlossaryTranslationTaskSetting = Field(
+        title="显示名翻译",
+        description="地点与显示名术语翻译阶段的运行参数。",
+    )
 
 
 class TranslationContextSetting(StrictBaseModel):
@@ -160,8 +195,19 @@ class ErrorTranslationSetting(StrictBaseModel):
         system_prompt: 错误重翻使用的完整系统提示词。
     """
 
-    chunk_size: int = Field(gt=0)
-    system_prompt: str
+    chunk_size: int = Field(
+        gt=0,
+        title="每批错误条目数",
+        description="错误重翻阶段每次发送给模型的条目数量。",
+    )
+    system_prompt_file: str = Field(
+        title="提示词文件",
+        description="错误重翻阶段使用的系统提示词文件路径。",
+    )
+    system_prompt: str = Field(
+        title="提示词正文",
+        description="运行时注入后的错误重翻提示词文本。",
+    )
 
 
 class TextTranslationSetting(StrictBaseModel):
@@ -176,11 +222,34 @@ class TextTranslationSetting(StrictBaseModel):
         system_prompt: 正文翻译使用的完整系统提示词。
     """
 
-    worker_count: int = Field(gt=0)
-    rpm: int | None = Field(gt=0)
-    retry_count: int = Field(ge=0)
-    retry_delay: int = Field(ge=0)
-    system_prompt: str
+    worker_count: int = Field(
+        gt=0,
+        title="并发工作数",
+        description="正文翻译阶段同时运行的并发 worker 数量。",
+    )
+    rpm: int | None = Field(
+        gt=0,
+        title="每分钟请求上限",
+        description="对模型服务施加的每分钟请求上限，空值表示不限速。",
+    )
+    retry_count: int = Field(
+        ge=0,
+        title="网络重试次数",
+        description="正文翻译网络失败后允许自动重试的次数。",
+    )
+    retry_delay: int = Field(
+        ge=0,
+        title="重试间隔秒数",
+        description="正文翻译重试时两次请求之间的等待秒数。",
+    )
+    system_prompt_file: str = Field(
+        title="提示词文件",
+        description="正文翻译阶段使用的系统提示词文件路径。",
+    )
+    system_prompt: str = Field(
+        title="提示词正文",
+        description="运行时注入后的正文翻译提示词文本。",
+    )
 
 
 class Setting(StrictBaseModel):
@@ -200,12 +269,30 @@ class Setting(StrictBaseModel):
         text_translation: 正文翻译参数。
     """
 
-    llm_services: LLMServicesSetting
-    glossary_extraction: GlossaryExtractionSetting
-    glossary_translation: GlossaryTranslationSetting
-    translation_context: TranslationContextSetting
-    error_translation: ErrorTranslationSetting
-    text_translation: TextTranslationSetting
+    llm_services: LLMServicesSetting = Field(
+        title="模型服务配置",
+        description="术语翻译与正文翻译所使用的模型服务集合。",
+    )
+    glossary_extraction: GlossaryExtractionSetting = Field(
+        title="术语提取配置",
+        description="角色样本抽取阶段的切分规则。",
+    )
+    glossary_translation: GlossaryTranslationSetting = Field(
+        title="术语翻译配置",
+        description="角色名和显示名术语翻译阶段的运行参数。",
+    )
+    translation_context: TranslationContextSetting = Field(
+        title="正文上下文配置",
+        description="正文批次切分和上下文拼接规则。",
+    )
+    error_translation: ErrorTranslationSetting = Field(
+        title="错误重翻配置",
+        description="错误重翻阶段的运行参数和提示词路径。",
+    )
+    text_translation: TextTranslationSetting = Field(
+        title="正文翻译配置",
+        description="正文翻译阶段的并发、限速和重试参数。",
+    )
 
 
 __all__: list[str] = [

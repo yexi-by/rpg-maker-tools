@@ -11,8 +11,10 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+import tomlkit
 from app.config.schemas import Setting
 from app.utils.log_utils import logger
+from tomlkit.toml_document import TOMLDocument
 
 DEFAULT_SETTING_FILE_NAME: str = "setting.toml"
 
@@ -58,6 +60,71 @@ def load_setting(setting_path: str | Path | None = None) -> Setting:
     return setting
 
 
+def load_setting_document(setting_path: str | Path | None = None) -> TOMLDocument:
+    """
+    读取原始 `setting.toml` 文档对象。
+
+    Args:
+        setting_path: 可选的配置文件路径。
+
+    Returns:
+        保留原始结构与注释的 TOML 文档对象。
+    """
+    resolved_setting_path = resolve_setting_path(setting_path)
+    if not resolved_setting_path.exists():
+        logger.error(
+            f"[tag.failure]配置文件未找到[/tag.failure] [tag.path]{resolved_setting_path}[/tag.path]"
+        )
+        raise FileNotFoundError(f"配置文件未找到: {resolved_setting_path}")
+
+    raw_setting = resolved_setting_path.read_text(encoding="utf-8-sig")
+    return tomlkit.parse(raw_setting)
+
+
+def validate_setting_document(
+    document: TOMLDocument,
+    setting_path: str | Path | None = None,
+) -> Setting:
+    """
+    校验原始 TOML 文档是否能够转成运行时配置。
+
+    Args:
+        document: 待校验的 TOML 文档对象。
+        setting_path: 可选的配置文件路径，用于解析相对提示词路径。
+
+    Returns:
+        校验通过后的运行时配置对象。
+    """
+    resolved_setting_path = resolve_setting_path(setting_path)
+    raw_config = _document_to_raw_config(document)
+    _inject_prompt_texts(raw_config=raw_config, base_dir=resolved_setting_path.parent)
+    return Setting.model_validate(raw_config)
+
+
+def save_setting_value(
+    field_path: tuple[str, ...],
+    value: str | int | float,
+    setting_path: str | Path | None = None,
+) -> Setting:
+    """
+    修改单个配置字段并在校验通过后原子写回文件。
+
+    Args:
+        field_path: 目标字段路径，例如 `(\"text_translation\", \"worker_count\")`。
+        value: 待写入的新值。
+        setting_path: 可选的配置文件路径。
+
+    Returns:
+        写回后重新校验得到的运行时配置对象。
+    """
+    resolved_setting_path = resolve_setting_path(setting_path)
+    document = load_setting_document(resolved_setting_path)
+    _update_document_value(document=document, field_path=field_path, value=value)
+    setting = validate_setting_document(document, resolved_setting_path)
+    _write_setting_document(document=document, setting_path=resolved_setting_path)
+    return setting
+
+
 def _read_toml_data(setting_path: Path) -> dict[str, Any]:
     """
     读取原始 TOML 数据。
@@ -76,6 +143,56 @@ def _read_toml_data(setting_path: Path) -> dict[str, Any]:
 
     raw_setting = setting_path.read_text(encoding="utf-8-sig")
     return tomllib.loads(raw_setting)
+
+
+def _document_to_raw_config(document: TOMLDocument) -> dict[str, Any]:
+    """
+    把 TOML 文档对象转换为普通字典。
+
+    Args:
+        document: 已解析的 TOML 文档。
+
+    Returns:
+        适合继续做提示词注入和 Pydantic 校验的普通字典。
+    """
+    return tomllib.loads(tomlkit.dumps(document))
+
+
+def _update_document_value(
+    *,
+    document: TOMLDocument,
+    field_path: tuple[str, ...],
+    value: str | int | float,
+) -> None:
+    """
+    按路径更新 TOML 文档里的单个字段。
+
+    Args:
+        document: 待修改的 TOML 文档。
+        field_path: 目标字段路径。
+        value: 待写入的新值。
+    """
+    current: Any = document
+    for key in field_path[:-1]:
+        if key not in current:
+            raise KeyError(f"配置路径不存在: {'.'.join(field_path)}")
+        current = current[key]
+
+    current[field_path[-1]] = value
+
+
+def _write_setting_document(document: TOMLDocument, setting_path: Path) -> None:
+    """
+    以原子方式写回 TOML 文档。
+
+    Args:
+        document: 待写回的 TOML 文档。
+        setting_path: 目标配置文件路径。
+    """
+    raw_setting = tomlkit.dumps(document)
+    temp_path = setting_path.with_suffix(f"{setting_path.suffix}.tmp")
+    temp_path.write_text(raw_setting, encoding="utf-8")
+    temp_path.replace(setting_path)
 
 
 def _inject_prompt_texts(raw_config: dict[str, Any], base_dir: Path) -> None:
@@ -110,7 +227,7 @@ def _inject_glossary_prompt_texts(raw_config: dict[str, Any], base_dir: Path) ->
                 f"配置文件中缺少 glossary_translation.{task_name} 配置段"
             )
 
-        prompt_file = task_config.pop("system_prompt_file", None)
+        prompt_file = task_config.get("system_prompt_file")
         if not isinstance(prompt_file, str) or not prompt_file.strip():
             raise ValueError(
                 f"配置文件中缺少 glossary_translation.{task_name}.system_prompt_file 配置项"
@@ -134,7 +251,7 @@ def _inject_text_translation_prompt_text(
     if not isinstance(text_translation, dict):
         raise ValueError("配置文件中缺少 text_translation 配置段")
 
-    prompt_file = text_translation.pop("system_prompt_file", None)
+    prompt_file = text_translation.get("system_prompt_file")
     if not isinstance(prompt_file, str) or not prompt_file.strip():
         raise ValueError("配置文件中缺少 text_translation.system_prompt_file 配置项")
 
@@ -156,7 +273,7 @@ def _inject_error_translation_prompt_text(
     if not isinstance(error_translation, dict):
         raise ValueError("配置文件中缺少 error_translation 配置段")
 
-    prompt_file = error_translation.pop("system_prompt_file", None)
+    prompt_file = error_translation.get("system_prompt_file")
     if not isinstance(prompt_file, str) or not prompt_file.strip():
         raise ValueError("配置文件中缺少 error_translation.system_prompt_file 配置项")
 
@@ -325,4 +442,11 @@ def _describe_provider(provider_type: str) -> str:
     return provider_type
 
 
-__all__: list[str] = ["DEFAULT_SETTING_FILE_NAME", "load_setting", "resolve_setting_path"]
+__all__: list[str] = [
+    "DEFAULT_SETTING_FILE_NAME",
+    "load_setting",
+    "load_setting_document",
+    "resolve_setting_path",
+    "save_setting_value",
+    "validate_setting_document",
+]

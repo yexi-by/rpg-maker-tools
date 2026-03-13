@@ -21,12 +21,7 @@ Thumbs.db
 logs/
 scripts/
 
-# Runtime databases and SQLite artifacts
-data/*.db
-data/*.sqlite
-data/*.sqlite3
-data/*.db-*
-data/*.sqlite-*
-data/*.sqlite3-*
+
 
 AGENTS.md
+data/
