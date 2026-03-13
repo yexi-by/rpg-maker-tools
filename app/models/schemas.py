@@ -19,6 +19,8 @@ CONTROL_CHARS_PATTERN = re.compile(
 )
 # 日文字符匹配模式
 JAPANESE_PATTERN = re.compile(r"[\u3040-\u309F\u30A0-\u30FF]")
+# 连续日文片段匹配模式
+JAPANESE_SEGMENT_PATTERN = re.compile(r"[\u3040-\u309F\u30A0-\u30FF]+")
 
 # 允许保留的日文字符（不视为未翻译）
 ALLOWED_JAPANESE_CHARS: set[str] = {
@@ -29,6 +31,25 @@ ALLOWED_JAPANESE_CHARS: set[str] = {
     "ー",  # 长音
     "〜",  # 波浪号
     "～",  # 全角波浪号
+}
+
+# 允许保留的拟声尾音字符。
+# 这类字符常作为中文拟声词的拖尾出现，例如“姆啾ぅ”“啾啪ぁ”“咿ッッ”。
+# 只有当一整段连续日文片段都由这些尾音字符组成时，才会在残留校验时放行。
+ALLOWED_JAPANESE_TAIL_CHARS: set[str] = {
+    "ぁ",
+    "ぃ",
+    "ぅ",
+    "ぇ",
+    "ぉ",
+    "ァ",
+    "ィ",
+    "ゥ",
+    "ェ",
+    "ォ",
+    "ッ",
+    "う",
+    "ウ",
 }
 
 type ItemType = Literal["long_text", "array", "short_text"]
@@ -323,8 +344,9 @@ class TranslationItem(BaseModel):
         """
         检查翻译后的文本列表是否有日文残留。
 
-        遍历每个文本项，用正则匹配日文字符，
-        过滤白名单字符后，如果仍有残留则返回错误信息。
+        遍历每个文本项，按连续片段匹配日文字符。
+        过滤普通白名单字符后，如果整段只剩拟声尾音字符，则视为可接受的中文拟声拖尾；
+        否则判定为真实日文残留并返回错误信息。
 
         Args:
             translated_items: 翻译后的文本列表（行列表或选项列表）
@@ -333,13 +355,21 @@ class TranslationItem(BaseModel):
             发现日文残留时返回错误信息，否则返回 None
         """
         for i, item in enumerate(self.translation_lines):
-            matches = JAPANESE_PATTERN.findall(item)
-            if not matches:
+            segments = JAPANESE_SEGMENT_PATTERN.findall(item)
+            if not segments:
                 continue
-            # 过滤白名单字符
-            real_residual: list[str] = [
-                c for c in matches if c not in ALLOWED_JAPANESE_CHARS
-            ]
+            real_residual: list[str] = []
+            for segment in segments:
+                filtered_segment: list[str] = [
+                    char for char in segment if char not in ALLOWED_JAPANESE_CHARS
+                ]
+                if not filtered_segment:
+                    continue
+                if all(
+                    char in ALLOWED_JAPANESE_TAIL_CHARS for char in filtered_segment
+                ):
+                    continue
+                real_residual.extend(filtered_segment)
             if real_residual:
                 raise ValueError(f"发现日文残留(第 {i + 1} 项): {real_residual}")
 
@@ -436,6 +466,7 @@ class GameData(BaseModel):
 
 __all__: list[str] = [
     "ALLOWED_JAPANESE_CHARS",
+    "ALLOWED_JAPANESE_TAIL_CHARS",
     "BaseGlossary",
     "Code",
     "COMMON_EVENTS_FILE_NAME",
@@ -447,6 +478,7 @@ __all__: list[str] = [
     "GlossaryBuildChunk",
     "ItemType",
     "JAPANESE_PATTERN",
+    "JAPANESE_SEGMENT_PATTERN",
     "MAP_INFOS_FILE_NAME",
     "MAP_PATTERN",
     "Place",
