@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 
-from app.models.schemas import TranslationItem
+from app.models.schemas import ItemType, TranslationItem
 
 
 class TranslationCache:
@@ -83,6 +83,41 @@ class TranslationCache:
             之前被压掉的重复条目列表；若不存在则返回空列表。
         """
         cache_key: str = self.build_cache_key(item)
+        return self.duplicate_items.pop(cache_key, [])
+
+    def pop_duplicate_items_by_fields(
+        self,
+        *,
+        original_lines: list[str],
+        item_type: ItemType,
+        role: str | None,
+    ) -> list[TranslationItem]:
+        """
+        根据正文主键字段取出重复条目。
+
+        该方法主要用于“首条正文失败”场景。
+        当首条送模条目进入错误表时，需要把同键的重复条目一起补写到错误表，
+        才能保证错误表与进度统计口径和 `pending_count` 保持一致。
+
+        Args:
+            original_lines: 正文原文行列表。
+            item_type: 正文条目类型。
+            role: 角色上下文字段。
+
+        Returns:
+            同键的全部重复条目；若不存在则返回空列表。
+        """
+        cache_payload: dict[str, str | list[str] | None] = {
+            "original_lines": list(original_lines),
+            "item_type": item_type,
+            "role": role,
+        }
+        cache_key = json.dumps(
+            cache_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         return self.duplicate_items.pop(cache_key, [])
 
 

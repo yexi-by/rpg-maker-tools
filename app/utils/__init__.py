@@ -6,11 +6,12 @@
 
 from .command_utils import iter_all_commands
 from .japanese_utils import JapaneseDetectMode, has_japanese
-from .log_utils import console, get_progress, logger, setup_logger
+from .log_utils import LogLine, console, get_progress, logger, setup_logger
 from .probe_utils import run_dialogue_probe
 
 __all__: list[str] = [
     "JapaneseDetectMode",
+    "LogLine",
     "console",
     "get_progress",
     "has_japanese",

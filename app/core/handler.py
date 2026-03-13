@@ -1,4 +1,4 @@
-"""
+﻿"""
 多游戏新栈总编排模块。
 
 本模块提供独立于旧 `handler.py` 的新编排入口。
@@ -12,7 +12,7 @@
 import asyncio
 import copy
 import json
-from collections.abc import AsyncIterator
+from collections.abc import Callable
 from pathlib import Path
 from typing import Self
 
@@ -31,10 +31,10 @@ from app.models.schemas import (
     ErrorRetryItem,
     GameData,
     Glossary,
-    GlossaryBuildChunk,
     ItemType,
     PLUGINS_FILE_NAME,
     TranslationData,
+    TranslationErrorItem,
     TranslationItem,
 )
 from app.services.llm import LLMHandler
@@ -51,6 +51,7 @@ from app.utils.log_utils import logger
 from app.write_back.data_text_write_back import write_data_text
 from app.write_back.glossary_write_back import write_glossary
 from app.write_back.plugin_text_write_back import write_plugin_text
+
 
 
 class TranslationHandler:
@@ -144,355 +145,473 @@ class TranslationHandler:
         resolved_game_path = resolve_game_directory(game_path)
         game_title = read_game_title(resolved_game_path)
 
-        await self.game_database_manager.create_database(resolved_game_path)
-        game_database_item = self._get_game_database_item(game_title)
-        await self.game_data_manager.load_game_data(game_database_item.game_path)
+        try:
+            await self.game_database_manager.create_database(resolved_game_path)
+            game_database_item = self._get_game_database_item(game_title)
+            await self.game_data_manager.load_game_data(game_database_item.game_path)
 
-        logger.success(
-            f"[tag.success]游戏已加入新栈[/tag.success] "
-            f"标题 [tag.count]{game_title}[/tag.count] "
-            f"路径 [tag.path]{game_database_item.game_path}[/tag.path]"
-        )
-        return game_title
+            logger.success(
+                f"[tag.success]游戏已加入新栈[/tag.success] "
+                f"标题 [tag.count]{game_title}[/tag.count] "
+                f"路径 [tag.path]{game_database_item.game_path}[/tag.path]"
+            )
+            return game_title
+        except Exception:
+            raise
 
-    async def build_glossary(self, game_title: str) -> AsyncIterator[GlossaryBuildChunk]:
+    async def build_glossary(
+        self,
+        game_title: str,
+        callbacks: tuple[Callable[[int, int], None], Callable[[int], None]],
+    ) -> None:
         """
-        为指定游戏构建术语表，并流式产出已完成分块。
+        为指定游戏构建术语表。
 
         Args:
             game_title: 目标游戏标题。
-
-        Yields:
-            当前已经翻译完成的术语分块。
+            callbacks: 术语构建进度回调元组。
         """
-        async with self._container() as request_container:
-            setting = await request_container.get(Setting)
-            glossary_translation = await request_container.get(GlossaryTranslation)
+        set_progress, advance_progress = callbacks
 
-            game_data = self._get_game_data(game_title)
-            glossary_extraction = GlossaryExtraction(game_data)
-            sampled_role_lines = glossary_extraction.extract_role_dialogue_chunks(
-                chunk_blocks=setting.glossary_extraction.role_chunk_blocks,
-                chunk_lines=setting.glossary_extraction.role_chunk_lines,
-            )
-            display_names = glossary_extraction.extract_display_names()
-            expected_role_names: set[str] = set(sampled_role_lines)
-            expected_display_names: set[str] = set(display_names)
-            existing_glossary = await self.game_database_manager.read_glossary(game_title)
+        try:
+            async with self._container() as request_container:
+                setting = await request_container.get(Setting)
+                glossary_translation = await request_container.get(GlossaryTranslation)
 
-            if existing_glossary is not None and self._is_glossary_complete(
-                glossary=existing_glossary,
-                expected_role_names=expected_role_names,
-                expected_display_names=expected_display_names,
-            ):
-                logger.info(
-                    f"[tag.skip]术语表已完整存在，跳过构建[/tag.skip] "
-                    f"游戏 [tag.count]{game_title}[/tag.count]"
+                game_data = self._get_game_data(game_title)
+                glossary_extraction = GlossaryExtraction(game_data)
+                sampled_role_lines = glossary_extraction.extract_role_dialogue_chunks(
+                    chunk_blocks=setting.glossary_extraction.role_chunk_blocks,
+                    chunk_lines=setting.glossary_extraction.role_chunk_lines,
                 )
-                return
-
-            if not expected_role_names and not expected_display_names:
-                await self.game_database_manager.replace_glossary(game_title, Glossary())
-                logger.info(
-                    f"[tag.skip]未提取到可翻译术语，已写入空术语表[/tag.skip] "
-                    f"游戏 [tag.count]{game_title}[/tag.count]"
+                display_names = glossary_extraction.extract_display_names()
+                expected_role_names: set[str] = set(sampled_role_lines)
+                expected_display_names: set[str] = set(display_names)
+                existing_glossary = await self.game_database_manager.read_glossary(
+                    game_title
                 )
-                return
+                total = len(expected_role_names) + len(expected_display_names)
+                current = 0
 
-            logger.info(
-                f"[tag.phase]术语提取[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] "
-                f"角色名 [tag.count]{len(expected_role_names)}[/tag.count] 条，"
-                f"地点名 [tag.count]{len(expected_display_names)}[/tag.count] 条"
-            )
+                set_progress(0, total)
 
-            roles = []
-            if sampled_role_lines:
-                logger.info(
-                    f"[tag.phase]角色术语翻译[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count]"
-                )
-                async for role_chunk in glossary_translation.translate_role_names(
-                    llm_handler=self.llm_handler,
-                    role_lines=sampled_role_lines,
+                if existing_glossary is not None and self._is_glossary_complete(
+                    glossary=existing_glossary,
+                    expected_role_names=expected_role_names,
+                    expected_display_names=expected_display_names,
                 ):
-                    roles.extend(role_chunk)
-                    yield GlossaryBuildChunk(kind="roles", items=role_chunk)
+                    logger.info(
+                        f"[tag.skip]术语表已完整存在，跳过构建[/tag.skip] "
+                        f"游戏 [tag.count]{game_title}[/tag.count]"
+                    )
+                    set_progress(total, total)
+                    return
 
-            places = []
-            if display_names:
+                if not expected_role_names and not expected_display_names:
+                    await self.game_database_manager.replace_glossary(
+                        game_title,
+                        Glossary(),
+                    )
+                    logger.info(
+                        f"[tag.skip]未提取到可翻译术语，已写入空术语表[/tag.skip] "
+                        f"游戏 [tag.count]{game_title}[/tag.count]"
+                    )
+                    return
+
                 logger.info(
-                    f"[tag.phase]地点术语翻译[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count]"
+                    f"[tag.phase]术语提取[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] "
+                    f"角色名 [tag.count]{len(expected_role_names)}[/tag.count] 条，"
+                    f"地点名 [tag.count]{len(expected_display_names)}[/tag.count] 条"
                 )
-                async for place_chunk in glossary_translation.translate_display_names(
-                    llm_handler=self.llm_handler,
-                    display_names=display_names,
-                    roles=roles,
-                ):
-                    places.extend(place_chunk)
-                    yield GlossaryBuildChunk(kind="places", items=place_chunk)
 
-            glossary = Glossary(roles=roles, places=places)
-            await self.game_database_manager.replace_glossary(game_title, glossary)
-            logger.success(
-                f"[tag.success]术语表构建完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] "
-                f"角色术语 [tag.count]{len(glossary.roles)}[/tag.count] 条，"
-                f"地点术语 [tag.count]{len(glossary.places)}[/tag.count] 条"
-            )
+                roles = []
+                if sampled_role_lines:
+                    logger.info(
+                        f"[tag.phase]角色术语翻译[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count]"
+                    )
+                    async for role_chunk in glossary_translation.translate_role_names(
+                        llm_handler=self.llm_handler,
+                        role_lines=sampled_role_lines,
+                    ):
+                        roles.extend(role_chunk)
+                        current += len(role_chunk)
+                        advance_progress(len(role_chunk))
 
-    async def translate_text(self, game_title: str) -> None:
+                places = []
+                if display_names:
+                    logger.info(
+                        f"[tag.phase]地点术语翻译[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count]"
+                    )
+                    async for (
+                        place_chunk
+                    ) in glossary_translation.translate_display_names(
+                        llm_handler=self.llm_handler,
+                        display_names=display_names,
+                        roles=roles,
+                    ):
+                        places.extend(place_chunk)
+                        current += len(place_chunk)
+                        advance_progress(len(place_chunk))
+
+                glossary = Glossary(roles=roles, places=places)
+                await self.game_database_manager.replace_glossary(game_title, glossary)
+                logger.success(
+                    f"[tag.success]术语表构建完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] "
+                    f"角色术语 [tag.count]{len(glossary.roles)}[/tag.count] 条，"
+                    f"地点术语 [tag.count]{len(glossary.places)}[/tag.count] 条"
+                )
+                if current < total:
+                    set_progress(current, total)
+        except Exception:
+            raise
+
+    async def translate_text(
+        self,
+        game_title: str,
+        callbacks: tuple[
+            Callable[[int, int], None],
+            Callable[[int], None],
+            Callable[[str], None],
+        ],
+    ) -> None:
         """
         为指定游戏执行正文翻译。
 
         Args:
             game_title: 目标游戏标题。
+            callbacks: 正文翻译回调元组。
         """
-        async with self._container() as request_container:
-            setting = await request_container.get(Setting)
-            text_translation = await request_container.get(TextTranslation)
-            translation_cache = await request_container.get(TranslationCache)
+        set_progress, advance_progress, set_status = callbacks
 
-            game_data = self._get_game_data(game_title)
-            glossary_extraction = GlossaryExtraction(game_data)
-            data_text_extraction = DataTextExtraction(game_data)
-            plugin_text_extraction = PluginTextExtraction(game_data)
+        try:
+            async with self._container() as request_container:
+                setting = await request_container.get(Setting)
+                text_translation = await request_container.get(TextTranslation)
+                translation_cache = await request_container.get(TranslationCache)
 
-            glossary = await self.game_database_manager.read_glossary(game_title)
-            role_lines = glossary_extraction.extract_role_dialogue_chunks(
-                chunk_blocks=setting.glossary_extraction.role_chunk_blocks,
-                chunk_lines=setting.glossary_extraction.role_chunk_lines,
-            )
-            display_names = glossary_extraction.extract_display_names()
+                game_data = self._get_game_data(game_title)
+                glossary_extraction = GlossaryExtraction(game_data)
+                data_text_extraction = DataTextExtraction(game_data)
+                plugin_text_extraction = PluginTextExtraction(game_data)
 
-            if glossary is None or not self._is_glossary_complete(
-                glossary=glossary,
-                expected_role_names=set(role_lines),
-                expected_display_names=set(display_names),
-            ):
-                logger.warning(
-                    f"[tag.warning]术语表缺失或不完整，正文翻译流程已终止[/tag.warning] "
-                    f"游戏 [tag.count]{game_title}[/tag.count]"
+                glossary = await self.game_database_manager.read_glossary(game_title)
+                role_lines = glossary_extraction.extract_role_dialogue_chunks(
+                    chunk_blocks=setting.glossary_extraction.role_chunk_blocks,
+                    chunk_lines=setting.glossary_extraction.role_chunk_lines,
                 )
-                return
+                display_names = glossary_extraction.extract_display_names()
 
-            translation_data_map: dict[str, TranslationData] = {}
-            translation_data_map.update(data_text_extraction.extract_all_text())
-            translation_data_map.update(plugin_text_extraction.extract_all_text())
+                if glossary is None or not self._is_glossary_complete(
+                    glossary=glossary,
+                    expected_role_names=set(role_lines),
+                    expected_display_names=set(display_names),
+                ):
+                    logger.warning(
+                        f"[tag.warning]术语表缺失或不完整，正文翻译流程已终止[/tag.warning] "
+                        f"游戏 [tag.count]{game_title}[/tag.count]"
+                    )
+                    set_progress(0, 0)
+                    set_status("术语表缺失或不完整，正文翻译流程已终止")
+                    return
 
-            total_extracted_items = self._count_translation_items(translation_data_map)
-            if total_extracted_items == 0:
+                translation_data_map: dict[str, TranslationData] = {}
+                translation_data_map.update(data_text_extraction.extract_all_text())
+                translation_data_map.update(plugin_text_extraction.extract_all_text())
+
+                total_extracted_items = self._count_translation_items(
+                    translation_data_map
+                )
+                if total_extracted_items == 0:
+                    logger.info(
+                        f"[tag.skip]未提取到可翻译正文[/tag.skip] 游戏 [tag.count]{game_title}[/tag.count]"
+                    )
+                    set_progress(0, 0)
+                    set_status("未提取到可翻译正文")
+                    return
+
+                translated_location_paths = (
+                    await self.game_database_manager.read_translation_location_paths(
+                        game_title
+                    )
+                )
+                pending_translation_data = self._filter_pending_translation_data(
+                    translation_data_map=translation_data_map,
+                    translated_location_paths=translated_location_paths,
+                )
+                pending_count = self._count_translation_items(pending_translation_data)
+                set_progress(0, pending_count)
+
                 logger.info(
-                    f"[tag.skip]未提取到可翻译正文[/tag.skip] 游戏 [tag.count]{game_title}[/tag.count]"
+                    f"[tag.phase]正文提取[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] "
+                    f"共 [tag.count]{total_extracted_items}[/tag.count] 条"
                 )
-                return
+                set_status(f"正文提取完成，共 {total_extracted_items} 条")
 
-            logger.info(
-                f"[tag.phase]正文提取[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] "
-                f"共 [tag.count]{total_extracted_items}[/tag.count] 条"
-            )
+                if pending_count == 0:
+                    logger.info(
+                        f"[tag.skip]没有需要新增翻译的正文[/tag.skip] 游戏 [tag.count]{game_title}[/tag.count]"
+                    )
+                    set_status("没有需要新增翻译的正文")
+                    return
 
-            translated_location_paths = (
-                await self.game_database_manager.read_translation_location_paths(game_title)
-            )
-            pending_translation_data = self._filter_pending_translation_data(
-                translation_data_map=translation_data_map,
-                translated_location_paths=translated_location_paths,
-            )
-            pending_count = self._count_translation_items(pending_translation_data)
-            if pending_count == 0:
+                deduplicated_translation_data = self._deduplicate_translation_data(
+                    translation_data_map=pending_translation_data,
+                    translation_cache=translation_cache,
+                )
+                deduplicated_count = self._count_translation_items(
+                    deduplicated_translation_data
+                )
+                saved_count = pending_count - deduplicated_count
+                saved_ratio = 0.0
+                if pending_count > 0:
+                    saved_ratio = saved_count / pending_count
+
                 logger.info(
-                    f"[tag.skip]没有需要新增翻译的正文[/tag.skip] 游戏 [tag.count]{game_title}[/tag.count]"
+                    f"[tag.phase]正文缓存[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] "
+                    f"过滤后 [tag.count]{pending_count}[/tag.count] 条，"
+                    f"实际送模 [tag.count]{deduplicated_count}[/tag.count] 条，"
+                    f"节省 [tag.count]{saved_count}[/tag.count] 条 ({saved_ratio:.2%})"
                 )
-                return
-
-            deduplicated_translation_data = self._deduplicate_translation_data(
-                translation_data_map=pending_translation_data,
-                translation_cache=translation_cache,
-            )
-            deduplicated_count = self._count_translation_items(
-                deduplicated_translation_data
-            )
-            saved_count = pending_count - deduplicated_count
-            saved_ratio = 0.0
-            if pending_count > 0:
-                saved_ratio = saved_count / pending_count
-
-            logger.info(
-                f"[tag.phase]正文缓存[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] "
-                f"过滤后 [tag.count]{pending_count}[/tag.count] 条，"
-                f"实际送模 [tag.count]{deduplicated_count}[/tag.count] 条，"
-                f"节省 [tag.count]{saved_count}[/tag.count] 条 ({saved_ratio:.2%})"
-            )
-
-            batches = self._build_translation_batches(
-                translation_data_map=deduplicated_translation_data,
-                glossary=glossary,
-                setting=setting,
-            )
-            if not batches:
-                logger.warning(
-                    f"[tag.warning]没有构建出可用的翻译批次[/tag.warning] "
-                    f"游戏 [tag.count]{game_title}[/tag.count]"
+                set_status(
+                    f"去重后实际送模 {deduplicated_count} 条，节省 "
+                    f"{saved_count} 条（{saved_ratio:.2%}）"
                 )
-                return
 
-            logger.info(
-                f"[tag.phase]正文上下文[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] "
-                f"共构建 [tag.count]{len(batches)}[/tag.count] 个翻译批次"
-            )
+                batches = self._build_translation_batches(
+                    translation_data_map=deduplicated_translation_data,
+                    glossary=glossary,
+                    setting=setting,
+                )
+                if not batches:
+                    logger.warning(
+                        f"[tag.warning]没有构建出可用的翻译批次[/tag.warning] "
+                        f"游戏 [tag.count]{game_title}[/tag.count]"
+                    )
+                    set_status("没有构建出可用的翻译批次")
+                    return
 
-            await self._run_text_translation_batches(
-                game_title=game_title,
-                text_translation=text_translation,
-                batches=batches,
-                total_items=pending_count,
-                start_log_message="正文翻译任务已启动",
-                finish_log_message="正文翻译流程结束",
-                translation_cache=translation_cache,
-            )
+                logger.info(
+                    f"[tag.phase]正文上下文[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] "
+                    f"共构建 [tag.count]{len(batches)}[/tag.count] 个翻译批次"
+                )
+                set_status(f"已构建 {len(batches)} 个翻译批次")
 
-    async def retry_error_table(self, game_title: str) -> None:
+                success_count, error_count = await self._run_text_translation_batches(
+                    game_title=game_title,
+                    text_translation=text_translation,
+                    batches=batches,
+                    start_log_message="正文翻译任务已启动",
+                    finish_log_message="正文翻译流程结束",
+                    advance_progress=advance_progress,
+                    set_status=set_status,
+                    translation_cache=translation_cache,
+                )
+                set_status(
+                    f"正文翻译完成，成功 {success_count} 条，失败 {error_count} 条"
+                )
+        except Exception as error:
+            set_status(f"正文翻译失败：{error}")
+            raise
+
+    async def retry_error_table(
+        self,
+        game_title: str,
+        callbacks: tuple[
+            Callable[[int, int], None],
+            Callable[[int], None],
+            Callable[[str], None],
+        ],
+    ) -> None:
         """
         为指定游戏重翻最近一张错误表。
 
         Args:
             game_title: 目标游戏标题。
+            callbacks: 错误重翻回调元组。
         """
-        async with self._container() as request_container:
-            setting = await request_container.get(Setting)
-            text_translation = await request_container.get(TextTranslation)
+        set_progress, advance_progress, set_status = callbacks
 
-            game_data = self._get_game_data(game_title)
-            glossary_extraction = GlossaryExtraction(game_data)
-            glossary = await self.game_database_manager.read_glossary(game_title)
-            role_lines = glossary_extraction.extract_role_dialogue_chunks(
-                chunk_blocks=setting.glossary_extraction.role_chunk_blocks,
-                chunk_lines=setting.glossary_extraction.role_chunk_lines,
-            )
-            display_names = glossary_extraction.extract_display_names()
+        try:
+            async with self._container() as request_container:
+                setting = await request_container.get(Setting)
+                text_translation = await request_container.get(TextTranslation)
+                translation_cache = await request_container.get(TranslationCache)
 
-            if glossary is None or not self._is_glossary_complete(
-                glossary=glossary,
-                expected_role_names=set(role_lines),
-                expected_display_names=set(display_names),
-            ):
-                logger.warning(
-                    f"[tag.warning]术语表缺失或不完整，错误表重翻译流程已终止[/tag.warning] "
-                    f"游戏 [tag.count]{game_title}[/tag.count]"
+                game_data = self._get_game_data(game_title)
+                glossary_extraction = GlossaryExtraction(game_data)
+                glossary = await self.game_database_manager.read_glossary(game_title)
+                role_lines = glossary_extraction.extract_role_dialogue_chunks(
+                    chunk_blocks=setting.glossary_extraction.role_chunk_blocks,
+                    chunk_lines=setting.glossary_extraction.role_chunk_lines,
                 )
-                return
+                display_names = glossary_extraction.extract_display_names()
 
-            latest_error_table_name = (
-                await self.game_database_manager.read_latest_error_table_name(
-                    game_title,
-                    self.ERROR_TABLE_PREFIX,
+                if glossary is None or not self._is_glossary_complete(
+                    glossary=glossary,
+                    expected_role_names=set(role_lines),
+                    expected_display_names=set(display_names),
+                ):
+                    logger.warning(
+                        f"[tag.warning]术语表缺失或不完整，错误表重翻译流程已终止[/tag.warning] "
+                        f"游戏 [tag.count]{game_title}[/tag.count]"
+                    )
+                    set_progress(0, 0)
+                    set_status("术语表缺失或不完整，错误表重翻译流程已终止")
+                    return
+
+                latest_error_table_name = (
+                    await self.game_database_manager.read_latest_error_table_name(
+                        game_title,
+                        self.ERROR_TABLE_PREFIX,
+                    )
                 )
-            )
-            if latest_error_table_name is None:
+                if latest_error_table_name is None:
+                    logger.info(
+                        f"[tag.skip]数据库中没有可重翻译的错误表[/tag.skip] "
+                        f"游戏 [tag.count]{game_title}[/tag.count]"
+                    )
+                    set_progress(0, 0)
+                    set_status("数据库中没有可重翻译的错误表")
+                    return
+
+                error_retry_items = (
+                    await self.game_database_manager.read_error_retry_items(
+                        game_title,
+                        latest_error_table_name,
+                    )
+                )
+                set_progress(0, len(error_retry_items))
+
+                if not error_retry_items:
+                    logger.info(
+                        f"[tag.skip]最新错误表中没有可重翻译记录[/tag.skip] "
+                        f"游戏 [tag.count]{game_title}[/tag.count] "
+                        f"表名 [tag.path]{latest_error_table_name}[/tag.path]"
+                    )
+                    set_status("最新错误表中没有可重翻译记录")
+                    return
+
                 logger.info(
-                    f"[tag.skip]数据库中没有可重翻译的错误表[/tag.skip] "
-                    f"游戏 [tag.count]{game_title}[/tag.count]"
+                    f"[tag.phase]错误表读取[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] "
+                    f"表名 [tag.path]{latest_error_table_name}[/tag.path] "
+                    f"共 [tag.count]{len(error_retry_items)}[/tag.count] 条记录"
                 )
-                return
+                set_status(
+                    f"错误表读取完成，表名 {latest_error_table_name}，"
+                    f"共 {len(error_retry_items)} 条记录"
+                )
 
-            error_retry_items = await self.game_database_manager.read_error_retry_items(
-                game_title,
-                latest_error_table_name,
-            )
-            if not error_retry_items:
+                batches = self._build_error_retry_batches(
+                    error_retry_items=error_retry_items,
+                    glossary=glossary,
+                    setting=setting,
+                )
+                if not batches:
+                    logger.warning(
+                        f"[tag.warning]没有构建出可用的错误重翻译批次[/tag.warning] "
+                        f"游戏 [tag.count]{game_title}[/tag.count]"
+                    )
+                    set_status("没有构建出可用的错误重翻译批次")
+                    return
+
                 logger.info(
-                    f"[tag.skip]最新错误表中没有可重翻译记录[/tag.skip] "
-                    f"游戏 [tag.count]{game_title}[/tag.count] "
-                    f"表名 [tag.path]{latest_error_table_name}[/tag.path]"
+                    f"[tag.phase]错误重翻译上下文[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] "
+                    f"共构建 [tag.count]{len(batches)}[/tag.count] 个翻译批次"
                 )
-                return
+                set_status(f"已构建 {len(batches)} 个错误重翻译批次")
 
-            logger.info(
-                f"[tag.phase]错误表读取[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] "
-                f"表名 [tag.path]{latest_error_table_name}[/tag.path] "
-                f"共 [tag.count]{len(error_retry_items)}[/tag.count] 条记录"
-            )
-
-            batches = self._build_error_retry_batches(
-                error_retry_items=error_retry_items,
-                glossary=glossary,
-                setting=setting,
-            )
-            if not batches:
-                logger.warning(
-                    f"[tag.warning]没有构建出可用的错误重翻译批次[/tag.warning] "
-                    f"游戏 [tag.count]{game_title}[/tag.count]"
+                success_count, error_count = await self._run_text_translation_batches(
+                    game_title=game_title,
+                    text_translation=text_translation,
+                    batches=batches,
+                    start_log_message="错误表重翻译任务已启动",
+                    finish_log_message="错误表重翻译流程结束",
+                    advance_progress=advance_progress,
+                    set_status=set_status,
+                    translation_cache=translation_cache,
                 )
-                return
+                set_status(
+                    f"错误表重翻译完成，成功 {success_count} 条，失败 {error_count} 条"
+                )
+        except Exception as error:
+            set_status(f"错误表重翻译失败：{error}")
+            raise
 
-            logger.info(
-                f"[tag.phase]错误重翻译上下文[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] "
-                f"共构建 [tag.count]{len(batches)}[/tag.count] 个翻译批次"
-            )
-            await self._run_text_translation_batches(
-                game_title=game_title,
-                text_translation=text_translation,
-                batches=batches,
-                total_items=len(error_retry_items),
-                start_log_message="错误表重翻译任务已启动",
-                finish_log_message="错误表重翻译流程结束",
-            )
-
-    async def write_back(self, game_title: str) -> None:
+    async def write_back(
+        self,
+        game_title: str,
+        callbacks: tuple[Callable[[int, int], None], Callable[[int], None]],
+    ) -> None:
         """
         将指定游戏的术语与正文译文回写到游戏目录。
 
         Args:
             game_title: 目标游戏标题。
+            callbacks: 回写进度回调元组。
         """
+        set_progress, advance_progress = callbacks
         game_data = self._get_game_data(game_title)
         game_database_item = self._get_game_database_item(game_title)
         glossary = await self.game_database_manager.read_glossary(game_title)
         translated_items = await self.game_database_manager.read_translated_items(
             game_title
         )
-
-        if glossary is None and not translated_items:
-            logger.warning(
-                f"[tag.warning]未找到可回写数据[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count]"
-            )
-            return
-
-        self._reset_writable_copies(game_data)
-
+        glossary_count = 0
         if glossary is not None:
-            write_glossary(game_data, glossary)
-            logger.success(
-                f"[tag.success]术语表回写完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] "
-                f"角色术语 [tag.count]{len(glossary.roles)}[/tag.count] 条，"
-                f"地点术语 [tag.count]{len(glossary.places)}[/tag.count] 条"
-            )
-        else:
-            logger.warning(
-                f"[tag.warning]数据库中不存在术语表，本次只回写正文数据[/tag.warning] "
-                f"游戏 [tag.count]{game_title}[/tag.count]"
-            )
+            glossary_count = len(glossary.roles) + len(glossary.places)
+        total = glossary_count + len(translated_items)
+        set_progress(0, total)
 
-        if translated_items:
-            write_data_text(game_data, translated_items)
-            write_plugin_text(game_data, translated_items)
-            logger.success(
-                f"[tag.success]正文回写完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] "
-                f"共处理 [tag.count]{len(translated_items)}[/tag.count] 条译文"
-            )
-        else:
-            logger.warning(
-                f"[tag.warning]数据库中没有可回写的正文译文[/tag.warning] "
-                f"游戏 [tag.count]{game_title}[/tag.count]"
-            )
+        try:
+            if glossary is None and not translated_items:
+                logger.warning(
+                    f"[tag.warning]未找到可回写数据[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count]"
+                )
+                return
 
-        self._write_game_files(
-            game_data=game_data,
-            game_root=game_database_item.game_path,
-        )
-        logger.success(
-            f"[tag.success]游戏文件已写回原始目录[/tag.success] "
-            f"游戏 [tag.count]{game_title}[/tag.count] "
-            f"路径 [tag.path]{game_database_item.game_path}[/tag.path]"
-        )
+            self._reset_writable_copies(game_data)
+
+            if glossary is not None:
+                write_glossary(game_data, glossary)
+                logger.success(
+                    f"[tag.success]术语表回写完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] "
+                    f"角色术语 [tag.count]{len(glossary.roles)}[/tag.count] 条，"
+                    f"地点术语 [tag.count]{len(glossary.places)}[/tag.count] 条"
+                )
+                glossary_delta = len(glossary.roles) + len(glossary.places)
+                if glossary_delta > 0:
+                    advance_progress(glossary_delta)
+            else:
+                logger.warning(
+                    f"[tag.warning]数据库中不存在术语表，本次只回写正文数据[/tag.warning] "
+                    f"游戏 [tag.count]{game_title}[/tag.count]"
+                )
+
+            if translated_items:
+                write_data_text(game_data, translated_items)
+                write_plugin_text(game_data, translated_items)
+                logger.success(
+                    f"[tag.success]正文回写完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] "
+                    f"共处理 [tag.count]{len(translated_items)}[/tag.count] 条译文"
+                )
+                advance_progress(len(translated_items))
+            else:
+                logger.warning(
+                    f"[tag.warning]数据库中没有可回写的正文译文[/tag.warning] "
+                    f"游戏 [tag.count]{game_title}[/tag.count]"
+                )
+
+            self._write_game_files(
+                game_data=game_data,
+                game_root=game_database_item.game_path,
+            )
+            logger.success(
+                f"[tag.success]游戏文件已写回原始目录[/tag.success] "
+                f"游戏 [tag.count]{game_title}[/tag.count] "
+                f"路径 [tag.path]{game_database_item.game_path}[/tag.path]"
+            )
+        except Exception:
+            raise
 
     def _get_game_data(self, game_title: str) -> GameData:
         """
@@ -709,11 +828,12 @@ class TranslationHandler:
         game_title: str,
         text_translation: TextTranslation,
         batches: list[tuple[list[TranslationItem], list[ChatMessage]]],
-        total_items: int,
         start_log_message: str,
         finish_log_message: str,
+        advance_progress: Callable[[int], None],
+        set_status: Callable[[str], None],
         translation_cache: TranslationCache | None = None,
-    ) -> None:
+    ) -> tuple[int, int]:
         """
         统一执行一轮正文类翻译任务。
 
@@ -721,10 +841,14 @@ class TranslationHandler:
             game_title: 目标游戏标题。
             text_translation: 正文翻译器实例。
             batches: 已构造完成的翻译批次。
-            total_items: 本轮处理的条目总数。
             start_log_message: 启动日志文案。
             finish_log_message: 完成日志文案。
+            advance_progress: 推进进度条的回调。
+            set_status: 更新状态文本的回调。
             translation_cache: 可选的请求级正文去重缓存。
+
+        Returns:
+            成功条数与失败条数。
         """
         error_table_name = await self.game_database_manager.start_error_table(
             game_title,
@@ -734,6 +858,7 @@ class TranslationHandler:
             f"[tag.phase]错误表已创建[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] "
             f"表名 [tag.path]{error_table_name}[/tag.path]"
         )
+        set_status(f"错误表已创建：{error_table_name}")
 
         text_translation.start_translation(
             llm_handler=self.llm_handler,
@@ -743,14 +868,16 @@ class TranslationHandler:
             f"[tag.phase]任务启动[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] "
             f"{start_log_message}"
         )
+        set_status(start_log_message)
 
         db_write_lock = asyncio.Lock()
-        background_tasks: list[asyncio.Task[None]] = [
+        background_tasks: list[asyncio.Task[int]] = [
             asyncio.create_task(
                 self._consume_right_items(
                     game_title=game_title,
                     text_translation=text_translation,
                     db_write_lock=db_write_lock,
+                    advance_progress=advance_progress,
                     translation_cache=translation_cache,
                 )
             ),
@@ -760,12 +887,14 @@ class TranslationHandler:
                     text_translation=text_translation,
                     error_table_name=error_table_name,
                     db_write_lock=db_write_lock,
+                    advance_progress=advance_progress,
+                    translation_cache=translation_cache,
                 )
             ),
         ]
 
         try:
-            await asyncio.gather(*background_tasks)
+            success_count, error_count = await asyncio.gather(*background_tasks)
         finally:
             for task in background_tasks:
                 if task.done():
@@ -776,8 +905,9 @@ class TranslationHandler:
         logger.success(
             f"[tag.success]{finish_log_message}[/tag.success] "
             f"游戏 [tag.count]{game_title}[/tag.count] "
-            f"共处理 [tag.count]{total_items}[/tag.count] 条"
+            f"共处理 [tag.count]{success_count + error_count}[/tag.count] 条"
         )
+        return success_count, error_count
 
     async def _consume_right_items(
         self,
@@ -785,17 +915,14 @@ class TranslationHandler:
         game_title: str,
         text_translation: TextTranslation,
         db_write_lock: asyncio.Lock,
+        advance_progress: Callable[[int], None],
         translation_cache: TranslationCache | None,
-    ) -> None:
+    ) -> int:
         """
         消费正文翻译成功队列并写入主翻译表。
-
-        Args:
-            game_title: 目标游戏标题。
-            text_translation: 正文翻译器实例。
-            db_write_lock: 串行化数据库写入的锁。
-            translation_cache: 可选的请求级正文去重缓存。
         """
+        success_count = 0
+
         async for items in text_translation.iter_right_items():
             expanded_items = self._expand_cached_translation_items(
                 items=items,
@@ -820,11 +947,15 @@ class TranslationHandler:
                     serialized_items,
                 )
 
+            success_count += len(expanded_items)
+            advance_progress(len(expanded_items))
             logger.success(
                 f"[tag.success]已写入正文翻译结果[/tag.success] "
                 f"游戏 [tag.count]{game_title}[/tag.count] "
                 f"[tag.count]{len(expanded_items)}[/tag.count] 条"
             )
+
+        return success_count
 
     async def _consume_error_items(
         self,
@@ -833,29 +964,79 @@ class TranslationHandler:
         text_translation: TextTranslation,
         error_table_name: str,
         db_write_lock: asyncio.Lock,
-    ) -> None:
+        advance_progress: Callable[[int], None],
+        translation_cache: TranslationCache | None,
+    ) -> int:
         """
         消费正文翻译错误队列并写入当前错误表。
-
-        Args:
-            game_title: 目标游戏标题。
-            text_translation: 正文翻译器实例。
-            error_table_name: 当前运行对应的错误表名。
-            db_write_lock: 串行化数据库写入的锁。
         """
+        error_count = 0
+
         async for error_items in text_translation.iter_error_items():
+            expanded_error_items = self._expand_cached_error_items(
+                error_items=error_items,
+                translation_cache=translation_cache,
+            )
+
             async with db_write_lock:
                 await self.game_database_manager.write_error_items(
                     game_title,
                     error_table_name,
-                    error_items,
+                    expanded_error_items,
                 )
 
+            error_count += len(expanded_error_items)
+            advance_progress(len(expanded_error_items))
             logger.error(
                 f"[tag.failure]已写入错误记录[/tag.failure] "
                 f"游戏 [tag.count]{game_title}[/tag.count] "
-                f"[tag.count]{len(error_items)}[/tag.count] 条"
+                f"[tag.count]{len(expanded_error_items)}[/tag.count] 条"
             )
+
+        return error_count
+
+    @staticmethod
+    def _expand_cached_error_items(
+        error_items: list[TranslationErrorItem],
+        translation_cache: TranslationCache | None,
+    ) -> list[TranslationErrorItem]:
+        """
+        在错误落库前展开与失败正文同键的重复条目。
+        """
+        if translation_cache is None:
+            return error_items
+
+        expanded_error_items: list[TranslationErrorItem] = []
+        for error_item in error_items:
+            expanded_error_items.append(error_item)
+            (
+                _location_path,
+                item_type,
+                role,
+                original_lines,
+                translation_lines,
+                error_type,
+                error_detail,
+            ) = error_item
+            duplicate_items = translation_cache.pop_duplicate_items_by_fields(
+                original_lines=original_lines,
+                item_type=item_type,
+                role=role,
+            )
+            for duplicate_item in duplicate_items:
+                expanded_error_items.append(
+                    (
+                        duplicate_item.location_path,
+                        duplicate_item.item_type,
+                        duplicate_item.role,
+                        list(duplicate_item.original_lines),
+                        list(translation_lines),
+                        error_type,
+                        list(error_detail),
+                    )
+                )
+
+        return expanded_error_items
 
     @staticmethod
     def _expand_cached_translation_items(
