@@ -1,61 +1,72 @@
 # RPG Maker Tools
 
-一个面向 RPG Maker 项目的 CLI 翻译工具。
+一个面向 RPG Maker 项目的终端翻译工具仓库。
 
-当前版本围绕四件事组织：
+当前版本以 **Textual TUI 工作台** 为默认入口，围绕“多游戏管理 + 术语构建 + 正文翻译 + 错误重翻 + 回写”组织完整流程。每个游戏会在仓库本地维护独立 SQLite 数据库，用于保存术语、正文译文、错误表和元数据，支持断点续跑与多次回写。
 
-- 提取术语和正文
-- 调用 LLM 进行翻译
-- 用 SQLite 保存断点状态和术语表
-- 将译文回写到游戏目录
+## 1. 项目定位
 
-当前版本已经彻底移除 GUI。`main.py` 现在只启动交互式 CLI，业务编排仍由 [`TranslationHandler`](/c:/Users/夜袭/Desktop/translation%20tools/rpg-maker-tools/app/core/handler.py) 负责。
+这个仓库解决的是 RPG Maker 项目的批量翻译问题，重点不是“把一段文本送给模型”，而是把下面这些环节稳定串起来：
 
-## 当前能力
+- 从游戏目录提取可翻译文本
+- 使用术语表约束正文翻译
+- 使用 SQLite 保存进度、译文和错误记录
+- 在失败批次基础上进行错误重翻
+- 将最终译文回写到原始游戏目录
 
-- 术语表构建
-  - 提取角色名和地图显示名
-  - 分块调用 LLM 翻译术语
-  - 术语表统一写入 `translation.db`
+当前实现已经移除旧版 GUI/旧版单游戏配置思路，运行方式和文档都以现有 TUI 新栈为准。
+
+## 2. 核心能力
+
+- 多游戏管理
+  - 启动时自动扫描仓库下的 `data/db/*.db`
+  - 工作台内可继续添加新的游戏目录
+  - 每个游戏按 `package.json.window.title` 建立独立数据库
+- 术语构建
+  - 从事件对白中提取角色名与对话样本
+  - 从地图数据中提取 `displayName`
+  - 使用独立术语模型服务翻译角色名、地点名
 - 正文翻译
-  - 提取 `data/` 与 `js/plugins.js` 中可翻译文本
-  - 读取数据库中的术语表参与翻译
-  - 已完成译文按 `location_path` 过滤，支持断点续跑
-- 错误重翻译
-  - 读取最新错误表
-  - 重新构造上下文并再次翻译
+  - 提取 `data/` 目录内正文、系统术语、基础数据库文本
+  - 提取 `js/plugins.js` 和事件内插件命令参数文本
+  - 通过术语表参与上下文构造
+  - 使用请求级去重缓存减少重复送模
+  - 已翻译条目按 `location_path` 自动跳过，支持断点续跑
+- 结果校验
+  - 校验模型返回 JSON 结构
+  - 校验漏翻
+  - 校验占位符与控制符
+  - 校验日文残留
+  - 校验失败条目自动落入错误表
+- 错误重翻
+  - 自动读取最近一张错误表
+  - 重新构造批次并再次送模
 - 回写
-  - 读取数据库中的术语表和正文译文
-  - 统一回写到游戏原目录
-- CLI 交互
-  - 启动后通过数字菜单选择动作
-  - 动作执行完成后返回菜单
-  - 配置修改只在重启进程后生效
+  - 术语、正文统一回写到游戏原目录
+  - 支持写回 `data/*.json`
+  - 支持写回 `js/plugins.js`
 
-## 目录结构
+## 3. 整体流程
 
-```text
-rpg-maker-tools/
-├─ app/
-│  ├─ config/          # 配置模型与加载器
-│  ├─ core/            # Handler 与依赖装配
-│  ├─ database/        # SQLite 读写
-│  ├─ extraction/      # 术语、正文、插件文本提取
-│  ├─ models/          # 游戏数据与翻译数据模型
-│  ├─ services/llm/    # LLM 服务适配层
-│  ├─ translation/     # 术语翻译、正文翻译、校验、上下文构建
-│  ├─ utils/           # 日志、进度条、通用工具
-│  └─ write_back/      # 术语与正文回写
-├─ cli/                # 交互式 CLI 入口
-├─ prompts/            # 系统提示词文件
-├─ main.py             # CLI 入口
-└─ setting.toml        # 配置样例
-```
+推荐按下面顺序使用：
 
-## 环境要求
+1. 添加游戏
+2. 构建术语
+3. 正文翻译
+4. 错误重翻（可选）
+5. 回写
 
-- Python 3.14+
+其中有几个关键前提：
+
+- 正文翻译依赖完整术语表；术语表缺失或不完整时，正文流程会直接终止
+- 错误重翻只处理“最近一次翻译任务生成的最新错误表”
+- 回写使用的是数据库中的最终结果，而不是内存中的临时状态
+
+## 4. 运行环境
+
+- Python `>=3.14`
 - `uv`
+- 推荐在 Windows 终端中运行；仓库已提供 `launch_tui.bat`
 
 安装依赖：
 
@@ -63,66 +74,383 @@ rpg-maker-tools/
 uv sync
 ```
 
-## 配置
+## 5. 快速开始
 
-项目根目录下的 [`setting.toml`](/c:/Users/夜袭/Desktop/translation%20tools/rpg-maker-tools/setting.toml) 是唯一配置入口。
+### 5.1 配置模型服务
 
-核心字段包括：
+先修改项目根目录的 `setting.toml`，填入你自己的模型服务地址、密钥、模型名和提示词文件路径。
 
-```toml
-[project]
-file_path = "D:/your-game"
-work_path = "data"
-db_name = "translation.db"
-translation_table_name = "translation_items"
-
-[llm_services.glossary]
-provider_type = "openai"
-base_url = "https://your-glossary-api-base"
-api_key = "your-glossary-api-key"
-model = "your_glossary_model"
-timeout = 600
-```
-
-说明：
-
-- `project.file_path` 指向游戏根目录
-- `project.work_path` 必须是相对 `setting.toml` 的路径，运行时会解析到配置文件目录下
-- `system_prompt_file` 字段保存 Prompt 文件路径，运行时会读取并注入 Prompt 正文
-- 修改 `setting.toml` 后必须重启进程，当前 CLI 会话不会热更新
-
-运行时配置加载入口在 [`app/config/loaders.py`](/c:/Users/夜袭/Desktop/translation%20tools/rpg-maker-tools/app/config/loaders.py)。
-
-## 运行
-
-从项目根目录启动：
+### 5.2 启动工作台
 
 ```bash
 uv run python main.py
 ```
 
-CLI 会提供以下动作：
+或者直接使用：
 
-- 构建术语表
-- 翻译正文
-- 重翻错误表
-- 回写游戏文件
-- 一键全流程
-- 退出
+```bash
+uv run python main.py tui
+```
 
-## 运行产物
+Windows 下也可以双击：
 
-默认会在相对 `setting.toml` 解析后的 `work_path` 下生成或使用：
+```bat
+launch_tui.bat
+```
 
-- `translation.db`
-- 若干错误表
+### 5.3 在工作台中操作
 
-其中 `translation.db` 会维护：
+1. 首页点击“添加游戏”，输入 RPG Maker 游戏根目录
+2. 选中游戏后按 `Enter` 进入任务页
+3. 依次执行“构建术语”“正文翻译”“错误重翻”“回写”
+
+## 6. 游戏目录要求
+
+被添加的游戏目录至少需要满足以下条件：
+
+- 根目录存在 `package.json`
+- `package.json` 中存在 `window.title`
+- 根目录存在 `data/`
+- 若需要翻译插件配置文本，建议存在 `js/plugins.js`
+
+项目通过 `package.json.window.title` 作为：
+
+- 游戏显示标题
+- 数据库文件名
+- 多游戏管理器中的唯一键
+
+因此要注意：
+
+- 不同游戏如果标题相同，会复用同一个数据库标识，容易串数据
+- 标题不能包含 Windows 非法文件名字符，例如 `< > : " / \ | ? *`
+
+## 7. 配置说明
+
+### 7.1 配置入口
+
+当前仓库只有一个配置入口：
+
+- `setting.toml`
+
+配置加载特点如下：
+
+- 每次任务执行时都会重新加载 `setting.toml`
+- 设置页修改字段后会立即写回文件
+- 运行中的任务不会热更新，下一次任务才会使用新配置
+- `system_prompt_file` 支持相对路径，相对基准是 `setting.toml` 所在目录
+
+### 7.2 示例配置
+
+下面是一份不包含真实密钥的示例：
+
+```toml
+[llm_services.glossary]
+provider_type = "openai"
+base_url = "https://your-glossary-endpoint/v1"
+api_key = "your-glossary-api-key"
+model = "your-glossary-model"
+timeout = 600
+
+[llm_services.text]
+provider_type = "openai"
+base_url = "https://your-text-endpoint/v1"
+api_key = "your-text-api-key"
+model = "your-text-model"
+timeout = 600
+
+[glossary_extraction]
+role_chunk_blocks = 10
+role_chunk_lines = 3
+
+[glossary_translation.role_name]
+chunk_size = 60
+retry_count = 3
+retry_delay = 1
+response_retry_count = 3
+system_prompt_file = "prompts/glossary_role_name_system.txt"
+
+[glossary_translation.display_name]
+chunk_size = 60
+retry_count = 3
+retry_delay = 1
+response_retry_count = 3
+system_prompt_file = "prompts/glossary_display_name_system.txt"
+
+[translation_context]
+token_size = 512
+factor = 3.5
+max_command_items = 5
+
+[error_translation]
+chunk_size = 10
+system_prompt_file = "prompts/error_retry_system.txt"
+
+[text_translation]
+worker_count = 60
+rpm = 60
+retry_count = 3
+retry_delay = 2
+system_prompt_file = "prompts/text_translation_system.txt"
+```
+
+### 7.3 配置段说明
+
+#### `llm_services`
+
+用于定义两个独立模型服务：
+
+| 字段 | 说明 |
+| --- | --- |
+| `llm_services.glossary` | 构建术语时使用的模型服务 |
+| `llm_services.text` | 正文翻译与错误重翻时使用的模型服务 |
+
+单个服务支持以下字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `provider_type` | 提供商类型，当前支持 `openai`、`gemini`、`volcengine` |
+| `base_url` | 接口基地址，可填官方地址或兼容网关 |
+| `api_key` | 鉴权密钥 |
+| `model` | 实际调用的模型名 |
+| `timeout` | 单次请求超时时间，单位秒 |
+
+#### `glossary_extraction`
+
+控制角色样本采样策略：
+
+| 字段 | 说明 |
+| --- | --- |
+| `role_chunk_blocks` | 将角色对白按时间线切成多少块 |
+| `role_chunk_lines` | 每块保留多少行样本 |
+
+#### `glossary_translation.role_name`
+
+控制角色名翻译：
+
+| 字段 | 说明 |
+| --- | --- |
+| `chunk_size` | 每批送模的角色条目数 |
+| `retry_count` | 网络失败重试次数 |
+| `retry_delay` | 网络失败重试间隔秒数 |
+| `response_retry_count` | 结构校验失败后允许纠错的轮数 |
+| `system_prompt_file` | 角色术语提示词文件 |
+
+#### `glossary_translation.display_name`
+
+控制地图显示名翻译，字段含义与 `role_name` 相同。
+
+#### `translation_context`
+
+控制正文批次切分和上下文大小：
+
+| 字段 | 说明 |
+| --- | --- |
+| `token_size` | 单批目标 token 上限 |
+| `factor` | 字符数到 token 的经验换算系数 |
+| `max_command_items` | 同角色连续命令允许强制合并的最大条目数 |
+
+#### `text_translation`
+
+控制正文翻译运行参数：
+
+| 字段 | 说明 |
+| --- | --- |
+| `worker_count` | 并发 worker 数量 |
+| `rpm` | 每分钟请求上限 |
+| `retry_count` | 网络失败重试次数 |
+| `retry_delay` | 网络失败重试间隔秒数 |
+| `system_prompt_file` | 正文翻译提示词文件 |
+
+#### `error_translation`
+
+控制错误重翻：
+
+| 字段 | 说明 |
+| --- | --- |
+| `chunk_size` | 每批错误条目数 |
+| `system_prompt_file` | 错误重翻提示词文件 |
+
+### 7.4 配置安全建议
+
+- `setting.toml` 当前以明文形式保存密钥
+- 不要把真实密钥写进公开仓库
+- 如需共享仓库，建议只保留占位值
+
+## 8. 工作台说明
+
+### 8.1 页面结构
+
+工作台有三个主要页面：
+
+- 首页
+  - 查看已注册游戏
+  - 添加游戏
+  - 进入设置页
+- 设置页
+  - 直接编辑 `setting.toml`
+  - 输入校验失败时不会覆盖最后一次合法值
+- 任务页
+  - 对当前游戏执行构建术语、正文翻译、错误重翻、回写
+  - 展示进度条、状态文本和实时日志
+
+日志历史由应用统一维护，切换页面后不会丢失。
+
+### 8.2 常用快捷键
+
+| 按键 | 作用 |
+| --- | --- |
+| `Up` / `Down` | 列表上下移动 |
+| `Enter` | 进入或执行当前项 |
+| `Tab` / `Shift+Tab` | 切换焦点 |
+| `Esc` | 返回上一页 |
+| `g` | 添加游戏 |
+| `s` | 打开设置页 |
+| `Ctrl+Left` / `Ctrl+Right` | 切换设置页分页 |
+| `l` | 聚焦日志区域 |
+| `q` | 退出程序 |
+
+### 8.3 推荐操作顺序
+
+首次导入一个游戏时，推荐这样操作：
+
+1. 在首页添加游戏
+2. 先进入设置页确认模型配置和提示词路径
+3. 进入任务页构建术语
+4. 术语成功后再执行正文翻译
+5. 如有失败项，再执行错误重翻
+6. 确认无误后执行回写
+
+## 9. 支持的提取与回写范围
+
+### 9.1 `data/` 目录
+
+当前正文提取覆盖以下内容：
+
+- 事件对白
+- 选项文本
+- 滚动文本
+- `System.json` 内的系统术语、提示消息、游戏标题等
+- 基础数据库中的名称、昵称、简介、说明、战斗消息
+- 事件中的插件命令文本参数
+
+### 9.2 `js/plugins.js`
+
+当前会递归提取插件配置中的可翻译文本，主要特点：
+
+- 只提取看起来像文本字段的参数键
+- 会跳过明显的文件名、纯数字、颜色值、布尔值和纯配置字符串
+- 会优先保留包含日文的叶子文本
+
+### 9.3 回写行为
+
+回写时会先在内存中重建可写副本，再统一写回：
+
+- `data/*.json`
+- `js/plugins.js`
+
+数据库中不存在的数据不会被凭空生成，因此回写前应先确保术语或正文结果已经写入数据库。
+
+## 10. 数据存储与产物
+
+### 10.1 数据库位置
+
+每个游戏的数据库固定保存在：
+
+```text
+data/db/<游戏标题>.db
+```
+
+这是仓库内部固定路径，不走外部配置。
+
+### 10.2 数据库存储内容
+
+每个游戏数据库会保存：
 
 - 主翻译表
-- `glossary_role_name`
-- `glossary_display_name`
-- `glossary_state`
-- 若干错误表
+- 角色术语表
+- 地点术语表
+- 术语状态表
+- 元数据表
+- 按时间戳创建的错误表
 
-主翻译表、术语表和错误表统一由 [`TranslationDB`](/c:/Users/夜袭/Desktop/translation%20tools/rpg-maker-tools/app/database/db.py) 管理。
+### 10.3 启动时的恢复行为
+
+程序启动时会自动扫描 `data/db` 并恢复：
+
+- 游戏标题
+- 游戏原始路径
+- 数据库连接
+
+因此同一仓库下的已添加游戏，下次启动仍会出现在工作台中。
+
+## 11. 目录结构
+
+```text
+rpg-maker-tools/
+├─ app/
+│  ├─ config/          # 配置模型
+│  ├─ core/            # 编排器与依赖注入
+│  ├─ database/        # SQLite 管理与 SQL
+│  ├─ extraction/      # 术语、正文、插件文本提取
+│  ├─ models/          # 游戏数据与业务模型
+│  ├─ services/llm/    # LLM 服务适配层
+│  ├─ translation/     # 术语翻译、正文翻译、校验、上下文、缓存
+│  ├─ tui/             # Textual 工作台
+│  ├─ utils/           # 配置、日志、路径、探针等工具
+│  └─ write_back/      # 回写逻辑
+├─ prompts/            # 提示词文件
+├─ data/db/            # 运行后自动生成的数据库目录
+├─ main.py             # 程序入口
+├─ launch_tui.bat      # Windows 快捷启动脚本
+├─ setting.toml        # 唯一配置入口
+├─ pyproject.toml
+└─ uv.lock
+```
+
+## 12. 常见问题
+
+### 12.1 为什么正文翻译一启动就终止？
+
+最常见原因是术语表缺失或不完整。当前流程要求先构建术语，再跑正文翻译。
+
+### 12.2 为什么重新启动后游戏列表还在？
+
+因为游戏注册信息保存在 `data/db/*.db` 中，启动时会自动恢复。
+
+### 12.3 为什么添加游戏时报数据库文件名错误？
+
+因为数据库文件名直接来自 `package.json.window.title`。如果标题包含 Windows 非法字符，就无法创建数据库文件。
+
+### 12.4 为什么错误重翻没有执行？
+
+因为数据库里没有最近错误表，或者最新错误表中已经没有可重翻条目。
+
+### 12.5 修改 `setting.toml` 后要不要重启程序？
+
+通常不需要。下一次任务执行时会重新读取配置。但已经在运行中的任务不会中途切换到新配置。
+
+## 13. 开发与冒烟验证
+
+当前仓库没有独立维护自动化测试目录，修改后建议至少做一次最小冒烟：
+
+```bash
+uv sync
+uv run python main.py
+```
+
+建议重点检查：
+
+- 工作台是否能正常启动
+- 设置页是否能正常保存 `setting.toml`
+- 添加游戏后是否成功生成 `data/db/*.db`
+- 术语构建、正文翻译、错误重翻、回写的日志是否符合预期
+
+## 14. 适用范围说明
+
+当前实现面向 RPG Maker MV/MZ 风格项目，重点覆盖：
+
+- `data/` 目录 JSON 数据
+- `package.json`
+- `js/plugins.js`
+
+如果你的项目目录结构、插件格式或文本承载方式明显偏离这一套约定，建议先阅读提取和回写模块代码，再决定是否直接投入生产使用。
