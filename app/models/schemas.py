@@ -403,8 +403,12 @@ class ErrorRetryItem(BaseModel):
     error_detail: list[str] = Field(default_factory=list)
 
 
+DATA_DIRECTORY_NAME: str = "data"
+DATA_ORIGIN_DIRECTORY_NAME: str = "data_origin"
+JS_DIRECTORY_NAME: str = "js"
 SYSTEM_FILE_NAME: str = "System.json"
 PLUGINS_FILE_NAME: str = "plugins.js"
+PLUGINS_ORIGIN_FILE_NAME: str = "plugins_origin.js"
 COMMON_EVENTS_FILE_NAME: str = "CommonEvents.json"
 TROOPS_FILE_NAME: str = "Troops.json"
 MAP_INFOS_FILE_NAME: str = "MapInfos.json"
@@ -420,6 +424,7 @@ MAP_PATTERN: re.Pattern[str] = re.compile(r"Map\d+\.json")
 # 所有已知的固定文件名集合
 FIXED_FILE_NAMES: set[str] = {
     "Actors.json",
+    "Animations.json",
     "Armors.json",
     "Classes.json",
     "Enemies.json",
@@ -427,6 +432,7 @@ FIXED_FILE_NAMES: set[str] = {
     "Skills.json",
     "States.json",
     "Weapons.json",
+    "Tilesets.json",
     MAP_INFOS_FILE_NAME,
     COMMON_EVENTS_FILE_NAME,
     TROOPS_FILE_NAME,
@@ -471,6 +477,8 @@ __all__: list[str] = [
     "Code",
     "COMMON_EVENTS_FILE_NAME",
     "CONTROL_CHARS_PATTERN",
+    "DATA_DIRECTORY_NAME",
+    "DATA_ORIGIN_DIRECTORY_NAME",
     "ErrorType",
     "FIXED_FILE_NAMES",
     "GameData",
@@ -479,10 +487,12 @@ __all__: list[str] = [
     "ItemType",
     "JAPANESE_PATTERN",
     "JAPANESE_SEGMENT_PATTERN",
+    "JS_DIRECTORY_NAME",
     "MAP_INFOS_FILE_NAME",
     "MAP_PATTERN",
     "Place",
     "PLUGINS_FILE_NAME",
+    "PLUGINS_ORIGIN_FILE_NAME",
     "PLUGINS_JS_PATTERN",
     "Role",
     "SYSTEM_FILE_NAME",

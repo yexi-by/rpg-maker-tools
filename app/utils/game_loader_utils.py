@@ -19,10 +19,14 @@ from pydantic import TypeAdapter
 from app.models.game_data import BaseItem, CommonEvent, MapData, System, Troop
 from app.models.schemas import (
     COMMON_EVENTS_FILE_NAME,
+    DATA_DIRECTORY_NAME,
+    DATA_ORIGIN_DIRECTORY_NAME,
     FIXED_FILE_NAMES,
     GameData,
+    JS_DIRECTORY_NAME,
     MAP_PATTERN,
     PLUGINS_FILE_NAME,
+    PLUGINS_ORIGIN_FILE_NAME,
     PLUGINS_JS_PATTERN,
     SYSTEM_FILE_NAME,
     TROOPS_FILE_NAME,
@@ -45,19 +49,17 @@ async def load_game_data(game_path: str | Path) -> GameData:
         构造完成且包含所有内存态和可写副本态的 `GameData` 聚合模型。
 
     Raises:
-        FileNotFoundError: 当游戏目录下的 `data/` 文件夹不存在时抛出，通常说明这不是一个合法的 RM 游戏目录。
-        ValueError: 缺失 `System.json` 或 `CommonEvents.json` 等维持翻译运转必须的核心文件时抛出；或者对话探针未通过时抛出。
+        FileNotFoundError: 当源数据目录或源 `plugins.js` 不存在时抛出。
+        ValueError: 目录处于半成品布局、缺失 `System.json` / `CommonEvents.json` 等核心文件，
+            或者对话探针未通过时抛出。
     """
     game_root: Path = Path(game_path)
-    data_dir: Path = game_root / "data"
-
-    if not data_dir.exists():
-        raise FileNotFoundError(f"数据目录不存在: {data_dir}")
+    source_data_dir, source_plugins_path, _ = resolve_game_source_paths(game_root)
 
     valid_files: list[Path] = sorted(
         (
             file_path
-            for file_path in data_dir.iterdir()
+            for file_path in source_data_dir.iterdir()
             if file_path.is_file() and _is_valid_filename(file_path.name)
         ),
         key=lambda file_path: file_path.name,
@@ -78,9 +80,7 @@ async def load_game_data(game_path: str | Path) -> GameData:
     common_events_adapter: TypeAdapter[list[CommonEvent | None]] = TypeAdapter(
         list[CommonEvent | None]
     )
-    troops_adapter: TypeAdapter[list[Troop | None]] = TypeAdapter(
-        list[Troop | None]
-    )
+    troops_adapter: TypeAdapter[list[Troop | None]] = TypeAdapter(list[Troop | None])
     base_data_adapter: TypeAdapter[list[BaseItem | None]] = TypeAdapter(
         list[BaseItem | None]
     )
@@ -102,11 +102,9 @@ async def load_game_data(game_path: str | Path) -> GameData:
         else:
             base_data[file_name] = base_data_adapter.validate_json(content)
 
-    plugins_path: Path = game_root / "js" / PLUGINS_FILE_NAME
-    if plugins_path.exists():
-        plugins_content: str = await _read_text_file(plugins_path)
-        data[PLUGINS_FILE_NAME] = plugins_content
-        plugins_js = _parse_plugins_js_text(plugins_content)
+    plugins_content: str = await _read_text_file(source_plugins_path)
+    data[PLUGINS_FILE_NAME] = plugins_content
+    plugins_js = _parse_plugins_js_text(plugins_content)
 
     if system is None or common_events is None or troops is None:
         raise ValueError("游戏缺少必要文件，禁止启动")
@@ -128,6 +126,52 @@ async def load_game_data(game_path: str | Path) -> GameData:
         plugins_js=plugins_js,
         writable_plugins_js=copy.deepcopy(plugins_js),
     )
+
+
+def resolve_game_source_paths(game_root: Path) -> tuple[Path, Path, bool]:
+    """
+    根据是否存在原件备份，解析本次应读取的源数据路径。
+
+    规则固定为三态：
+    1. `data_origin/` 与 `js/plugins_origin.js` 同时存在，视为已翻译布局，工具始终读取原件。
+    2. 两者都不存在，视为原始布局，工具直接读取 `data/` 与 `js/plugins.js`。
+    3. 只存在其一，视为半成品目录，直接报错禁止继续工作。
+
+    Args:
+        game_root: 游戏根目录。
+
+    Returns:
+        依次返回：源数据目录、源插件配置路径、是否存在原件备份。
+
+    Raises:
+        FileNotFoundError: 需要读取的源目录或源插件文件不存在时抛出。
+        ValueError: 当目录处于半成品布局时抛出。
+    """
+    active_data_dir = game_root / DATA_DIRECTORY_NAME
+    active_plugins_path = game_root / JS_DIRECTORY_NAME / PLUGINS_FILE_NAME
+    origin_data_dir = game_root / DATA_ORIGIN_DIRECTORY_NAME
+    origin_plugins_path = game_root / JS_DIRECTORY_NAME / PLUGINS_ORIGIN_FILE_NAME
+
+    has_origin_data_dir = origin_data_dir.exists()
+    has_origin_plugins_path = origin_plugins_path.exists()
+
+    if has_origin_data_dir != has_origin_plugins_path:
+        raise ValueError(
+            "检测到半成品翻译布局：`data_origin/` 与 `js/plugins_origin.js` 必须同时存在或同时不存在"
+        )
+
+    is_translated_layout = has_origin_data_dir and has_origin_plugins_path
+    source_data_dir = origin_data_dir if is_translated_layout else active_data_dir
+    source_plugins_path = (
+        origin_plugins_path if is_translated_layout else active_plugins_path
+    )
+
+    if not source_data_dir.exists():
+        raise FileNotFoundError(f"数据目录不存在: {source_data_dir}")
+    if not source_plugins_path.exists():
+        raise FileNotFoundError(f"插件配置文件不存在: {source_plugins_path}")
+
+    return source_data_dir, source_plugins_path, is_translated_layout
 
 
 async def _read_text_file(file_path: Path) -> str:
@@ -188,4 +232,4 @@ def _parse_plugins_js_text(plugins_content: str) -> list[dict[str, Any]]:
     return [plugin for plugin in decoded if isinstance(plugin, dict)]
 
 
-__all__: list[str] = ["load_game_data"]
+__all__: list[str] = ["load_game_data", "resolve_game_source_paths"]

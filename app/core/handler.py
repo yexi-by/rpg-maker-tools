@@ -12,6 +12,8 @@
 import asyncio
 import copy
 import json
+import shutil
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Self
@@ -28,11 +30,15 @@ from app.database.db import (
 )
 from app.extraction import DataTextExtraction, GlossaryExtraction, PluginTextExtraction
 from app.models.schemas import (
+    DATA_DIRECTORY_NAME,
+    DATA_ORIGIN_DIRECTORY_NAME,
     ErrorRetryItem,
     GameData,
     Glossary,
     ItemType,
+    JS_DIRECTORY_NAME,
     PLUGINS_FILE_NAME,
+    PLUGINS_ORIGIN_FILE_NAME,
     TranslationData,
     TranslationErrorItem,
     TranslationItem,
@@ -110,13 +116,26 @@ class TranslationHandler:
                 game_database_manager=game_database_manager,
                 llm_handler=llm_handler,
             )
+            preloaded_count = 0
+            skipped_count = 0
 
             for item in game_database_manager.items.values():
-                await game_data_manager.load_game_data(item.game_path)
+                try:
+                    await game_data_manager.load_game_data(item.game_path)
+                    preloaded_count += 1
+                except Exception as error:
+                    skipped_count += 1
+                    logger.warning(
+                        f"[tag.warning]游戏预加载失败，已跳过该游戏[/tag.warning] "
+                        f"标题 [tag.count]{item.game_title}[/tag.count] "
+                        f"路径 [tag.path]{item.game_path}[/tag.path] "
+                        f"原因：{cls._format_exception_summary(error)}"
+                    )
 
             logger.info(
                 "[tag.phase]新编排器初始化完成[/tag.phase] "
-                f"已预加载 [tag.count]{len(game_database_manager.items)}[/tag.count] 个游戏"
+                f"成功预加载 [tag.count]{preloaded_count}[/tag.count] 个游戏，"
+                f"跳过 [tag.count]{skipped_count}[/tag.count] 个无效路径"
             )
             return handler
         except Exception:
@@ -605,10 +624,14 @@ class TranslationHandler:
                 game_data=game_data,
                 game_root=game_database_item.game_path,
             )
+            active_data_dir, origin_data_dir, _active_plugins_path, _origin_plugins_path = (
+                self._build_game_layout_paths(game_database_item.game_path)
+            )
             logger.success(
-                f"[tag.success]游戏文件已写回原始目录[/tag.success] "
+                f"[tag.success]激活版游戏文件已重建[/tag.success] "
                 f"游戏 [tag.count]{game_title}[/tag.count] "
-                f"路径 [tag.path]{game_database_item.game_path}[/tag.path]"
+                f"原件数据 [tag.path]{origin_data_dir}[/tag.path] "
+                f"激活数据 [tag.path]{active_data_dir}[/tag.path]"
             )
         except Exception:
             raise
@@ -1080,34 +1103,347 @@ class TranslationHandler:
     @staticmethod
     def _write_game_files(game_data: GameData, game_root: Path) -> None:
         """
-        把可写副本真正落盘到目标游戏目录。
+        基于原件重建新的激活版 `data/` 与 `plugins.js`。
 
         Args:
             game_data: 已完成回写修改的游戏数据对象。
             game_root: 当前游戏根目录。
         """
-        data_dir = game_root / "data"
-        js_dir = game_root / "js"
-        data_dir.mkdir(parents=True, exist_ok=True)
+        js_dir = game_root / JS_DIRECTORY_NAME
         js_dir.mkdir(parents=True, exist_ok=True)
+        (
+            active_data_dir,
+            origin_data_dir,
+            active_plugins_path,
+            origin_plugins_path,
+        ) = TranslationHandler._build_game_layout_paths(game_root)
+        has_origin_backup = TranslationHandler._validate_origin_backup_state(
+            origin_data_dir=origin_data_dir,
+            origin_plugins_path=origin_plugins_path,
+        )
+
+        staged_data_dir = Path(
+            tempfile.mkdtemp(prefix="write_back_data_", dir=game_root)
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            suffix=".js",
+            prefix="write_back_plugins_",
+            dir=js_dir,
+            delete=False,
+        ) as temp_plugins_file:
+            staged_plugins_path = Path(temp_plugins_file.name)
+
+        try:
+            if not has_origin_backup:
+                TranslationHandler._create_origin_backup(
+                    active_data_dir=active_data_dir,
+                    origin_data_dir=origin_data_dir,
+                    active_plugins_path=active_plugins_path,
+                    origin_plugins_path=origin_plugins_path,
+                )
+
+            TranslationHandler._stage_game_files(
+                game_data=game_data,
+                source_data_dir=origin_data_dir,
+                source_plugins_path=origin_plugins_path,
+                staged_data_dir=staged_data_dir,
+                staged_plugins_path=staged_plugins_path,
+            )
+
+            if has_origin_backup:
+                TranslationHandler._replace_active_layout(
+                    game_root=game_root,
+                    active_data_dir=active_data_dir,
+                    active_plugins_path=active_plugins_path,
+                    staged_data_dir=staged_data_dir,
+                    staged_plugins_path=staged_plugins_path,
+                )
+            else:
+                TranslationHandler._create_active_layout_from_stage(
+                    active_data_dir=active_data_dir,
+                    active_plugins_path=active_plugins_path,
+                    staged_data_dir=staged_data_dir,
+                    staged_plugins_path=staged_plugins_path,
+                )
+        except Exception:
+            if not has_origin_backup:
+                TranslationHandler._rollback_initial_backup_failure(
+                    active_data_dir=active_data_dir,
+                    origin_data_dir=origin_data_dir,
+                    active_plugins_path=active_plugins_path,
+                    origin_plugins_path=origin_plugins_path,
+                )
+            raise
+        finally:
+            TranslationHandler._cleanup_path(staged_data_dir)
+            TranslationHandler._cleanup_path(staged_plugins_path)
+
+    @staticmethod
+    def _stage_game_files(
+        game_data: GameData,
+        source_data_dir: Path,
+        source_plugins_path: Path,
+        staged_data_dir: Path,
+        staged_plugins_path: Path,
+    ) -> None:
+        """
+        基于原件生成一份可供切换的激活版临时目录。
+
+        Args:
+            game_data: 已完成内存回写的游戏数据对象。
+            source_data_dir: 本轮构建激活版所依赖的原件数据目录。
+            source_plugins_path: 本轮构建激活版所依赖的原件插件配置路径。
+            staged_data_dir: 临时激活版 `data/` 目录路径。
+            staged_plugins_path: 临时激活版 `plugins.js` 文件路径。
+        """
+        shutil.rmtree(staged_data_dir, ignore_errors=True)
+        shutil.copytree(source_data_dir, staged_data_dir)
+        shutil.copy2(source_plugins_path, staged_plugins_path)
 
         for file_name, data in game_data.writable_data.items():
             if file_name == PLUGINS_FILE_NAME:
-                plugins_path = js_dir / PLUGINS_FILE_NAME
-                if isinstance(data, str):
-                    plugins_path.write_text(data, encoding="utf-8")
-                else:
-                    plugins_path.write_text(
-                        json.dumps(data, ensure_ascii=False, indent=2),
-                        encoding="utf-8",
-                    )
+                TranslationHandler._write_plugins_file(
+                    plugins_path=staged_plugins_path,
+                    data=data,
+                )
                 continue
 
-            target_path = data_dir / file_name
+            target_path = staged_data_dir / file_name
             target_path.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+
+    @staticmethod
+    def _build_game_layout_paths(game_root: Path) -> tuple[Path, Path, Path, Path]:
+        """
+        构造当前游戏目录下激活版与原件备份的全部核心路径。
+
+        Args:
+            game_root: 游戏根目录。
+        Returns:
+            依次返回：激活数据目录、原件数据目录、激活插件配置、原件插件配置。
+        """
+        active_data_dir = game_root / DATA_DIRECTORY_NAME
+        origin_data_dir = game_root / DATA_ORIGIN_DIRECTORY_NAME
+        active_plugins_path = game_root / JS_DIRECTORY_NAME / PLUGINS_FILE_NAME
+        origin_plugins_path = game_root / JS_DIRECTORY_NAME / PLUGINS_ORIGIN_FILE_NAME
+        return (
+            active_data_dir,
+            origin_data_dir,
+            active_plugins_path,
+            origin_plugins_path,
+        )
+
+    @staticmethod
+    def _validate_origin_backup_state(
+        origin_data_dir: Path,
+        origin_plugins_path: Path,
+    ) -> bool:
+        """
+        校验原件备份是否处于一致状态。
+
+        Args:
+            origin_data_dir: 原件数据目录路径。
+            origin_plugins_path: 原件插件配置路径。
+
+        Returns:
+            两者同时存在时返回 `True`，两者同时不存在时返回 `False`。
+
+        Raises:
+            ValueError: 只存在其一时抛出。
+        """
+        has_origin_data_dir = origin_data_dir.exists()
+        has_origin_plugins_path = origin_plugins_path.exists()
+        if has_origin_data_dir != has_origin_plugins_path:
+            raise ValueError(
+                "检测到半成品翻译布局：`data_origin/` 与 `js/plugins_origin.js` 必须同时存在或同时不存在"
+            )
+        return has_origin_data_dir
+
+    @staticmethod
+    def _create_origin_backup(
+        active_data_dir: Path,
+        origin_data_dir: Path,
+        active_plugins_path: Path,
+        origin_plugins_path: Path,
+    ) -> None:
+        """
+        首次回写前，将当前激活版目录重命名为原件备份。
+
+        Args:
+            active_data_dir: 当前激活数据目录。
+            origin_data_dir: 目标原件数据目录。
+            active_plugins_path: 当前激活插件配置文件。
+            origin_plugins_path: 目标原件插件配置文件。
+        """
+        if not active_data_dir.exists():
+            raise FileNotFoundError(f"激活数据目录不存在: {active_data_dir}")
+        if not active_plugins_path.exists():
+            raise FileNotFoundError(f"激活插件配置文件不存在: {active_plugins_path}")
+
+        active_data_dir.rename(origin_data_dir)
+        try:
+            active_plugins_path.rename(origin_plugins_path)
+        except Exception:
+            origin_data_dir.rename(active_data_dir)
+            raise
+
+    @staticmethod
+    def _create_active_layout_from_stage(
+        active_data_dir: Path,
+        active_plugins_path: Path,
+        staged_data_dir: Path,
+        staged_plugins_path: Path,
+    ) -> None:
+        """
+        在首次备份完成后，把临时激活版写回默认运行路径。
+
+        Args:
+            active_data_dir: 当前激活数据目录。
+            active_plugins_path: 当前激活插件配置文件。
+            staged_data_dir: 已生成好的临时激活版 `data/` 目录。
+            staged_plugins_path: 已生成好的临时激活版 `plugins.js` 文件。
+        """
+        staged_data_dir.rename(active_data_dir)
+        try:
+            staged_plugins_path.replace(active_plugins_path)
+        except Exception:
+            shutil.rmtree(active_data_dir, ignore_errors=True)
+            raise
+
+    @staticmethod
+    def _replace_active_layout(
+        game_root: Path,
+        active_data_dir: Path,
+        active_plugins_path: Path,
+        staged_data_dir: Path,
+        staged_plugins_path: Path,
+    ) -> None:
+        """
+        在已翻译布局上重新生成新的激活版目录。
+
+        Args:
+            game_root: 游戏根目录。
+            active_data_dir: 当前激活数据目录。
+            active_plugins_path: 当前激活插件配置文件。
+            staged_data_dir: 已生成好的临时激活版 `data/` 目录。
+            staged_plugins_path: 已生成好的临时激活版 `plugins.js` 文件。
+        """
+        rollback_root = Path(
+            tempfile.mkdtemp(prefix="write_back_rollback_", dir=game_root)
+        )
+        rollback_data_dir = rollback_root / "data"
+        rollback_plugins_path = rollback_root / PLUGINS_FILE_NAME
+        data_swapped = False
+        plugins_swapped = False
+
+        try:
+            if active_data_dir.exists():
+                active_data_dir.rename(rollback_data_dir)
+
+            staged_data_dir.rename(active_data_dir)
+            data_swapped = True
+
+            if active_plugins_path.exists():
+                active_plugins_path.rename(rollback_plugins_path)
+
+            staged_plugins_path.replace(active_plugins_path)
+            plugins_swapped = True
+        except Exception:
+            if data_swapped and active_data_dir.exists():
+                shutil.rmtree(active_data_dir, ignore_errors=True)
+            if rollback_data_dir.exists():
+                rollback_data_dir.rename(active_data_dir)
+
+            if plugins_swapped and active_plugins_path.exists():
+                active_plugins_path.unlink()
+            if rollback_plugins_path.exists():
+                rollback_plugins_path.rename(active_plugins_path)
+            raise
+        finally:
+            shutil.rmtree(rollback_root, ignore_errors=True)
+
+    @staticmethod
+    def _rollback_initial_backup_failure(
+        active_data_dir: Path,
+        origin_data_dir: Path,
+        active_plugins_path: Path,
+        origin_plugins_path: Path,
+    ) -> None:
+        """
+        首次回写失败后，把原件备份恢复回默认运行路径。
+
+        Args:
+            active_data_dir: 当前激活数据目录。
+            origin_data_dir: 原件数据目录。
+            active_plugins_path: 当前激活插件配置文件。
+            origin_plugins_path: 原件插件配置文件。
+        """
+        if active_data_dir.exists():
+            shutil.rmtree(active_data_dir, ignore_errors=True)
+        if active_plugins_path.exists():
+            active_plugins_path.unlink()
+
+        if origin_data_dir.exists():
+            origin_data_dir.rename(active_data_dir)
+        if origin_plugins_path.exists():
+            origin_plugins_path.rename(active_plugins_path)
+
+    @staticmethod
+    def _write_plugins_file(plugins_path: Path, data: object) -> None:
+        """
+        将插件配置文本写入目标文件。
+
+        Args:
+            plugins_path: 目标 `plugins.js` 路径。
+            data: 已序列化的 JS 文本，或仍为普通 JSON 对象的兜底内容。
+        """
+        if isinstance(data, str):
+            plugins_path.write_text(data, encoding="utf-8")
+            return
+
+        plugins_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _cleanup_path(target_path: Path) -> None:
+        """
+        清理临时目录或临时文件。
+
+        Args:
+            target_path: 待清理的路径。
+        """
+        if target_path.is_dir():
+            shutil.rmtree(target_path, ignore_errors=True)
+        elif target_path.exists():
+            target_path.unlink()
+
+    @staticmethod
+    def _format_exception_summary(error: Exception) -> str:
+        """
+        将异常压缩为适合日志首行展示的稳定摘要。
+
+        Args:
+            error: 当前捕获到的异常对象。
+
+        Returns:
+            `异常类型: 异常信息` 形式的简短摘要；若异常消息为空则仅返回类型名。
+        """
+        current_error: BaseException = error
+        while isinstance(current_error, BaseExceptionGroup):
+            if not current_error.exceptions:
+                break
+            current_error = current_error.exceptions[0]
+
+        message = str(current_error).strip()
+        if message:
+            return f"{type(current_error).__name__}: {message}"
+        return type(current_error).__name__
 
 
 __all__: list[str] = ["TranslationHandler"]

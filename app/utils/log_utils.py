@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import traceback
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -28,7 +29,7 @@ from rich.theme import Theme
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from loguru import Message
+    from loguru import Message, Record
 
 # --- 配置常量 ---
 LOG_LEVEL = "DEBUG"
@@ -193,6 +194,78 @@ def strip_markup(message: str) -> str:
         return message
 
 
+def format_record_exception(exception: object | None) -> str:
+    """
+    把 Loguru 记录中的异常对象格式化为完整 traceback 文本。
+
+    为什么需要单独格式化：
+    `record["message"]` 只包含显式传入的日志正文，不会天然带上异常堆栈。
+    如果界面层和文件日志都只消费 message，最终只能看到“任务失败”这一句，
+    无法定位真实出错位置。
+
+    Args:
+        exception: Loguru 记录中的异常对象，通常带有类型、值和 traceback 属性。
+
+    Returns:
+        可直接拼接到日志正文后的完整异常文本；没有异常时返回空字符串。
+    """
+    if exception is None:
+        return ""
+
+    exception_type = getattr(exception, "type", None)
+    exception_value = getattr(exception, "value", None)
+    exception_traceback = getattr(exception, "traceback", None)
+    if (
+        exception_type is None
+        or exception_value is None
+        or exception_traceback is None
+    ):
+        return str(exception).strip()
+
+    return "".join(
+        traceback.format_exception(
+            exception_type,
+            exception_value,
+            exception_traceback,
+        )
+    ).rstrip()
+
+
+def append_exception_text(message: str, exception_text: str) -> str:
+    """
+    在日志正文后追加异常文本，同时避免无异常时引入多余空行。
+
+    Args:
+        message: 原始日志正文。
+        exception_text: 已格式化好的异常堆栈文本。
+
+    Returns:
+        拼接后的最终日志文本。
+    """
+    if not exception_text:
+        return message
+    return f"{message}\n{exception_text}"
+
+
+def build_sink_format(record: Record) -> str:
+    """
+    为 Loguru sink 构造格式字符串。
+
+    为什么使用可调用格式器：
+    只有在当前记录确实携带异常时，才显式追加 `{exception}`，
+    这样既能保留 traceback，又不会让普通日志多出空白行。
+
+    Args:
+        record: Loguru 传入的单条日志记录字典。
+
+    Returns:
+        当前日志记录对应的格式字符串。
+    """
+    if record["exception"] is None:
+        return LOG_FORMAT
+    return f"{LOG_FORMAT}\n{{exception}}"
+
+
 def build_log_line(message: Message) -> LogLine:
     """
     把 Loguru 消息对象转换为结构化日志对象。
@@ -206,8 +279,12 @@ def build_log_line(message: Message) -> LogLine:
     record = message.record
     timestamp = record["time"].strftime("%Y-%m-%d %H:%M:%S")
     level = record["level"].name
-    raw_message = record["message"]
-    plain_message = strip_markup(raw_message)
+    exception_text = format_record_exception(record["exception"])
+    raw_message = append_exception_text(record["message"], exception_text)
+    plain_message = append_exception_text(
+        strip_markup(record["message"]),
+        exception_text,
+    )
     plain_text = f"[{timestamp}] {level:<8} {plain_message}"
     return LogLine(
         timestamp=timestamp,
@@ -258,7 +335,7 @@ def setup_logger(
                 ],
             ),
             level=level,
-            format="{message}",
+            format=build_sink_format,
             catch=True,
         )
 
@@ -266,7 +343,7 @@ def setup_logger(
         logger.add(
             LOG_FILE_PATH,
             level=LOG_FILE_LEVEL,
-            format=LOG_FORMAT,
+            format=build_sink_format,
             rotation=LOG_ROTATION,
             retention=LOG_RETENTION,
             compression=LOG_COMPRESSION,
@@ -280,7 +357,7 @@ def setup_logger(
         logger.add(
             UILogSink(ui_log_callbacks),
             level=level,
-            format="{message}",
+            format=build_sink_format,
             catch=True,
         )
 
@@ -320,8 +397,11 @@ setup_logger()
 
 __all__ = [
     "LogLine",
+    "append_exception_text",
     "build_log_line",
+    "build_sink_format",
     "console",
+    "format_record_exception",
     "get_progress",
     "logger",
     "setup_logger",

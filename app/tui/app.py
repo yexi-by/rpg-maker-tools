@@ -27,6 +27,7 @@ from textual.widgets import (
     Button,
     ContentSwitcher,
     Footer,
+    Header,
     Input,
     Label,
     ListItem,
@@ -300,30 +301,6 @@ SETTING_CARDS: tuple[SettingCardSpec, ...] = (
 )
 
 
-def _chunk_setting_cards(
-    cards: tuple[SettingCardSpec, ...],
-    chunk_size: int,
-) -> tuple[tuple[SettingCardSpec, ...], ...]:
-    """
-    按固定尺寸把配置卡片切成若干页。
-
-    Args:
-        cards: 全部配置卡片定义。
-        chunk_size: 每页卡片数量。
-
-    Returns:
-        按页分组后的卡片元组。
-    """
-    return tuple(
-        cards[index : index + chunk_size]
-        for index in range(0, len(cards), chunk_size)
-    )
-
-
-SETTINGS_PAGES: tuple[tuple[SettingCardSpec, ...], ...] = _chunk_setting_cards(
-    SETTING_CARDS,
-    3,
-)
 
 
 def _iter_setting_fields() -> tuple[SettingFieldSpec, ...]:
@@ -347,31 +324,6 @@ ALL_SETTING_FIELDS: tuple[SettingFieldSpec, ...] = _iter_setting_fields()
 class AddGamePathScreen(ModalScreen[str | None]):
     """
     添加游戏路径输入弹窗。
-    """
-
-    CSS = """
-    AddGamePathScreen {
-        align: center middle;
-        background: $background 70%;
-    }
-
-    #dialog {
-        width: 72;
-        height: auto;
-        padding: 1 2;
-        border: round $panel;
-        background: $surface;
-    }
-
-    #dialog-title {
-        margin-bottom: 1;
-        text-style: bold;
-    }
-
-    #dialog-actions {
-        height: auto;
-        margin-top: 1;
-    }
     """
 
     BINDINGS = [("escape", "cancel", "关闭")]
@@ -429,186 +381,23 @@ class AddGamePathScreen(ModalScreen[str | None]):
         self.dismiss(game_path)
 
 
+class HomeDashboard(Vertical):
+    """
+    首页容器面板，自带特定的快捷键绑定。
+    """
+
+    BINDINGS = [
+        Binding("g", "app.add_game", "添加游戏"),
+        Binding("s", "app.open_settings", "设置"),
+    ]
+
+
 class TranslationWorkbenchApp(App[None]):
     """
     翻译工作台应用。
     """
 
-    CSS = """
-    Screen {
-        layout: vertical;
-        background: $background;
-    }
-
-    #page-header {
-        height: auto;
-        padding: 1 2;
-        border-bottom: solid $panel;
-        background: $surface;
-    }
-
-    #page-title {
-        text-style: bold;
-    }
-
-    #page-status {
-        margin-top: 1;
-        color: $text-muted;
-    }
-
-    #view-switcher {
-        height: 1fr;
-        padding: 1;
-    }
-
-    #home-view,
-    #settings-view,
-    #actions-view {
-        height: 1fr;
-    }
-
-    #home-command-bar {
-        height: auto;
-        padding: 1;
-        margin-bottom: 1;
-        border: round $panel;
-        background: $surface;
-    }
-
-    .command-button {
-        width: 20;
-        margin-right: 1;
-    }
-
-    #home-main-row,
-    #actions-main-row {
-        height: 1fr;
-    }
-
-    #home-list-panel,
-    #home-log-panel,
-    #actions-sidebar,
-    #actions-task-panel,
-    #actions-log-panel,
-    .settings-card,
-    .settings-log-panel,
-    .settings-placeholder {
-        padding: 1;
-        border: round $panel;
-        background: $surface;
-    }
-
-    #home-list-panel {
-        width: 1fr;
-        margin-right: 1;
-    }
-
-    #home-log-panel {
-        width: 1fr;
-    }
-
-    .section-title {
-        margin-bottom: 1;
-        text-style: bold;
-    }
-
-    .section-subtitle {
-        margin-top: 1;
-        margin-bottom: 1;
-        color: $text-muted;
-        text-style: bold;
-    }
-
-    #game-list,
-    #action-list {
-        height: 1fr;
-        border: round $panel-lighten-1;
-    }
-
-    #actions-sidebar {
-        width: 28;
-        margin-right: 1;
-    }
-
-    #actions-back-button {
-        margin-top: 1;
-    }
-
-    #actions-workspace {
-        width: 1fr;
-    }
-
-    #actions-task-panel {
-        height: auto;
-        margin-bottom: 1;
-    }
-
-    #task-title {
-        text-style: bold;
-    }
-
-    #task-phase,
-    #task-status,
-    #task-detail {
-        margin-top: 1;
-        color: $text-muted;
-    }
-
-    #task-progress {
-        margin-top: 1;
-    }
-
-    #settings-note {
-        height: auto;
-        margin-bottom: 1;
-        padding: 0 1;
-        color: $text-muted;
-    }
-
-    #settings-page-switcher {
-        height: 1fr;
-    }
-
-    .settings-page {
-        layout: grid;
-        grid-size: 2 2;
-        grid-columns: 1fr 1fr;
-        grid-rows: 1fr 1fr;
-        grid-gutter: 1 1;
-        height: 1fr;
-    }
-
-    .settings-card,
-    .settings-log-panel,
-    .settings-placeholder {
-        height: 1fr;
-    }
-
-    .settings-field-block {
-        height: auto;
-        margin-bottom: 1;
-    }
-
-    .settings-field-title {
-        text-style: bold;
-    }
-
-    .settings-field-desc {
-        color: $text-muted;
-    }
-
-    .setting-input,
-    .setting-select {
-        width: 1fr;
-        margin-top: 1;
-        margin-bottom: 1;
-    }
-
-    .shared-log-output {
-        height: 1fr;
-        border: round $panel-lighten-1;
-    }
-    """
+    CSS_PATH = "styles.tcss"
 
     BINDINGS = [
         Binding("up", "move_up", "上移"),
@@ -617,10 +406,6 @@ class TranslationWorkbenchApp(App[None]):
         Binding("tab", "focus_next", "下一项"),
         Binding("shift+tab", "focus_previous", "上一项"),
         Binding("escape", "go_back", "返回"),
-        Binding("g", "add_game", "添加游戏"),
-        Binding("s", "open_settings", "设置"),
-        Binding("ctrl+left", "previous_settings_page", "设置上一页"),
-        Binding("ctrl+right", "next_settings_page", "设置下一页"),
         Binding("l", "focus_logs", "日志"),
         Binding("q", "request_quit", "退出"),
     ]
@@ -649,7 +434,6 @@ class TranslationWorkbenchApp(App[None]):
         self.task_phase_text: str = "游戏：未选择"
         self.task_status_text: str = "状态：请选择功能"
         self.task_detail_text: str = "细节：使用上下键选择功能，Enter 执行，Esc 返回"
-        self.settings_page_index: int = 0
         self.settings_dirty_fields: set[str] = set()
         self.settings_error_text: str = ""
         self.settings_success_text: str = ""
@@ -665,109 +449,70 @@ class TranslationWorkbenchApp(App[None]):
         self._secret_widget_ids: set[str] = {
             spec.widget_id for spec in ALL_SETTING_FIELDS if spec.secret
         }
-        self._all_log_widget_ids: tuple[str, ...] = (
-            "home-log-output",
-            "actions-log-output",
-            *tuple(
-                f"settings-log-output-{page_index}"
-                for page_index in range(len(SETTINGS_PAGES))
-            ),
-        )
 
     def compose(self) -> ComposeResult:
         """
         组装主界面。
         """
-        with Vertical(id="page-header"):
-            yield Static("选择游戏", id="page-title")
-            yield Static("", id="page-status")
+        yield Header(show_clock=True)
 
-        with ContentSwitcher(initial="home-view", id="view-switcher"):
-            with Vertical(id="home-view"):
-                with Horizontal(id="home-command-bar"):
-                    yield Button("添加游戏", id="action-add-game", classes="command-button")
-                    yield Button("设置", id="action-open-settings", classes="command-button")
+        with Horizontal():
+            with Vertical(id="left-pane"):
+                with ContentSwitcher(initial="home-view", id="view-switcher"):
+                    with HomeDashboard(id="home-view"):
+                        with Horizontal(id="home-command-bar"):
+                            yield Button("添加游戏", id="action-add-game", classes="command-button")
+                            yield Button("设置", id="action-open-settings", classes="command-button")
 
-                with Horizontal(id="home-main-row"):
-                    with Vertical(id="home-list-panel"):
-                        yield Static("游戏列表", classes="section-title")
-                        yield ListView(id="game-list")
+                        with Horizontal(id="home-main-row"):
+                            with Vertical(id="home-list-panel"):
+                                yield Static("游戏列表", classes="section-title")
+                                yield ListView(id="game-list")
 
-                    with Vertical(id="home-log-panel"):
-                        yield Static("实时日志", classes="section-title")
-                        yield RichLog(id="home-log-output", classes="shared-log-output")
+                    with Vertical(id="settings-view"):
+                        with Horizontal(id="settings-header-bar"):
+                            yield Static("", id="settings-note")
+                            yield Button("返回首页", id="settings-back-button", variant="primary")
+                        with VerticalScroll(id="settings-scroll"):
+                            for card_index, card_spec in enumerate(SETTING_CARDS):
+                                yield self._build_setting_card(card_spec, card_index)
 
-            with Vertical(id="settings-view"):
-                yield Static("", id="settings-note")
-                with ContentSwitcher(initial="settings-page-0", id="settings-page-switcher"):
-                    for page_index, card_group in enumerate(SETTINGS_PAGES):
-                        with Grid(
-                            id=f"settings-page-{page_index}",
-                            classes="settings-page",
-                        ):
-                            for card_index in range(3):
-                                if card_index < len(card_group):
-                                    yield self._build_setting_card(
-                                        card_group[card_index],
-                                        page_index,
-                                        card_index,
+                    with Vertical(id="actions-view"):
+                        with Horizontal(id="actions-main-row"):
+                            with Vertical(id="actions-sidebar"):
+                                yield Static("翻译功能", classes="section-title")
+                                with Vertical(id="action-button-group"):
+                                    yield Button("构建术语", id="btn-build_glossary", classes="action-btn")
+                                    yield Button("正文翻译", id="btn-translate_text", classes="action-btn")
+                                    yield Button("错误重翻", id="btn-retry_error_table", classes="action-btn")
+                                    yield Button("回写数据", id="btn-write_back", classes="action-btn")
+                                yield Static("", classes="sidebar-spacer")
+                                yield Button("返回首页", id="actions-back-button", variant="error")
+
+                            with Vertical(id="actions-workspace"):
+                                with Vertical(id="actions-task-panel"):
+                                    yield Static(self.task_title_text, id="task-title")
+                                    yield Static(self.task_phase_text, id="task-phase")
+                                    yield Static(self.task_status_text, id="task-status")
+                                    yield Static(self.task_detail_text, id="task-detail")
+                                    yield ProgressBar(
+                                        total=1,
+                                        show_eta=True,
+                                        show_percentage=True,
+                                        id="task-progress",
                                     )
-                                else:
-                                    yield Static(
-                                        "当前页面没有更多配置块。",
-                                        classes="settings-placeholder",
-                                    )
 
-                            with Vertical(
-                                id=f"settings-log-panel-{page_index}",
-                                classes="settings-log-panel",
-                            ):
-                                yield Static("实时日志", classes="section-title")
-                                yield RichLog(
-                                    id=f"settings-log-output-{page_index}",
-                                    classes="shared-log-output",
-                                )
-
-            with Vertical(id="actions-view"):
-                with Horizontal(id="actions-main-row"):
-                    with Vertical(id="actions-sidebar"):
-                        yield Static("翻译功能", classes="section-title")
-                        yield ListView(
-                            ListItem(Label("构建术语"), name="build_glossary"),
-                            ListItem(Label("正文翻译"), name="translate_text"),
-                            ListItem(Label("错误重翻"), name="retry_error_table"),
-                            ListItem(Label("回写"), name="write_back"),
-                            id="action-list",
-                        )
-                        yield Button("返回首页", id="actions-back-button")
-
-                    with Vertical(id="actions-workspace"):
-                        with Vertical(id="actions-task-panel"):
-                            yield Static(self.task_title_text, id="task-title")
-                            yield Static(self.task_phase_text, id="task-phase")
-                            yield Static(self.task_status_text, id="task-status")
-                            yield Static(self.task_detail_text, id="task-detail")
-                            yield ProgressBar(
-                                total=1,
-                                show_eta=False,
-                                id="task-progress",
-                            )
-
-                        with Vertical(id="actions-log-panel"):
-                            yield Static("实时日志", classes="section-title")
-                            yield RichLog(
-                                id="actions-log-output",
-                                classes="shared-log-output",
-                            )
+            with Vertical(id="right-pane"):
+                yield Static("全局后台日志", id="global-log-title")
+                yield RichLog(id="global-log-output")
 
         yield Footer(compact=True)
 
     def _build_setting_card(
         self,
         card_spec: SettingCardSpec,
-        page_index: int,
         card_index: int,
-    ) -> VerticalScroll:
+    ) -> Vertical:
         """
         构造单张设置卡片。
         """
@@ -775,8 +520,9 @@ class TranslationWorkbenchApp(App[None]):
 
         for section in card_spec.sections:
             children.append(Static(section.title, classes="section-subtitle"))
+            grid_children = []
             for field_spec in section.fields:
-                children.append(
+                grid_children.append(
                     Vertical(
                         Static(
                             self._get_schema_field_title(field_spec.path),
@@ -790,10 +536,11 @@ class TranslationWorkbenchApp(App[None]):
                         classes="settings-field-block",
                     )
                 )
+            children.append(Grid(*grid_children, classes="settings-fields-grid"))
 
-        return VerticalScroll(
+        return Vertical(
             *children,
-            id=f"settings-card-{page_index}-{card_index}",
+            id=f"settings-card-{card_index}",
             classes="settings-card",
         )
 
@@ -824,8 +571,11 @@ class TranslationWorkbenchApp(App[None]):
 
         try:
             self.handler = await self._handler_factory()
-        except Exception:
-            logger.exception("[tag.exception]工作台初始化失败[/tag.exception]")
+        except Exception as error:
+            logger.exception(
+                f"[tag.exception]工作台初始化失败[/tag.exception]："
+                f"{self._format_exception_summary(error)}"
+            )
             self.home_status_text = "编排器初始化失败，请查看日志。"
 
         self._reload_setting_document()
@@ -846,7 +596,7 @@ class TranslationWorkbenchApp(App[None]):
 
     def action_move_up(self) -> None:
         """
-        在首页或二级翻译页中向上移动列表高亮。
+        在首页中向上移动列表高亮。
         """
         if self.current_view == "home":
             game_list = self.query_one("#game-list", ListView)
@@ -854,27 +604,15 @@ class TranslationWorkbenchApp(App[None]):
             game_list.action_cursor_up()
             return
 
-        if self.current_view == "actions":
-            action_list = self.query_one("#action-list", ListView)
-            if not action_list.disabled:
-                action_list.focus()
-                action_list.action_cursor_up()
-
     def action_move_down(self) -> None:
         """
-        在首页或二级翻译页中向下移动列表高亮。
+        在首页中向下移动列表高亮。
         """
         if self.current_view == "home":
             game_list = self.query_one("#game-list", ListView)
             game_list.focus()
             game_list.action_cursor_down()
             return
-
-        if self.current_view == "actions":
-            action_list = self.query_one("#action-list", ListView)
-            if not action_list.disabled:
-                action_list.focus()
-                action_list.action_cursor_down()
 
     def action_activate_current(self) -> None:
         """
@@ -926,35 +664,11 @@ class TranslationWorkbenchApp(App[None]):
             return
         self._switch_to_settings_view()
 
-    def action_previous_settings_page(self) -> None:
-        """
-        切换到上一页设置卡片。
-        """
-        if self.current_view != "settings":
-            return
-        if self.settings_page_index <= 0:
-            self.bell()
-            return
-        self.settings_page_index -= 1
-        self._refresh_settings_page()
-
-    def action_next_settings_page(self) -> None:
-        """
-        切换到下一页设置卡片。
-        """
-        if self.current_view != "settings":
-            return
-        if self.settings_page_index >= len(SETTINGS_PAGES) - 1:
-            self.bell()
-            return
-        self.settings_page_index += 1
-        self._refresh_settings_page()
-
     def action_focus_logs(self) -> None:
         """
-        聚焦当前页面对应的日志窗口。
+        聚焦全局日志窗口。
         """
-        self.query_one(f"#{self._current_log_widget_id()}", RichLog).focus()
+        self.query_one("#global-log-output", RichLog).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """
@@ -974,6 +688,16 @@ class TranslationWorkbenchApp(App[None]):
 
         if button_id == "actions-back-button":
             self.action_go_back()
+            return
+            
+        if button_id == "settings-back-button":
+            self.action_go_back()
+            return
+
+        if button_id and button_id.startswith("btn-"):
+            action_id = button_id[4:]
+            self.selected_action_id = action_id
+            self._run_selected_action()
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
         """
@@ -991,12 +715,6 @@ class TranslationWorkbenchApp(App[None]):
             self._refresh_header()
             return
 
-        if event.list_view.id == "action-list":
-            item = event.item
-            if item is None or item.name is None:
-                return
-            self.selected_action_id = item.name
-
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """
         回车执行当前高亮项的默认动作。
@@ -1007,9 +725,6 @@ class TranslationWorkbenchApp(App[None]):
         if event.list_view.id == "game-list":
             self._open_selected_game()
             return
-
-        if event.list_view.id == "action-list":
-            self._run_selected_action()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         """
@@ -1111,8 +826,8 @@ class TranslationWorkbenchApp(App[None]):
         self.current_view = "settings"
         self._reload_setting_document()
         self._refresh_settings_inputs()
-        self._refresh_settings_page()
         self.query_one("#view-switcher", ContentSwitcher).current = "settings-view"
+        self._refresh_settings_note()
         self._refresh_header()
         self._focus_first_setting_widget()
 
@@ -1126,16 +841,14 @@ class TranslationWorkbenchApp(App[None]):
         self._refresh_action_list()
         self._refresh_action_panel()
         self._refresh_header()
-        self.query_one("#action-list", ListView).focus()
+        self.query_one("#btn-build_glossary", Button).focus()
 
     def _refresh_header(self) -> None:
         """
-        根据当前视图刷新标题栏文本。
+        根据当前视图刷新应用标题与副标题。
         """
-        title_widget = self.query_one("#page-title", Static)
-        status_widget = self.query_one("#page-status", Static)
-        title_widget.update(self._build_page_title())
-        status_widget.update(self._build_page_status())
+        self.title = self._build_page_title()
+        self.sub_title = self._build_page_status()
 
     def _build_page_title(self) -> str:
         """
@@ -1158,10 +871,7 @@ class TranslationWorkbenchApp(App[None]):
                 return "当前字段存在未保存或格式错误内容，文件已保留最后一次合法值。"
             if self.settings_success_text:
                 return self.settings_success_text
-            return (
-                f"当前第 {self.settings_page_index + 1}/{len(SETTINGS_PAGES)} 页，"
-                "Tab 切字段，Ctrl+左右翻页。"
-            )
+            return "Tab 切换字段，滚动页面浏览所有设置项。"
 
         if self.current_view == "actions":
             return self.task_status_text
@@ -1179,7 +889,7 @@ class TranslationWorkbenchApp(App[None]):
         add_button.disabled = disabled
         settings_button.disabled = self.task_running
         if self.handler is not None and not self.home_status_text.startswith("已添加游戏："):
-            game_count = len(self.handler.game_database_manager.items)
+            game_count = len(self.handler.game_data_manager.items)
             self.home_status_text = (
                 f"当前已载入 {game_count} 个游戏，方向键选择，Enter 进入。"
             )
@@ -1196,21 +906,17 @@ class TranslationWorkbenchApp(App[None]):
             self.selected_game_title = None
             return
 
-        database_items = sorted(
-            self.handler.game_database_manager.items.values(),
-            key=lambda item: item.game_title,
-        )
-        if not database_items:
+        available_titles = sorted(self.handler.game_data_manager.items)
+        if not available_titles:
             self.selected_game_title = None
             game_list.disabled = self.task_running
             return
 
         game_list.extend(
-            ListItem(Label(item.game_title), name=item.game_title)
-            for item in database_items
+            ListItem(Label(game_title), name=game_title)
+            for game_title in available_titles
         )
 
-        available_titles = [item.game_title for item in database_items]
         if self.selected_game_title not in available_titles:
             self.selected_game_title = available_titles[0]
 
@@ -1219,20 +925,11 @@ class TranslationWorkbenchApp(App[None]):
 
     def _refresh_action_list(self) -> None:
         """
-        刷新二级翻译页功能列表状态。
+        刷新二级翻译页功能按钮状态。
         """
-        action_list = self.query_one("#action-list", ListView)
-        action_list.disabled = self.task_running
-
-        action_names = [
-            item.name
-            for item in action_list.query(ListItem)
-            if item.name is not None
-        ]
-        if self.selected_action_id not in action_names and action_names:
-            self.selected_action_id = action_names[0]
-        if self.selected_action_id in action_names:
-            action_list.index = action_names.index(self.selected_action_id)
+        for btn in self.query(".action-btn"):
+            if isinstance(btn, Button):
+                btn.disabled = self.task_running
 
         self.query_one("#actions-back-button", Button).disabled = self.task_running
 
@@ -1249,16 +946,6 @@ class TranslationWorkbenchApp(App[None]):
         total = max(self.progress_total, 1)
         current = min(self.progress_current, total)
         progress.update(total=total, progress=current)
-
-    def _refresh_settings_page(self) -> None:
-        """
-        刷新设置页分页状态。
-        """
-        self.query_one("#settings-page-switcher", ContentSwitcher).current = (
-            f"settings-page-{self.settings_page_index}"
-        )
-        self._refresh_settings_note()
-        self._refresh_header()
 
     def _refresh_settings_note(self) -> None:
         """
@@ -1279,9 +966,8 @@ class TranslationWorkbenchApp(App[None]):
 
         note_widget.update(
             (
-                f"共 {len(SETTING_CARDS)} 个配置块，当前第 {self.settings_page_index + 1}/"
-                f"{len(SETTINGS_PAGES)} 页。"
-                "Tab 切换字段，Ctrl+左右切页，Esc 返回首页。"
+                f"共 {len(SETTING_CARDS)} 个配置块。"
+                "Tab 切换字段，上下滚动浏览，Esc 返回首页。"
             )
         )
 
@@ -1295,10 +981,13 @@ class TranslationWorkbenchApp(App[None]):
             self.settings_error_text = ""
             self.settings_success_text = "已载入当前 setting.toml 配置。"
         except Exception as error:
+            error_summary = self._format_exception_summary(error)
             self._setting_document = None
-            self.settings_error_text = f"配置读取失败：{error}"
+            self.settings_error_text = f"配置读取失败：{error_summary}"
             self.settings_success_text = ""
-            logger.exception("[tag.exception]设置文件读取失败[/tag.exception]")
+            logger.exception(
+                f"[tag.exception]设置文件读取失败[/tag.exception]：{error_summary}"
+            )
 
     def _refresh_settings_inputs(self) -> None:
         """
@@ -1421,8 +1110,11 @@ class TranslationWorkbenchApp(App[None]):
             self._ui_queue.put(("reload_games", game_title))
             self._ui_queue.put(("home_status", f"已添加游戏：{game_title}"))
         except Exception as error:
-            logger.exception("[tag.exception]添加游戏任务失败[/tag.exception]")
-            self._ui_queue.put(("home_status", f"添加游戏失败：{error}"))
+            error_summary = self._format_exception_summary(error)
+            logger.exception(
+                f"[tag.exception]添加游戏任务失败[/tag.exception]：{error_summary}"
+            )
+            self._ui_queue.put(("home_status", f"添加游戏失败：{error_summary}"))
         finally:
             self._ui_queue.put(("task_done",))
 
@@ -1442,8 +1134,11 @@ class TranslationWorkbenchApp(App[None]):
             )
             self._ui_queue.put(("finished", "术语构建完成"))
         except Exception as error:
-            logger.exception("[tag.exception]术语构建任务失败[/tag.exception]")
-            self._ui_queue.put(("finished", f"术语构建失败：{error}"))
+            error_summary = self._format_exception_summary(error)
+            logger.exception(
+                f"[tag.exception]术语构建任务失败[/tag.exception]：{error_summary}"
+            )
+            self._ui_queue.put(("finished", f"术语构建失败：{error_summary}"))
 
     async def _run_translate_text_task(self, game_title: str) -> None:
         """
@@ -1465,8 +1160,11 @@ class TranslationWorkbenchApp(App[None]):
             )
             self._ui_queue.put(("finished", "正文翻译完成"))
         except Exception as error:
-            logger.exception("[tag.exception]正文翻译任务失败[/tag.exception]")
-            self._ui_queue.put(("finished", f"正文翻译失败：{error}"))
+            error_summary = self._format_exception_summary(error)
+            logger.exception(
+                f"[tag.exception]正文翻译任务失败[/tag.exception]：{error_summary}"
+            )
+            self._ui_queue.put(("finished", f"正文翻译失败：{error_summary}"))
 
     async def _run_retry_error_table_task(self, game_title: str) -> None:
         """
@@ -1488,8 +1186,11 @@ class TranslationWorkbenchApp(App[None]):
             )
             self._ui_queue.put(("finished", "错误重翻完成"))
         except Exception as error:
-            logger.exception("[tag.exception]错误重翻任务失败[/tag.exception]")
-            self._ui_queue.put(("finished", f"错误重翻失败：{error}"))
+            error_summary = self._format_exception_summary(error)
+            logger.exception(
+                f"[tag.exception]错误重翻任务失败[/tag.exception]：{error_summary}"
+            )
+            self._ui_queue.put(("finished", f"错误重翻失败：{error_summary}"))
 
     async def _run_write_back_task(self, game_title: str) -> None:
         """
@@ -1507,8 +1208,11 @@ class TranslationWorkbenchApp(App[None]):
             )
             self._ui_queue.put(("finished", "回写完成"))
         except Exception as error:
-            logger.exception("[tag.exception]回写任务失败[/tag.exception]")
-            self._ui_queue.put(("finished", f"回写失败：{error}"))
+            error_summary = self._format_exception_summary(error)
+            logger.exception(
+                f"[tag.exception]回写任务失败[/tag.exception]：{error_summary}"
+            )
+            self._ui_queue.put(("finished", f"回写失败：{error_summary}"))
 
     def _try_save_setting(self, field_spec: SettingFieldSpec, raw_value: str) -> None:
         """
@@ -1712,7 +1416,7 @@ class TranslationWorkbenchApp(App[None]):
 
     def _drain_log_queue(self) -> None:
         """
-        批量处理日志队列，并同步写入所有页面的日志窗口。
+        批量处理日志队列，并写入全局日志窗口。
         """
         while True:
             try:
@@ -1721,9 +1425,11 @@ class TranslationWorkbenchApp(App[None]):
                 break
 
             self.log_history.append(log_line)
-            for widget_id in self._all_log_widget_ids:
-                log_output = self.query_one(f"#{widget_id}", RichLog)
+            try:
+                log_output = self.query_one("#global-log-output", RichLog)
                 self._write_log_line(log_output, log_line)
+            except Exception:
+                pass
 
     def _reset_task_panel(self, game_title: str) -> None:
         """
@@ -1758,30 +1464,62 @@ class TranslationWorkbenchApp(App[None]):
             f"状态：处理中 {self.progress_current}/{self.progress_total}"
         )
 
-    def _current_log_widget_id(self) -> str:
+    @staticmethod
+    def _format_exception_summary(error: Exception) -> str:
         """
-        返回当前页面对应的日志控件标识。
+        生成适合界面与日志首行展示的异常摘要。
+
+        为什么不直接使用 `str(error)`：
+        某些异常的字符串结果为空，界面上会退化成“任务失败：”这一类无效提示。
+        同时要主动展开 `ExceptionGroup`，否则并发任务失败时界面只会看到
+        一层外壳类型，真正的底层原因会被埋在长堆栈里。
+
+        Args:
+            error: 当前捕获到的异常对象。
+
+        Returns:
+            `异常类型: 异常信息` 形式的稳定摘要；若异常消息为空则仅返回类型名。
         """
-        if self.current_view == "settings":
-            return f"settings-log-output-{self.settings_page_index}"
-        if self.current_view == "actions":
-            return "actions-log-output"
-        return "home-log-output"
+        current_error: BaseException = error
+        while isinstance(current_error, BaseExceptionGroup):
+            if not current_error.exceptions:
+                break
+            current_error = current_error.exceptions[0]
+
+        detail = str(current_error).strip()
+        if detail:
+            return f"{type(current_error).__name__}: {detail}"
+        return type(current_error).__name__
 
     @staticmethod
     def _write_log_line(log_output: RichLog, log_line: LogLine) -> None:
         """
-        按日志级别写入一条日志。
+        按日志级别写入一条日志，使用 Rich markup 还原终端色彩。
         """
-        style = {
-            "DEBUG": "dim",
-            "INFO": "cyan",
-            "SUCCESS": "green",
-            "WARNING": "yellow",
-            "ERROR": "bold red",
-            "CRITICAL": "bold white on red",
-        }.get(log_line.level.upper(), "white")
-        log_output.write(Text(log_line.plain_text, style=style))
+        # 尝试将 loguru 的原始带 markup 的 message 重新格式化为终端行
+        # 我们使用 Text.from_markup() 来保留 <cyan> 等标签
+        try:
+            timestamp_text = f"[{log_line.timestamp}] "
+            level_text = f"{log_line.level:<8} "
+            
+            # 对日志级别上色以增强可读性
+            level_style = {
+                "DEBUG": "dim",
+                "INFO": "cyan",
+                "SUCCESS": "bold green",
+                "WARNING": "bold yellow",
+                "ERROR": "bold red",
+                "CRITICAL": "bold white on red",
+            }.get(log_line.level.upper(), "")
+
+            line = Text()
+            line.append(timestamp_text, style="dim")
+            line.append(level_text, style=level_style)
+            line.append(Text.from_markup(log_line.message))
+            log_output.write(line)
+        except Exception:
+            # 如果解析 markup 失败，回退到纯文本
+            log_output.write(Text(log_line.plain_text))
 
 
 __all__: list[str] = ["AddGamePathScreen", "TranslationWorkbenchApp"]

@@ -22,6 +22,7 @@ from app.models.schemas import (
     TranslationErrorItem,
     TranslationItem,
 )
+from app.utils.log_utils import logger
 
 from .sql import (
     CREATE_ERROR_TABLE,
@@ -128,7 +129,7 @@ class GameDatabaseManager:
 
     async def create_database(self, game_path: str | Path) -> None:
         """
-        为指定游戏目录创建数据库，或复用已存在的同名数据库。
+        为指定游戏目录创建数据库，复用已存在的同名数据库，或在同标题迁移时更新路径。
 
         Args:
             game_path: RPG Maker 游戏根目录路径。
@@ -138,6 +139,21 @@ class GameDatabaseManager:
         resolved_game_path = resolve_game_directory(game_path)
         game_title = read_game_title(resolved_game_path)
         if game_title in self.items:
+            item = self.items[game_title]
+            if item.game_path == resolved_game_path:
+                return
+
+            await write_metadata(
+                connection=item.connection,
+                game_title=game_title,
+                game_path=resolved_game_path,
+            )
+            item.game_path = resolved_game_path
+            logger.warning(
+                f"[tag.warning]检测到同标题游戏路径变化，已更新数据库绑定路径[/tag.warning] "
+                f"标题 [tag.count]{game_title}[/tag.count] "
+                f"新路径 [tag.path]{resolved_game_path}[/tag.path]"
+            )
             return
 
         db_path = build_db_path(game_title)

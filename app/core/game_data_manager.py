@@ -9,7 +9,11 @@ from pathlib import Path
 
 from app.models.schemas import GameData
 from app.utils.database_utils import read_game_title, resolve_game_directory
-from app.utils.game_loader_utils import load_game_data as load_game_data_from_path
+from app.utils.game_loader_utils import (
+    load_game_data as load_game_data_from_path,
+    resolve_game_source_paths,
+)
+from app.utils.log_utils import logger
 
 
 class GameDataManager:
@@ -35,7 +39,19 @@ class GameDataManager:
         """
         resolved_game_path = resolve_game_directory(game_path)
         game_title = read_game_title(resolved_game_path)
+        source_data_dir, source_plugins_path, has_origin_backup = (
+            resolve_game_source_paths(resolved_game_path)
+        )
         game_data = await load_game_data_from_path(resolved_game_path)
+
+        if has_origin_backup:
+            logger.warning(
+                f"[tag.warning]检测到该游戏已经执行过激活版回写，后续将始终读取原件[/tag.warning] "
+                f"游戏 [tag.count]{game_title}[/tag.count] "
+                f"原件数据 [tag.path]{source_data_dir}[/tag.path] "
+                f"原件插件 [tag.path]{source_plugins_path}[/tag.path]"
+            )
+
         self.items[game_title] = game_data
 
 

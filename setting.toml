@@ -15,7 +15,7 @@ timeout = 600
 [llm_services.text]
 provider_type = "openai"
 base_url = "https://api.deepseek.com"
-api_key = "sk-ecf9eb26acb64177beedfaafc109fd75"
+api_key = "sk-f677192f3675409dbb1e0a49761d48c1"
 model = "deepseek-chat"
 timeout = 600
 
