@@ -1,8 +1,8 @@
 [llm_services.glossary]
 provider_type = "openai"
 base_url = "https://api.deepseek.com"
-api_key = "sk-ecf9eb26acb64177beedfaafc109fd75"
-model = "deepseek-reasoner"
+api_key = "sk-f677192f3675409dbb1e0a49761d48c1"
+model = "deepseek-chat"
 timeout = 600
 
 # [llm_services.text]
@@ -23,8 +23,11 @@ timeout = 600
 role_chunk_blocks = 10
 role_chunk_lines = 3
 
+[glossary_translation]
+worker_count = 300
+rpm = 300
+
 [glossary_translation.role_name]
-chunk_size = 60
 retry_count = 3
 retry_delay = 1
 response_retry_count = 3
@@ -38,7 +41,7 @@ response_retry_count = 3
 system_prompt_file = "prompts/glossary_display_name_system.txt"
 
 [translation_context]
-token_size = 512
+token_size = 1024
 factor = 3.5
 max_command_items = 5
 

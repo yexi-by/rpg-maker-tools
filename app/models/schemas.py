@@ -8,52 +8,19 @@
 
 import re
 from enum import IntEnum
-from typing import Any, Literal, Self
+from typing import Any, Callable, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
-from .game_data import BaseItem, CommonEvent, MapData, System, Troop
+from .game_data import BaseItem, CommonEvent, MapData, QuestEntry, System, Troop
 
 CONTROL_CHARS_PATTERN = re.compile(
     r"\\([A-Za-z]+)(?:\[([^\]]*)\])?|\\([^\w\s])|%([0-9]+)"
 )
-# 日文字符匹配模式
-JAPANESE_PATTERN = re.compile(r"[\u3040-\u309F\u30A0-\u30FF]")
-# 连续日文片段匹配模式
-JAPANESE_SEGMENT_PATTERN = re.compile(r"[\u3040-\u309F\u30A0-\u30FF]+")
-
-# 允许保留的日文字符（不视为未翻译）
-ALLOWED_JAPANESE_CHARS: set[str] = {
-    "っ",  # 促音
-    "゛",  # 浊点
-    "゜",  # 半浊点
-    "・",  # 中点
-    "ー",  # 长音
-    "〜",  # 波浪号
-    "～",  # 全角波浪号
-}
-
-# 允许保留的拟声尾音字符。
-# 这类字符常作为中文拟声词的拖尾出现，例如“姆啾ぅ”“啾啪ぁ”“咿ッッ”。
-# 只有当一整段连续日文片段都由这些尾音字符组成时，才会在残留校验时放行。
-ALLOWED_JAPANESE_TAIL_CHARS: set[str] = {
-    "ぁ",
-    "ぃ",
-    "ぅ",
-    "ぇ",
-    "ぉ",
-    "ァ",
-    "ィ",
-    "ゥ",
-    "ェ",
-    "ォ",
-    "ッ",
-    "う",
-    "ウ",
-}
-
+SIMPLE_CONTROL_PARAM_PATTERN = re.compile(r"[A-Za-z0-9_]+")
 type ItemType = Literal["long_text", "array", "short_text"]
-type ErrorType = Literal["AI漏翻", "控制符不匹配", "日文残留"]
+type SourceLanguage = Literal["ja", "en"]
+type ErrorType = Literal["AI漏翻", "控制符不匹配", "源语言残留"]
 type TranslationErrorItem = tuple[
     str,
     ItemType,
@@ -63,6 +30,252 @@ type TranslationErrorItem = tuple[
     ErrorType,
     list[str],
 ]
+
+SOURCE_LANGUAGE_VALUES: tuple[SourceLanguage, ...] = ("ja", "en")
+type ControlSequenceKind = Literal["code", "symbol", "percent"]
+type ControlSequenceSpan = tuple[
+    int,
+    int,
+    str,
+    ControlSequenceKind,
+    str | None,
+    str | None,
+    bool,
+]
+
+
+def _find_matching_delimiter_end(
+    text: str,
+    start_index: int,
+    open_char: str,
+    close_char: str,
+) -> int | None:
+    """
+    在字符串中查找成对分隔符的闭合位置。
+
+    这里专门用于识别 RPG Maker 控制符参数，尤其是 `\\N[\\V[36]]`
+    与 `\\js<...>`、`\\js[...]` 这类带嵌套或脚本表达式的复杂控制符。
+
+    Args:
+        text: 当前正在扫描的整行文本。
+        start_index: 开始匹配的开分隔符位置。
+        open_char: 开分隔符字符。
+        close_char: 闭分隔符字符。
+
+    Returns:
+        成功闭合时返回闭分隔符下标；未找到闭合位置时返回 `None`。
+    """
+    if open_char == "<" and close_char == ">":
+        return _find_angle_delimiter_end(
+            text=text,
+            start_index=start_index,
+        )
+
+    depth: int = 0
+    active_quote: str | None = None
+
+    for index in range(start_index, len(text)):
+        char = text[index]
+        previous_char = text[index - 1] if index > start_index else ""
+
+        if active_quote is not None:
+            if char == active_quote and previous_char != "\\":
+                active_quote = None
+            continue
+
+        if char in {'"', "'"} and previous_char != "\\":
+            active_quote = char
+            continue
+
+        if char == open_char:
+            depth += 1
+            continue
+
+        if char == close_char:
+            depth -= 1
+            if depth == 0:
+                return index
+
+    return None
+
+
+def _find_angle_delimiter_end(
+    text: str,
+    start_index: int,
+) -> int | None:
+    """
+    查找 `\\js<...>` 这类角括号参数的闭合位置。
+
+    这里不能像中括号那样按深度统计 `<` 与 `>`，
+    因为脚本表达式里常见比较运算符 `<`、`<=`、`>`、`>=`。
+    如果把这些运算符也计入嵌套层级，就会错误地把
+    `\\js<$gameVariables.value(624) < 0 ? 4 : 1>` 判定为“未闭合”。
+
+    Args:
+        text: 当前正在扫描的整行文本。
+        start_index: 起始 `<` 的下标。
+
+    Returns:
+        首个未落在字符串字面量内的 `>` 下标；未找到时返回 `None`。
+    """
+    active_quote: str | None = None
+
+    for index in range(start_index + 1, len(text)):
+        char = text[index]
+        previous_char = text[index - 1]
+
+        if active_quote is not None:
+            if char == active_quote and previous_char != "\\":
+                active_quote = None
+            continue
+
+        if char in {'"', "'"} and previous_char != "\\":
+            active_quote = char
+            continue
+
+        if char == ">":
+            return index
+
+    return None
+
+
+def _iter_control_sequence_spans(text: str) -> list[ControlSequenceSpan]:
+    """
+    顺序扫描一行文本，识别其中的 RPG Maker 控制符片段。
+
+    与单条正则不同，这里显式处理了以下复杂情况：
+    1. `\\js<...>` 这类角括号脚本表达式。
+    2. `\\js[...]` 与 `\\N[\\V[36]]` 这类带嵌套中括号的参数。
+    3. `\\{`、`\\.` 这类符号型控制符。
+    4. `%1` 这类百分号占位符。
+
+    Args:
+        text: 待扫描原文。
+
+    Returns:
+        识别出的控制符区间列表，按出现顺序排列。
+    """
+    spans: list[ControlSequenceSpan] = []
+    index: int = 0
+
+    while index < len(text):
+        current_char = text[index]
+
+        if current_char == "%":
+            end_index: int = index + 1
+            while end_index < len(text) and text[end_index].isdigit():
+                end_index += 1
+            if end_index > index + 1:
+                original = text[index:end_index]
+                spans.append(
+                    (index, end_index, original, "percent", None, original[1:], False)
+                )
+                index = end_index
+                continue
+
+        if current_char != "\\" or index + 1 >= len(text):
+            index += 1
+            continue
+
+        next_char = text[index + 1]
+        if next_char.isalpha():
+            code_end: int = index + 1
+            while code_end < len(text) and text[code_end].isalpha():
+                code_end += 1
+
+            code: str = text[index + 1 : code_end]
+            if code_end < len(text) and text[code_end] in {"[", "<"}:
+                open_char = text[code_end]
+                close_char = "]" if open_char == "[" else ">"
+                match_end = _find_matching_delimiter_end(
+                    text=text,
+                    start_index=code_end,
+                    open_char=open_char,
+                    close_char=close_char,
+                )
+                if match_end is not None:
+                    original = text[index : match_end + 1]
+                    param = text[code_end + 1 : match_end]
+                    is_complex = (
+                        open_char == "<"
+                        or "\\" in param
+                        or "[" in param
+                        or "]" in param
+                        or "<" in param
+                        or ">" in param
+                        or not SIMPLE_CONTROL_PARAM_PATTERN.fullmatch(param)
+                    )
+                    spans.append(
+                        (
+                            index,
+                            match_end + 1,
+                            original,
+                            "code",
+                            code,
+                            param,
+                            is_complex,
+                        )
+                    )
+                    index = match_end + 1
+                    continue
+
+            original = text[index:code_end]
+            spans.append(
+                (index, code_end, original, "code", code, None, False)
+            )
+            index = code_end
+            continue
+
+        original = text[index : index + 2]
+        spans.append((index, index + 2, original, "symbol", None, None, False))
+        index += 2
+
+    return spans
+
+
+def replace_rm_control_sequences(
+    text: str,
+    replacer: Callable[[ControlSequenceSpan], str],
+) -> str:
+    """
+    按顺序替换文本中的 RPG Maker 控制符。
+
+    Args:
+        text: 原始文本。
+        replacer: 针对每个识别出的控制符区间返回替换结果的回调。
+
+    Returns:
+        完成替换后的新文本。
+    """
+    spans = _iter_control_sequence_spans(text)
+    if not spans:
+        return text
+
+    parts: list[str] = []
+    last_end: int = 0
+    for span in spans:
+        start_index, end_index = span[0], span[1]
+        parts.append(text[last_end:start_index])
+        parts.append(replacer(span))
+        last_end = end_index
+    parts.append(text[last_end:])
+    return "".join(parts)
+
+
+def strip_rm_control_sequences(text: str) -> str:
+    """
+    从文本中剥离所有 RPG Maker 控制符与复杂脚本控制串。
+
+    该函数用于源语言残留检测与“仅占位符文本”判断，
+    目的是避免把 `\\js<...>` 内部的变量名、脚本标识符误当成正文英文。
+
+    Args:
+        text: 待清洗文本。
+
+    Returns:
+        去除控制符后的纯文本。
+    """
+    return replace_rm_control_sequences(text, lambda _span: "")
 
 
 class Code(IntEnum):
@@ -255,33 +468,50 @@ class TranslationItem(BaseModel):
         self.placeholder_map.clear()
         self.placeholder_counts.clear()
         symbol_counter: int = 0
+        complex_control_counter: int = 0
+        complex_placeholder_map: dict[str, str] = {}
 
-        def replace_func(match: re.Match[str]) -> str:
+        def replace_func(span: ControlSequenceSpan) -> str:
             """
             对 original_data 中的 RM 文本控制符替换成自定义占位符，
             并构建 placeholder_map 和 placeholder_counts。
             """
-            nonlocal symbol_counter
-            original: str = match.group(0)
-
-            code: str | None = match.group(1)
-            param: str | None = match.group(2)
-            symbol: str | None = match.group(3)
-            percent_num: str | None = match.group(4)
+            nonlocal symbol_counter, complex_control_counter
+            (
+                _start_index,
+                _end_index,
+                original,
+                kind,
+                code,
+                param,
+                is_complex,
+            ) = span
 
             placeholder: str = ""
 
-            if code:
-                suffix = param if param is not None else "0"
-                placeholder = f"[{code.upper()}_{suffix}]"
-            elif symbol:
+            if kind == "percent":
+                if param is None:
+                    raise ValueError(f"百分号控制符缺少参数: {original}")
+                placeholder = f"[P_{param}]"
+            elif kind == "symbol":
                 symbol_counter += 1
                 placeholder = f"[S_{symbol_counter}]"
                 while placeholder in self.placeholder_map:
                     symbol_counter += 1
                     placeholder = f"[S_{symbol_counter}]"
-            elif percent_num:
-                placeholder = f"[P_{percent_num}]"
+            elif code is not None:
+                if is_complex:
+                    existing_placeholder = complex_placeholder_map.get(original)
+                    if existing_placeholder is not None:
+                        placeholder = existing_placeholder
+                    else:
+                        complex_control_counter += 1
+                        placeholder = f"[RM_{complex_control_counter}]"
+                        complex_placeholder_map[original] = placeholder
+                else:
+                    suffix = param if param is not None else "0"
+                    placeholder = f"[{code.upper()}_{suffix}]"
+
             if placeholder not in self.placeholder_map:
                 self.placeholder_map[placeholder] = original
 
@@ -291,7 +521,7 @@ class TranslationItem(BaseModel):
             return placeholder
 
         self.original_lines_with_placeholders = [
-            CONTROL_CHARS_PATTERN.sub(replace_func, line)
+            replace_rm_control_sequences(line, replace_func)
             for line in self.original_lines
         ]
 
@@ -340,40 +570,6 @@ class TranslationItem(BaseModel):
             new_translation_lines.append(line)
         self.translation_lines = new_translation_lines
 
-    def check_residual(self) -> None:
-        """
-        检查翻译后的文本列表是否有日文残留。
-
-        遍历每个文本项，按连续片段匹配日文字符。
-        过滤普通白名单字符后，如果整段只剩拟声尾音字符，则视为可接受的中文拟声拖尾；
-        否则判定为真实日文残留并返回错误信息。
-
-        Args:
-            translated_items: 翻译后的文本列表（行列表或选项列表）
-
-        Returns:
-            发现日文残留时返回错误信息，否则返回 None
-        """
-        for i, item in enumerate(self.translation_lines):
-            segments = JAPANESE_SEGMENT_PATTERN.findall(item)
-            if not segments:
-                continue
-            real_residual: list[str] = []
-            for segment in segments:
-                filtered_segment: list[str] = [
-                    char for char in segment if char not in ALLOWED_JAPANESE_CHARS
-                ]
-                if not filtered_segment:
-                    continue
-                if all(
-                    char in ALLOWED_JAPANESE_TAIL_CHARS for char in filtered_segment
-                ):
-                    continue
-                real_residual.extend(filtered_segment)
-            if real_residual:
-                raise ValueError(f"发现日文残留(第 {i + 1} 项): {real_residual}")
-
-
 class TranslationData(BaseModel):
     """
     单个文件维度的翻译数据集合。
@@ -409,6 +605,7 @@ JS_DIRECTORY_NAME: str = "js"
 SYSTEM_FILE_NAME: str = "System.json"
 PLUGINS_FILE_NAME: str = "plugins.js"
 PLUGINS_ORIGIN_FILE_NAME: str = "plugins_origin.js"
+QUESTS_FILE_NAME: str = "Quests.json"
 COMMON_EVENTS_FILE_NAME: str = "CommonEvents.json"
 TROOPS_FILE_NAME: str = "Troops.json"
 MAP_INFOS_FILE_NAME: str = "MapInfos.json"
@@ -433,6 +630,7 @@ FIXED_FILE_NAMES: set[str] = {
     "States.json",
     "Weapons.json",
     "Tilesets.json",
+    QUESTS_FILE_NAME,
     MAP_INFOS_FILE_NAME,
     COMMON_EVENTS_FILE_NAME,
     TROOPS_FILE_NAME,
@@ -455,6 +653,7 @@ class GameData(BaseModel):
         common_events: CommonEvents.json 解析后的公共事件列表（稀疏数组，索引 0 为 None）。
         troops: Troops.json 解析后的敌群列表（稀疏数组，索引 0 为 None）。
         base_data: 其余数据库文件（Actors/Items/Skills 等），键为文件名，值为条目列表。
+        quests: 可选的 `Quests.json` 结构化任务数据。文件不存在时为 `None`。
         plugins_js: plugins.js 清洗后的插件列表，用于后续递归提取插件参数文本。
         writable_plugins_js: 用于插件文本回写的插件列表副本。修改完成后会重新序列化回 `writable_data["plugins.js"]`。
     """
@@ -466,13 +665,12 @@ class GameData(BaseModel):
     common_events: list[CommonEvent | None]
     troops: list[Troop | None]
     base_data: dict[str, list[BaseItem | None]]
+    quests: dict[str, QuestEntry] | None = None
     plugins_js: list[dict[str, Any]]
     writable_plugins_js: list[dict[str, Any]]
 
 
 __all__: list[str] = [
-    "ALLOWED_JAPANESE_CHARS",
-    "ALLOWED_JAPANESE_TAIL_CHARS",
     "BaseGlossary",
     "Code",
     "COMMON_EVENTS_FILE_NAME",
@@ -485,19 +683,22 @@ __all__: list[str] = [
     "Glossary",
     "GlossaryBuildChunk",
     "ItemType",
-    "JAPANESE_PATTERN",
-    "JAPANESE_SEGMENT_PATTERN",
     "JS_DIRECTORY_NAME",
     "MAP_INFOS_FILE_NAME",
     "MAP_PATTERN",
     "Place",
     "PLUGINS_FILE_NAME",
     "PLUGINS_ORIGIN_FILE_NAME",
+    "QUESTS_FILE_NAME",
     "PLUGINS_JS_PATTERN",
     "Role",
+    "SOURCE_LANGUAGE_VALUES",
+    "SourceLanguage",
     "SYSTEM_FILE_NAME",
     "TROOPS_FILE_NAME",
     "TranslationData",
     "TranslationErrorItem",
     "TranslationItem",
+    "replace_rm_control_sequences",
+    "strip_rm_control_sequences",
 ]

@@ -19,13 +19,23 @@ from app.models.schemas import (
     ItemType,
     Place,
     Role,
+    SOURCE_LANGUAGE_VALUES,
+    SourceLanguage,
     TranslationErrorItem,
     TranslationItem,
 )
 from app.utils.log_utils import logger
+from app.utils.game_loader_utils import read_game_title, resolve_game_directory
+from app.utils.source_language_utils import validate_source_language
 
 from .sql import (
+    CHECK_CONNECTION_READABLE,
     CREATE_ERROR_TABLE,
+    CREATE_GLOSSARY_STATE_TABLE,
+    CREATE_METADATA_TABLE,
+    CREATE_PLACE_GLOSSARY_TABLE,
+    CREATE_ROLE_GLOSSARY_TABLE,
+    CREATE_TRANSLATION_TABLE,
     DELETE_ALL_ROWS,
     GLOSSARY_PLACE_TABLE_NAME,
     GLOSSARY_ROLE_TABLE_NAME,
@@ -36,27 +46,200 @@ from .sql import (
     SELECT_ALL,
     SELECT_GLOSSARY_STATE,
     SELECT_LATEST_TABLE_NAME_BY_PREFIX,
+    SELECT_METADATA,
     SELECT_PLACE_GLOSSARY_ITEMS,
     SELECT_ROLE_GLOSSARY_ITEMS,
     SELECT_TRANSLATED_ITEMS,
     SELECT_TRANSLATION_PATHS,
+    UPDATE_METADATA_SOURCE_LANGUAGE,
     UPSERT_GLOSSARY_STATE,
-)
-from app.utils.database_utils import (
-    DB_DIRECTORY,
-    build_db_path,
-    check_connection_readable,
-    create_static_tables,
-    ensure_db_directory,
-    open_connection,
-    read_game_title,
-    read_metadata,
-    resolve_game_directory,
-    write_metadata,
+    UPSERT_METADATA,
+    METADATA_KEY,
 )
 
 GLOSSARY_STATE_KEY: str = "current_glossary"
 DEFAULT_ERROR_TABLE_PREFIX: str = "translation_errors"
+PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
+DB_DIRECTORY: Path = PROJECT_ROOT / "data" / "db"
+INVALID_FILE_NAME_CHARS: set[str] = set('<>:"/\\|?*')
+
+
+def ensure_db_directory() -> None:
+    """
+    确保固定数据库目录存在。
+
+    目录规则已经锁定为仓库根目录下的 `data/db`，
+    因此这里不再走配置解析，直接按固定路径创建目录。
+    """
+    DB_DIRECTORY.mkdir(parents=True, exist_ok=True)
+
+
+def build_db_path(game_title: str) -> Path:
+    """
+    根据游戏标题生成固定数据库文件路径。
+
+    Args:
+        game_title: 已完成基础校验的游戏标题。
+
+    Returns:
+        数据库文件绝对路径。
+
+    Raises:
+        ValueError: 标题包含 Windows 非法文件名字时抛出。
+    """
+    invalid_chars = sorted(
+        {char for char in game_title if char in INVALID_FILE_NAME_CHARS}
+    )
+    if invalid_chars:
+        joined_chars = "".join(invalid_chars)
+        raise ValueError(f"游戏标题包含非法文件名字，无法创建数据库: {joined_chars}")
+
+    return DB_DIRECTORY / f"{game_title}.db"
+
+
+async def open_connection(db_path: Path) -> aiosqlite.Connection:
+    """
+    打开 SQLite 连接并设置统一行工厂。
+
+    Args:
+        db_path: 数据库文件绝对路径。
+
+    Returns:
+        已准备好的异步数据库连接。
+    """
+    connection = await aiosqlite.connect(db_path)
+    connection.row_factory = aiosqlite.Row
+    return connection
+
+
+async def check_connection_readable(
+    connection: aiosqlite.Connection,
+    db_path: Path,
+) -> None:
+    """
+    对已打开连接执行一次最轻量的可读性检查。
+
+    Args:
+        connection: 已建立的数据库连接。
+        db_path: 当前数据库文件路径，用于拼装错误上下文。
+
+    Raises:
+        RuntimeError: 查询结果不是预期结构时抛出。
+        aiosqlite.Error: 数据库文件不可读时由底层直接抛出。
+    """
+    async with connection.execute(CHECK_CONNECTION_READABLE) as cursor:
+        row = await cursor.fetchone()
+
+    if row is None:
+        raise RuntimeError(f"数据库可读性校验失败，未返回任何结果: {db_path}")
+    if row[0] != 1:
+        raise RuntimeError(f"数据库可读性校验失败，返回值异常: {db_path}")
+
+
+async def create_static_tables(connection: aiosqlite.Connection) -> None:
+    """
+    初始化多游戏数据库管理器要求的全部静态表。
+
+    Args:
+        connection: 目标数据库连接。
+    """
+    _ = await connection.execute(CREATE_TRANSLATION_TABLE)
+    _ = await connection.execute(CREATE_ROLE_GLOSSARY_TABLE)
+    _ = await connection.execute(CREATE_PLACE_GLOSSARY_TABLE)
+    _ = await connection.execute(CREATE_GLOSSARY_STATE_TABLE)
+    _ = await connection.execute(CREATE_METADATA_TABLE)
+    await connection.commit()
+
+
+async def write_metadata(
+    connection: aiosqlite.Connection,
+    game_title: str,
+    game_path: Path,
+    source_language: SourceLanguage,
+) -> None:
+    """
+    把游戏标题、游戏根目录和源语言写入元数据表。
+
+    Args:
+        connection: 目标数据库连接。
+        game_title: 游戏标题。
+        game_path: 游戏根目录绝对路径。
+        source_language: 当前游戏的源语言。
+    """
+    _ = await connection.execute(
+        UPSERT_METADATA,
+        (METADATA_KEY, game_title, str(game_path), source_language),
+    )
+    await connection.commit()
+
+
+async def read_metadata(
+    connection: aiosqlite.Connection,
+    db_path: Path,
+) -> tuple[str, Path, SourceLanguage]:
+    """
+    从元数据表恢复游戏标题、游戏根目录与源语言。
+
+    Args:
+        connection: 已建立的数据库连接。
+        db_path: 当前数据库文件路径，用于构造错误信息。
+
+    Returns:
+        校验通过后的游戏标题、游戏根目录和源语言。
+
+    Raises:
+        RuntimeError: 元数据表缺失记录、字段类型错误或字段为空时抛出。
+    """
+    try:
+        async with connection.execute(SELECT_METADATA, (METADATA_KEY,)) as cursor:
+            row = await cursor.fetchone()
+    except aiosqlite.Error as error:
+        raise RuntimeError(
+            "数据库 metadata 表缺少 source_language 字段，请先执行迁移脚本: "
+            f"{db_path}"
+        ) from error
+
+    if row is None:
+        raise RuntimeError(f"数据库缺少 metadata 元数据记录: {db_path}")
+
+    raw_game_title = row["game_title"]
+    raw_game_path = row["game_path"]
+    raw_source_language = row["source_language"]
+
+    if not isinstance(raw_game_title, str) or not raw_game_title.strip():
+        raise RuntimeError(f"metadata.game_title 非法: {db_path}")
+    if not isinstance(raw_game_path, str) or not raw_game_path.strip():
+        raise RuntimeError(f"metadata.game_path 非法: {db_path}")
+    if not isinstance(raw_source_language, str) or not raw_source_language.strip():
+        raise RuntimeError(f"metadata.source_language 非法: {db_path}")
+
+    try:
+        source_language = validate_source_language(raw_source_language)
+    except ValueError as error:
+        supported_values = ", ".join(SOURCE_LANGUAGE_VALUES)
+        raise RuntimeError(
+            f"metadata.source_language 非法，仅支持 {supported_values}: {db_path}"
+        ) from error
+
+    return raw_game_title.strip(), Path(raw_game_path).resolve(), source_language
+
+
+async def update_metadata_source_language(
+    connection: aiosqlite.Connection,
+    source_language: SourceLanguage,
+) -> None:
+    """
+    仅更新元数据表中的源语言字段。
+
+    Args:
+        connection: 目标数据库连接。
+        source_language: 新的源语言值。
+    """
+    _ = await connection.execute(
+        UPDATE_METADATA_SOURCE_LANGUAGE,
+        (source_language, METADATA_KEY),
+    )
+    await connection.commit()
 
 
 @dataclass(slots=True)
@@ -67,12 +250,14 @@ class GameDatabaseItem:
     Attributes:
         game_title: 游戏标题，来自 `package.json.window.title`。
         game_path: 游戏根目录绝对路径。
+        source_language: 当前游戏登记的源语言。
         db_path: 当前数据库文件绝对路径。
         connection: 与当前数据库文件绑定的异步 SQLite 连接。
     """
 
     game_title: str
     game_path: Path
+    source_language: SourceLanguage
     db_path: Path
     connection: aiosqlite.Connection
 
@@ -110,7 +295,7 @@ class GameDatabaseManager:
             connection = await open_connection(db_path)
             try:
                 await check_connection_readable(connection=connection, db_path=db_path)
-                game_title, game_path = await read_metadata(
+                game_title, game_path, source_language = await read_metadata(
                     connection=connection,
                     db_path=db_path,
                 )
@@ -121,18 +306,24 @@ class GameDatabaseManager:
             items[game_title] = GameDatabaseItem(
                 game_title=game_title,
                 game_path=game_path,
+                source_language=source_language,
                 db_path=db_path,
                 connection=connection,
             )
 
         return cls(items=items)
 
-    async def create_database(self, game_path: str | Path) -> None:
+    async def create_database(
+        self,
+        game_path: str | Path,
+        source_language: SourceLanguage,
+    ) -> None:
         """
         为指定游戏目录创建数据库，复用已存在的同名数据库，或在同标题迁移时更新路径。
 
         Args:
             game_path: RPG Maker 游戏根目录路径。
+            source_language: 当前游戏的源语言。
         """
         ensure_db_directory()
 
@@ -140,15 +331,20 @@ class GameDatabaseManager:
         game_title = read_game_title(resolved_game_path)
         if game_title in self.items:
             item = self.items[game_title]
-            if item.game_path == resolved_game_path:
+            if (
+                item.game_path == resolved_game_path
+                and item.source_language == source_language
+            ):
                 return
 
             await write_metadata(
                 connection=item.connection,
                 game_title=game_title,
                 game_path=resolved_game_path,
+                source_language=source_language,
             )
             item.game_path = resolved_game_path
+            item.source_language = source_language
             logger.warning(
                 f"[tag.warning]检测到同标题游戏路径变化，已更新数据库绑定路径[/tag.warning] "
                 f"标题 [tag.count]{game_title}[/tag.count] "
@@ -171,6 +367,7 @@ class GameDatabaseManager:
                 connection=connection,
                 game_title=game_title,
                 game_path=resolved_game_path,
+                source_language=source_language,
             )
         except Exception:
             await connection.close()
@@ -179,9 +376,32 @@ class GameDatabaseManager:
         self.items[game_title] = GameDatabaseItem(
             game_title=game_title,
             game_path=resolved_game_path,
+            source_language=source_language,
             db_path=db_path,
             connection=connection,
         )
+
+    async def update_source_language(
+        self,
+        game_title: str,
+        source_language: SourceLanguage,
+    ) -> None:
+        """
+        更新指定游戏的源语言并立即写回数据库。
+
+        Args:
+            game_title: 目标游戏标题。
+            source_language: 新的源语言。
+        """
+        item = self._get_item(game_title)
+        if item.source_language == source_language:
+            return
+
+        await update_metadata_source_language(
+            connection=item.connection,
+            source_language=source_language,
+        )
+        item.source_language = source_language
 
     async def write_translation_items(
         self,

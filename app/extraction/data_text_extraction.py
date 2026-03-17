@@ -19,11 +19,12 @@ from app.models.schemas import (
     Code,
     GameData,
     MAP_PATTERN,
+    QUESTS_FILE_NAME,
     SYSTEM_FILE_NAME,
     TranslationData,
     TranslationItem,
 )
-from app.utils import iter_all_commands
+from app.utils import iter_all_commands, should_skip_plugin_like_text
 
 PLUGIN_COMMAND_TEXT_KEYWORDS: set[str] = {
     "text",
@@ -73,6 +74,7 @@ class DataTextExtraction:
         all_translation_data.update(self._extract_command_text())
         all_translation_data.update(self._extract_system_text())
         all_translation_data.update(self._extract_base_text())
+        all_translation_data.update(self._extract_quests_text())
         return all_translation_data
 
     def _extract_command_text(self) -> dict[str, TranslationData]:
@@ -262,6 +264,79 @@ class DataTextExtraction:
 
         return translation_data_map
 
+    def _extract_quests_text(self) -> dict[str, TranslationData]:
+        """
+        提取可选 `Quests.json` 文件中的任务文本。
+
+        `Quests.json` 不是标准 RM 数据文件，因此不会参与基础数据库通路。
+        当前仅提取已经确认是玩家可见文本的四类字段：
+        `title_cte`、`summaries_cte`、`rewards_cte`、`objectives_cte`。
+        诸如 `condition`、`roland_quest` 这类脚本或标记字段只保留，不参与翻译。
+
+        Returns:
+            当 `Quests.json` 不存在或没有可翻译内容时返回空字典；
+            否则返回仅包含 `Quests.json` 的翻译数据映射。
+        """
+        if self.game_data.quests is None:
+            return {}
+
+        translation_data = TranslationData(
+            display_name=None,
+            translation_items=[],
+        )
+
+        for quest_id, quest in self.game_data.quests.items():
+            self._append_quest_text_item(
+                translation_data=translation_data,
+                location_path=f"{QUESTS_FILE_NAME}/{quest_id}/title_cte",
+                text=quest.title_cte,
+            )
+
+            bucket_texts: dict[str, dict[str, str]] = {
+                "summaries_cte": quest.summaries_cte,
+                "rewards_cte": quest.rewards_cte,
+                "objectives_cte": quest.objectives_cte,
+            }
+            for bucket_name, text_map in bucket_texts.items():
+                for entry_id, text in text_map.items():
+                    self._append_quest_text_item(
+                        translation_data=translation_data,
+                        location_path=(
+                            f"{QUESTS_FILE_NAME}/{quest_id}/{bucket_name}/{entry_id}"
+                        ),
+                        text=text,
+                    )
+
+        if not translation_data.translation_items:
+            return {}
+        return {QUESTS_FILE_NAME: translation_data}
+
+    def _append_quest_text_item(
+        self,
+        *,
+        translation_data: TranslationData,
+        location_path: str,
+        text: str,
+    ) -> None:
+        """
+        将单条任务文本封装为短文本翻译项。
+
+        Args:
+            translation_data: 正在累积的任务翻译数据对象。
+            location_path: 当前任务文本的精确定位路径。
+            text: 原始任务文本。
+        """
+        if not text:
+            return
+
+        translation_data.translation_items.append(
+            TranslationItem(
+                location_path=location_path,
+                item_type="short_text",
+                original_lines=[text],
+            )
+        )
+
     def _handle_name_command(
         self,
         command: EventCommand,
@@ -407,6 +482,17 @@ class DataTextExtraction:
         if not command.parameters:
             return
 
+        plugin_name = (
+            command.parameters[0]
+            if len(command.parameters) > 0 and isinstance(command.parameters[0], str)
+            else None
+        )
+        command_name = (
+            command.parameters[1]
+            if len(command.parameters) > 1 and isinstance(command.parameters[1], str)
+            else None
+        )
+
         for param_index, parameter in enumerate(command.parameters):
             if not isinstance(parameter, dict | list):
                 continue
@@ -416,6 +502,8 @@ class DataTextExtraction:
                 path_parts=[location_path, "parameters", param_index],
                 items=items,
                 keyword_active=False,
+                plugin_name=plugin_name,
+                command_name=command_name,
             )
 
     def _extract_plugin_command_container(
@@ -424,6 +512,8 @@ class DataTextExtraction:
         path_parts: list[str | int],
         items: list[TranslationItem],
         keyword_active: bool,
+        plugin_name: str | None,
+        command_name: str | None,
     ) -> None:
         """
         递归扫描 357 指令内部的容器参数，并抽取命中关键词的短文本。
@@ -450,6 +540,8 @@ class DataTextExtraction:
                             text=child,
                             path_parts=current_path_parts,
                             items=items,
+                            plugin_name=plugin_name,
+                            command_name=command_name,
                         )
                     continue
 
@@ -459,6 +551,8 @@ class DataTextExtraction:
                         path_parts=current_path_parts,
                         items=items,
                         keyword_active=keyword_active or key_matched,
+                        plugin_name=plugin_name,
+                        command_name=command_name,
                     )
             return
 
@@ -472,6 +566,8 @@ class DataTextExtraction:
                             text=child,
                             path_parts=current_path_parts,
                             items=items,
+                            plugin_name=plugin_name,
+                            command_name=command_name,
                         )
                     continue
 
@@ -481,6 +577,8 @@ class DataTextExtraction:
                         path_parts=current_path_parts,
                         items=items,
                         keyword_active=keyword_active,
+                        plugin_name=plugin_name,
+                        command_name=command_name,
                     )
 
     def _should_extract_plugin_command_key(self, key: str) -> bool:
@@ -503,6 +601,8 @@ class DataTextExtraction:
         text: str,
         path_parts: list[str | int],
         items: list[TranslationItem],
+        plugin_name: str | None,
+        command_name: str | None,
     ) -> None:
         """
         将命中的 357 插件参数文本封装为短文本翻译项。
@@ -512,14 +612,22 @@ class DataTextExtraction:
             path_parts: 文本叶子的完整定位路径。
             items: 当前文件正在收集的翻译项列表。
         """
-        if not text:
+        normalized_text = text.strip()
+        if not normalized_text:
+            return
+        if should_skip_plugin_like_text(
+            text=normalized_text,
+            path_parts=path_parts,
+            plugin_name=plugin_name,
+            command_name=command_name,
+        ):
             return
 
         items.append(
             TranslationItem(
                 location_path="/".join(map(str, path_parts)),
                 item_type="short_text",
-                original_lines=[text],
+                original_lines=[normalized_text],
             )
         )
 

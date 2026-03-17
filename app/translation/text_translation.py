@@ -17,7 +17,7 @@ import asyncio
 from collections.abc import AsyncIterator
 
 from app.config import Setting
-from app.models.schemas import TranslationErrorItem, TranslationItem
+from app.models.schemas import SourceLanguage, TranslationErrorItem, TranslationItem
 from app.services.llm.handler import LLMHandler
 from app.services.llm.schemas import ChatMessage
 
@@ -57,6 +57,7 @@ class TextTranslation:
         *,
         llm_handler: LLMHandler,
         batches: list[tuple[list[TranslationItem], list[ChatMessage]]],
+        source_language: SourceLanguage,
     ) -> None:
         """
         启动正文翻译的后台并发执行流程。
@@ -67,6 +68,7 @@ class TextTranslation:
         Args:
             llm_handler: 用于实际发起请求的 LLM 服务管理器。
             batches: 已经切割好并组装成目标提示词的批次列表。每一项包含原条目列表与上下文。
+            source_language: 当前游戏的源语言。
 
         Raises:
             RuntimeError: 当尝试在同一个实例上二次调用本方法时抛出，强制执行一次性约定。
@@ -83,6 +85,7 @@ class TextTranslation:
             self._run_translation(
                 llm_handler=llm_handler,
                 batches=batches,
+                source_language=source_language,
             )
         )
 
@@ -140,6 +143,7 @@ class TextTranslation:
         *,
         llm_handler: LLMHandler,
         batches: list[tuple[list[TranslationItem], list[ChatMessage]]],
+        source_language: SourceLanguage,
     ) -> None:
         """
         管理并发翻译的核心调度器。
@@ -206,6 +210,7 @@ class TextTranslation:
                             retry_count=retry_count,
                             retry_delay=retry_delay,
                             token_bucket=token_bucket,
+                            source_language=source_language,
                         )
                     )
 
@@ -236,6 +241,7 @@ class TextTranslation:
         retry_count: int,
         retry_delay: int,
         token_bucket: asyncio.Queue[int] | None,
+        source_language: SourceLanguage,
     ) -> None:
         """
         持续运行的后台工作协程，从任务队列中获取批次并发送翻译请求。
@@ -280,6 +286,7 @@ class TextTranslation:
                     items=items,
                     right_queue=right_queue,
                     error_queue=error_queue,
+                    source_language=source_language,
                 )
             finally:
                 task_queue.task_done()

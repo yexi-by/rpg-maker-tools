@@ -6,17 +6,12 @@
 1. 提取角色名及其对话采样块，返回 `dict[str, list[str]]`。
 2. 提取地图 `displayName`，返回 `dict[str, str]`，且值统一为空字符串。
 
-两个方法都会过滤掉键本身不包含日文的字符串。
-日文判断逻辑由 `app.utils.japanese_utils` 提供：
-
-1. 严格模式：只判断平假名和片假名。
-2. 非严格模式：判断平假名、片假名和汉字。
-3. 日文标点符号不算命中字符。
+两个方法都会过滤掉不符合当前源语言特征的字符串。
 """
 
 from app.models.game_data import EventCommand
-from app.models.schemas import Code, GameData
-from app.utils import has_japanese, iter_all_commands
+from app.models.schemas import Code, GameData, SourceLanguage, strip_rm_control_sequences
+from app.utils import is_glossary_text_candidate, iter_all_commands
 
 
 class GlossaryExtraction:
@@ -28,14 +23,20 @@ class GlossaryExtraction:
     并将抽取后的原始数据传递给下游进行 LLM 结构化翻译。
     """
 
-    def __init__(self, game_data: GameData) -> None:
+    def __init__(
+        self,
+        game_data: GameData,
+        source_language: SourceLanguage,
+    ) -> None:
         """
         初始化术语表提取器。
 
         Args:
             game_data: 已经载入内存的全局游戏数据对象。
+            source_language: 当前游戏的源语言。
         """
         self.game_data: GameData = game_data
+        self.source_language: SourceLanguage = source_language
 
     def extract_role_dialogue_chunks(
         self,
@@ -75,8 +76,8 @@ class GlossaryExtraction:
         """
         提取地图数据中的显示名称（displayName）。
 
-        此操作会遍历所有的 `MapXXX.json` 文件，如果发现地图存在非空的、且包含日文的
-        显示名，则将其记录下来准备作为地点类术语。
+        此操作会遍历所有的 `MapXXX.json` 文件，如果发现地图存在非空且符合当前源语言
+        特征的显示名，则将其记录下来准备作为地点类术语。
         目前返回结构的值默认填充为空字符串，仅作占位使用。
 
         Returns:
@@ -91,7 +92,10 @@ class GlossaryExtraction:
             # 步骤 2: 过滤掉无效键
             if not display_name:
                 continue
-            if not has_japanese(text=display_name, mode="non_strict"):
+            if not is_glossary_text_candidate(
+                text=display_name,
+                source_language=self.source_language,
+            ):
                 continue
 
             # 步骤 3: 构建值为空字符串的映射
@@ -128,7 +132,7 @@ class GlossaryExtraction:
             match command.code:
                 case Code.NAME:
                     role: str = self._extract_role_from_name_command(command)
-                    if not has_japanese(text=role, mode="non_strict"):
+                    if not self._is_role_name_candidate(role):
                         current_role = None
                         continue
 
@@ -167,8 +171,39 @@ class GlossaryExtraction:
         if not isinstance(role_value, str):
             return ""
 
-        # 步骤 3: 返回去除首尾空白后的角色名
-        return role_value.strip()
+        # 步骤 3: 过滤掉去除控制符后已无可见正文的动态名字。
+        raw_role: str = role_value.strip()
+        if not raw_role:
+            return ""
+
+        visible_role: str = strip_rm_control_sequences(raw_role).strip()
+        if not visible_role:
+            return ""
+
+        # 步骤 4: 角色术语表保留原始显示名，以便后续回写时保留控制符前后缀。
+        return raw_role
+
+    def _is_role_name_candidate(self, role: str) -> bool:
+        """
+        判断角色名是否值得进入术语表。
+
+        角色发言名可能带有 `\\c[21]` 这样的显示控制符，也可能是 `\\V[36]`、`\\N[4]`
+        这类纯动态引用。这里先剥离控制符，再判断剩余可见文本是否像真实角色名。
+
+        Args:
+            role: `101` 指令中的原始发言名。
+
+        Returns:
+            去除控制符后仍含有可翻译正文时返回 `True`。
+        """
+        visible_role: str = strip_rm_control_sequences(role).strip()
+        if not visible_role:
+            return False
+
+        return is_glossary_text_candidate(
+            text=visible_role,
+            source_language=self.source_language,
+        )
 
     def _extract_text_from_text_command(self, command: EventCommand) -> str:
         """

@@ -236,6 +236,7 @@ def _inject_glossary_prompt_texts(raw_config: dict[str, Any], base_dir: Path) ->
         task_config["system_prompt"] = _read_prompt_text(base_dir, prompt_file)
 
 
+
 def _inject_text_translation_prompt_text(
     raw_config: dict[str, Any],
     base_dir: Path,
@@ -362,7 +363,8 @@ def _build_setting_summary(
         ),
         (
             "术语翻译: "
-            f"角色名每批 [tag.count]{setting.glossary_translation.role_name.chunk_size}[/tag.count] 条，"
+            f"[tag.count]{setting.glossary_translation.worker_count}[/tag.count] 个 worker，"
+            f"RPM [tag.count]{setting.glossary_translation.rpm or '不限'}[/tag.count]，"
             f"地点名每批 [tag.count]{setting.glossary_translation.display_name.chunk_size}[/tag.count] 条"
         ),
         (
@@ -397,6 +399,7 @@ def _read_prompt_file_name(
     *,
     raw_config: dict[str, Any],
     section_path: list[str],
+    prompt_key: str = "system_prompt_file",
 ) -> str:
     """
     从原始配置里读取提示词文件名。
@@ -406,7 +409,7 @@ def _read_prompt_file_name(
         section_path: 目标配置段路径。
 
     Returns:
-        对应的 `system_prompt_file` 文件名，缺失时返回“未配置”。
+        对应的提示词文件名，缺失时返回“未配置”。
     """
     current: Any = raw_config
     for key in section_path:
@@ -417,7 +420,7 @@ def _read_prompt_file_name(
     if not isinstance(current, dict):
         return "未配置"
 
-    prompt_file = current.get("system_prompt_file")
+    prompt_file = current.get(prompt_key)
     if not isinstance(prompt_file, str) or not prompt_file.strip():
         return "未配置"
     return prompt_file

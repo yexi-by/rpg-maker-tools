@@ -14,14 +14,13 @@ import copy
 import json
 import shutil
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Self
 
 from dishka import AsyncContainer, make_async_container
 
 from app.config.schemas import Setting
-from app.core.game_data_manager import GameDataManager
 from app.core.di import TranslationProvider
 from app.database.db import (
     DEFAULT_ERROR_TABLE_PREFIX,
@@ -39,6 +38,8 @@ from app.models.schemas import (
     JS_DIRECTORY_NAME,
     PLUGINS_FILE_NAME,
     PLUGINS_ORIGIN_FILE_NAME,
+    Role,
+    SourceLanguage,
     TranslationData,
     TranslationErrorItem,
     TranslationItem,
@@ -52,12 +53,15 @@ from app.translation import (
     iter_error_retry_context_batches,
     iter_translation_context_batches,
 )
-from app.utils.database_utils import read_game_title, resolve_game_directory
+from app.utils.game_loader_utils import (
+    GameDataManager,
+    read_game_title,
+    resolve_game_directory,
+)
 from app.utils.log_utils import logger
 from app.write_back.data_text_write_back import write_data_text
 from app.write_back.glossary_write_back import write_glossary
 from app.write_back.plugin_text_write_back import write_plugin_text
-
 
 
 class TranslationHandler:
@@ -151,12 +155,17 @@ class TranslationHandler:
         """
         await self._container.close()
 
-    async def add_game(self, game_path: str | Path) -> str:
+    async def add_game(
+        self,
+        game_path: str | Path,
+        source_language: SourceLanguage,
+    ) -> str:
         """
         注册一个新的游戏到多游戏新栈。
 
         Args:
             game_path: RPG Maker 游戏根目录路径。
+            source_language: 当前游戏的源语言。
 
         Returns:
             最终登记到管理器中的 `game_title`。
@@ -165,7 +174,10 @@ class TranslationHandler:
         game_title = read_game_title(resolved_game_path)
 
         try:
-            await self.game_database_manager.create_database(resolved_game_path)
+            await self.game_database_manager.create_database(
+                resolved_game_path,
+                source_language,
+            )
             game_database_item = self._get_game_database_item(game_title)
             await self.game_data_manager.load_game_data(game_database_item.game_path)
 
@@ -182,6 +194,7 @@ class TranslationHandler:
         self,
         game_title: str,
         callbacks: tuple[Callable[[int, int], None], Callable[[int], None]],
+        force_rebuild: bool = False,
     ) -> None:
         """
         为指定游戏构建术语表。
@@ -189,6 +202,7 @@ class TranslationHandler:
         Args:
             game_title: 目标游戏标题。
             callbacks: 术语构建进度回调元组。
+            force_rebuild: 为 `True` 时即使当前术语表完整也重新构建。
         """
         set_progress, advance_progress = callbacks
 
@@ -197,8 +211,9 @@ class TranslationHandler:
                 setting = await request_container.get(Setting)
                 glossary_translation = await request_container.get(GlossaryTranslation)
 
+                source_language = self.get_game_source_language(game_title)
                 game_data = self._get_game_data(game_title)
-                glossary_extraction = GlossaryExtraction(game_data)
+                glossary_extraction = GlossaryExtraction(game_data, source_language)
                 sampled_role_lines = glossary_extraction.extract_role_dialogue_chunks(
                     chunk_blocks=setting.glossary_extraction.role_chunk_blocks,
                     chunk_lines=setting.glossary_extraction.role_chunk_lines,
@@ -214,17 +229,29 @@ class TranslationHandler:
 
                 set_progress(0, total)
 
-                if existing_glossary is not None and self._is_glossary_complete(
-                    glossary=existing_glossary,
-                    expected_role_names=expected_role_names,
-                    expected_display_names=expected_display_names,
-                ):
+                glossary_is_complete = (
+                    existing_glossary is not None
+                    and self._is_glossary_complete(
+                        glossary=existing_glossary,
+                        expected_role_names=expected_role_names,
+                        expected_display_names=expected_display_names,
+                    )
+                )
+
+                if glossary_is_complete and not force_rebuild:
                     logger.info(
                         f"[tag.skip]术语表已完整存在，跳过构建[/tag.skip] "
                         f"游戏 [tag.count]{game_title}[/tag.count]"
                     )
                     set_progress(total, total)
                     return
+
+                if glossary_is_complete and force_rebuild:
+                    logger.info(
+                        f"[tag.phase]检测到完整术语表，按要求执行重建[/tag.phase] "
+                        f"游戏 [tag.count]{game_title}[/tag.count] "
+                        "[tag.phase]旧术语表仅会在新术语表构建成功后被替换[/tag.phase]"
+                    )
 
                 if not expected_role_names and not expected_display_names:
                     await self.game_database_manager.replace_glossary(
@@ -248,13 +275,15 @@ class TranslationHandler:
                     logger.info(
                         f"[tag.phase]角色术语翻译[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count]"
                     )
-                    async for role_chunk in glossary_translation.translate_role_names(
-                        llm_handler=self.llm_handler,
-                        role_lines=sampled_role_lines,
-                    ):
-                        roles.extend(role_chunk)
-                        current += len(role_chunk)
-                        advance_progress(len(role_chunk))
+                    roles = await self._translate_roles_with_progress(
+                        glossary_translation=glossary_translation,
+                        sampled_role_lines=sampled_role_lines,
+                        source_language=source_language,
+                        current=current,
+                        total=total,
+                        set_progress=set_progress,
+                    )
+                    current += len(roles)
 
                 places = []
                 if display_names:
@@ -267,6 +296,7 @@ class TranslationHandler:
                         llm_handler=self.llm_handler,
                         display_names=display_names,
                         roles=roles,
+                        source_language=source_language,
                     ):
                         places.extend(place_chunk)
                         current += len(place_chunk)
@@ -283,6 +313,175 @@ class TranslationHandler:
                     set_progress(current, total)
         except Exception:
             raise
+
+    async def has_complete_glossary(self, game_title: str) -> bool:
+        """
+        判断指定游戏当前是否已经存在完整可用的术语表。
+
+        这里会重新按照当前源语言和术语提取配置提取角色名与地点名，
+        再与数据库里的术语表做严格比对。调用方可以基于这个结果决定
+        是否需要提示“重建术语表”。
+
+        Args:
+            game_title: 目标游戏标题。
+
+        Returns:
+            当前数据库中已经存在完整术语表时返回 `True`。
+        """
+        async with self._container() as request_container:
+            setting = await request_container.get(Setting)
+
+            source_language = self.get_game_source_language(game_title)
+            game_data = self._get_game_data(game_title)
+            glossary_extraction = GlossaryExtraction(game_data, source_language)
+            sampled_role_lines = glossary_extraction.extract_role_dialogue_chunks(
+                chunk_blocks=setting.glossary_extraction.role_chunk_blocks,
+                chunk_lines=setting.glossary_extraction.role_chunk_lines,
+            )
+            display_names = glossary_extraction.extract_display_names()
+            glossary = await self.game_database_manager.read_glossary(game_title)
+
+            if glossary is None:
+                return False
+
+            return self._is_glossary_complete(
+                glossary=glossary,
+                expected_role_names=set(sampled_role_lines),
+                expected_display_names=set(display_names),
+            )
+
+    async def _translate_roles_with_progress(
+        self,
+        *,
+        glossary_translation: GlossaryTranslation,
+        sampled_role_lines: dict[str, list[str]],
+        source_language: SourceLanguage,
+        current: int,
+        total: int,
+        set_progress: Callable[[int, int], None],
+    ) -> list[Role]:
+        """
+        在角色术语翻译期间，把内部候选任务进度折算到总进度条。
+
+        角色翻译链路现在只会在全部角色请求完成后 `yield` 一次最终结果，
+        因此如果编排层只等最终结果再推进进度条，界面会在大规模角色翻译阶段
+        长时间停在 `0/N`。这里通过读取 `GlossaryTranslation.progress_state`
+        的内部完成度，把单角色任务完成比例投影到“最终角色术语条数”这段区间上，
+        让总进度条持续前进。
+
+        Args:
+            glossary_translation: 当前请求级术语翻译服务。
+            sampled_role_lines: 角色样本台词映射。
+            source_language: 当前游戏源语言。
+            current: 进入角色阶段前已经完成的总进度。
+            total: 当前术语构建总进度。
+            set_progress: 设置绝对进度的界面回调。
+
+        Returns:
+            角色翻译完成后的角色术语列表。
+        """
+        roles: list[Role] = []
+        expected_role_count = len(sampled_role_lines)
+        stop_event = asyncio.Event()
+        monitor_task = asyncio.create_task(
+            self._watch_role_glossary_progress(
+                glossary_translation=glossary_translation,
+                current=current,
+                total=total,
+                expected_role_count=expected_role_count,
+                set_progress=set_progress,
+                stop_event=stop_event,
+            )
+        )
+
+        try:
+            async for role_chunk in glossary_translation.translate_roles(
+                llm_handler=self.llm_handler,
+                role_lines=sampled_role_lines,
+                source_language=source_language,
+            ):
+                roles.extend(role_chunk)
+        finally:
+            stop_event.set()
+            await monitor_task
+
+        set_progress(current + len(roles), total)
+        return roles
+
+    async def _watch_role_glossary_progress(
+        self,
+        *,
+        glossary_translation: GlossaryTranslation,
+        current: int,
+        total: int,
+        expected_role_count: int,
+        set_progress: Callable[[int, int], None],
+        stop_event: asyncio.Event,
+    ) -> None:
+        """
+        按固定间隔轮询角色术语内部进度，并同步到总进度条。
+
+        Args:
+            glossary_translation: 当前请求级术语翻译服务。
+            current: 角色阶段开始前的基础进度。
+            total: 当前术语构建总进度。
+            expected_role_count: 当前预计产出的角色术语条数。
+            set_progress: 设置绝对进度的界面回调。
+            stop_event: 停止轮询信号。
+        """
+        last_reported = -1
+        while not stop_event.is_set():
+            progress_state = glossary_translation.progress_state
+            projected_delta = self._project_role_progress(
+                progress_state=progress_state,
+                expected_role_count=expected_role_count,
+            )
+            projected_current = current + projected_delta
+            if projected_current != last_reported:
+                set_progress(projected_current, total)
+                last_reported = projected_current
+
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=0.1)
+            except asyncio.TimeoutError:
+                continue
+
+    @staticmethod
+    def _project_role_progress(
+        *,
+        progress_state: Mapping[str, object],
+        expected_role_count: int,
+    ) -> int:
+        """
+        把角色术语内部阶段进度映射成最终角色术语条数区间内的绝对增量。
+
+        Args:
+            progress_state: `GlossaryTranslation.progress_state` 的只读副本。
+            expected_role_count: 当前预计产出的角色术语条数。
+
+        Returns:
+            对应角色阶段应当显示的进度增量。
+        """
+        if expected_role_count <= 0:
+            return 0
+
+        phase = progress_state.get("phase")
+        completed = progress_state.get("completed")
+        phase_total = progress_state.get("total")
+
+        if phase == "done":
+            return expected_role_count
+
+        if (
+            phase != "role_candidates"
+            or not isinstance(completed, int)
+            or not isinstance(phase_total, int)
+            or phase_total <= 0
+        ):
+            return 0
+
+        bounded_completed = min(max(completed, 0), phase_total)
+        return int(expected_role_count * bounded_completed / phase_total)
 
     async def translate_text(
         self,
@@ -308,10 +507,14 @@ class TranslationHandler:
                 text_translation = await request_container.get(TextTranslation)
                 translation_cache = await request_container.get(TranslationCache)
 
+                source_language = self.get_game_source_language(game_title)
                 game_data = self._get_game_data(game_title)
-                glossary_extraction = GlossaryExtraction(game_data)
+                glossary_extraction = GlossaryExtraction(game_data, source_language)
                 data_text_extraction = DataTextExtraction(game_data)
-                plugin_text_extraction = PluginTextExtraction(game_data)
+                plugin_text_extraction = PluginTextExtraction(
+                    game_data,
+                    source_language,
+                )
 
                 glossary = await self.game_database_manager.read_glossary(game_title)
                 role_lines = glossary_extraction.extract_role_dialogue_chunks(
@@ -400,6 +603,7 @@ class TranslationHandler:
                     translation_data_map=deduplicated_translation_data,
                     glossary=glossary,
                     setting=setting,
+                    source_language=source_language,
                 )
                 if not batches:
                     logger.warning(
@@ -423,6 +627,7 @@ class TranslationHandler:
                     finish_log_message="正文翻译流程结束",
                     advance_progress=advance_progress,
                     set_status=set_status,
+                    source_language=source_language,
                     translation_cache=translation_cache,
                 )
                 set_status(
@@ -456,8 +661,9 @@ class TranslationHandler:
                 text_translation = await request_container.get(TextTranslation)
                 translation_cache = await request_container.get(TranslationCache)
 
+                source_language = self.get_game_source_language(game_title)
                 game_data = self._get_game_data(game_title)
-                glossary_extraction = GlossaryExtraction(game_data)
+                glossary_extraction = GlossaryExtraction(game_data, source_language)
                 glossary = await self.game_database_manager.read_glossary(game_title)
                 role_lines = glossary_extraction.extract_role_dialogue_chunks(
                     chunk_blocks=setting.glossary_extraction.role_chunk_blocks,
@@ -524,6 +730,7 @@ class TranslationHandler:
                     error_retry_items=error_retry_items,
                     glossary=glossary,
                     setting=setting,
+                    source_language=source_language,
                 )
                 if not batches:
                     logger.warning(
@@ -547,6 +754,7 @@ class TranslationHandler:
                     finish_log_message="错误表重翻译流程结束",
                     advance_progress=advance_progress,
                     set_status=set_status,
+                    source_language=source_language,
                     translation_cache=translation_cache,
                 )
                 set_status(
@@ -624,9 +832,12 @@ class TranslationHandler:
                 game_data=game_data,
                 game_root=game_database_item.game_path,
             )
-            active_data_dir, origin_data_dir, _active_plugins_path, _origin_plugins_path = (
-                self._build_game_layout_paths(game_database_item.game_path)
-            )
+            (
+                active_data_dir,
+                origin_data_dir,
+                _active_plugins_path,
+                _origin_plugins_path,
+            ) = self._build_game_layout_paths(game_database_item.game_path)
             logger.success(
                 f"[tag.success]激活版游戏文件已重建[/tag.success] "
                 f"游戏 [tag.count]{game_title}[/tag.count] "
@@ -635,6 +846,35 @@ class TranslationHandler:
             )
         except Exception:
             raise
+
+    def get_game_source_language(self, game_title: str) -> SourceLanguage:
+        """
+        读取指定游戏当前登记的源语言。
+
+        Args:
+            game_title: 目标游戏标题。
+
+        Returns:
+            当前游戏的源语言。
+        """
+        return self._get_game_database_item(game_title).source_language
+
+    async def update_game_source_language(
+        self,
+        game_title: str,
+        source_language: SourceLanguage,
+    ) -> None:
+        """
+        更新指定游戏的源语言。
+
+        Args:
+            game_title: 目标游戏标题。
+            source_language: 新的源语言。
+        """
+        await self.game_database_manager.update_source_language(
+            game_title=game_title,
+            source_language=source_language,
+        )
 
     def _get_game_data(self, game_title: str) -> GameData:
         """
@@ -790,6 +1030,7 @@ class TranslationHandler:
         translation_data_map: dict[str, TranslationData],
         glossary: Glossary,
         setting: Setting,
+        source_language: SourceLanguage,
     ) -> list[tuple[list[TranslationItem], list[ChatMessage]]]:
         """
         把待翻译正文构造成上下文批次。
@@ -814,6 +1055,7 @@ class TranslationHandler:
                     max_command_items=context_setting.max_command_items,
                     system_prompt=setting.text_translation.system_prompt,
                     glossary=glossary,
+                    source_language=source_language,
                 )
             )
 
@@ -824,6 +1066,7 @@ class TranslationHandler:
         error_retry_items: list[ErrorRetryItem],
         glossary: Glossary,
         setting: Setting,
+        source_language: SourceLanguage,
     ) -> list[tuple[list[TranslationItem], list[ChatMessage]]]:
         """
         把错误表条目构造成错误重翻译批次。
@@ -842,6 +1085,7 @@ class TranslationHandler:
                 chunk_size=setting.error_translation.chunk_size,
                 system_prompt=setting.error_translation.system_prompt,
                 glossary=glossary,
+                source_language=source_language,
             )
         )
 
@@ -855,6 +1099,7 @@ class TranslationHandler:
         finish_log_message: str,
         advance_progress: Callable[[int], None],
         set_status: Callable[[str], None],
+        source_language: SourceLanguage,
         translation_cache: TranslationCache | None = None,
     ) -> tuple[int, int]:
         """
@@ -886,6 +1131,7 @@ class TranslationHandler:
         text_translation.start_translation(
             llm_handler=self.llm_handler,
             batches=batches,
+            source_language=source_language,
         )
         logger.info(
             f"[tag.phase]任务启动[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] "

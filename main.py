@@ -7,7 +7,30 @@
 
 
 import argparse
+import warnings
 from collections.abc import Sequence
+
+
+def _suppress_known_third_party_warnings() -> None:
+    """
+    屏蔽已确认不影响当前项目运行的第三方已知警告。
+
+    这里不能粗暴关闭全部 `UserWarning`，否则会把真正有价值的运行时提示一起吞掉。
+    当前只精确屏蔽 `volcenginesdkarkruntime` 在 Python 3.14 下发出的那一条
+    兼容性提示，避免每次启动 TUI 都污染终端输出。
+    """
+    warnings.filterwarnings(
+        action="ignore",
+        message=(
+            r"Core Pydantic V1 functionality isn't compatible with Python 3\.14 "
+            r"or greater\."
+        ),
+        category=UserWarning,
+        module=r"volcenginesdkarkruntime\._compat",
+    )
+
+
+_suppress_known_third_party_warnings()
 
 from app.tui import TranslationWorkbenchApp
 from app.utils import logger

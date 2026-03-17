@@ -5,8 +5,9 @@ RPG Maker 原始数据结构模型模块。
 用于承接 `data/` 目录及相关文件在解析后的结构化结果。
 """
 
-from pydantic import BaseModel, Field
 from typing import Any
+
+from pydantic import BaseModel, Field
 
 
 class BaseItem(BaseModel):
@@ -190,3 +191,28 @@ class CommonEvent(BaseModel):
 
     id: int
     commands: list[EventCommand] = Field(..., alias="list")
+
+
+class QuestEntry(BaseModel):
+    """
+    自定义任务数据条目模型。
+
+    对应部分游戏额外扩展出来的 `Quests.json` 文件。
+    该文件不属于 RPG Maker 标准数据结构，因此单独定义轻量模型，
+    只承接当前已确认需要翻译或需要保留的字段。
+
+    Attributes:
+        title_cte: 任务标题文本。
+        summaries_cte: 任务摘要文本字典，键通常为字符串数字。
+        rewards_cte: 任务奖励文本字典，键通常为字符串数字。
+        objectives_cte: 任务目标文本字典，键通常为字符串数字。
+        condition: 任务出现条件脚本。该字段只保留，不参与翻译。
+        roland_quest: 特定支线标记值。该字段只保留，不参与翻译。
+    """
+
+    title_cte: str
+    summaries_cte: dict[str, str]
+    rewards_cte: dict[str, str]
+    objectives_cte: dict[str, str]
+    condition: str | None = None
+    roland_quest: int | None = None

@@ -36,7 +36,7 @@
   - 校验模型返回 JSON 结构
   - 校验漏翻
   - 校验占位符与控制符
-  - 校验日文残留
+  - 校验源语言残留（当前支持日文 / 英文）
   - 校验失败条目自动落入错误表
 - 错误重翻
   - 自动读取最近一张错误表
@@ -331,6 +331,7 @@ system_prompt_file = "prompts/text_translation_system.txt"
 - 滚动文本
 - `System.json` 内的系统术语、提示消息、游戏标题等
 - 基础数据库中的名称、昵称、简介、说明、战斗消息
+- 可选 `Quests.json` 中的 `title_cte`、`summaries_cte`、`rewards_cte`、`objectives_cte`
 - 事件中的插件命令文本参数
 
 ### 9.2 `js/plugins.js`

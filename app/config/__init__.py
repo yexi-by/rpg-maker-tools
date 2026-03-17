@@ -8,6 +8,7 @@
 from .schemas import (
     ErrorTranslationSetting,
     GlossaryExtractionSetting,
+    GlossaryRoleNameTranslationSetting,
     GlossaryTranslationSetting,
     GlossaryTranslationTaskSetting,
     LLMServicesSetting,
@@ -20,6 +21,7 @@ from .schemas import (
 __all__: list[str] = [
     "ErrorTranslationSetting",
     "GlossaryExtractionSetting",
+    "GlossaryRoleNameTranslationSetting",
     "GlossaryTranslationSetting",
     "GlossaryTranslationTaskSetting",
     "LLMServicesSetting",

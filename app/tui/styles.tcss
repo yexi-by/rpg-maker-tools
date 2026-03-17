@@ -117,6 +117,18 @@ Screen {
     padding: 2 4;
 }
 
+#task-source-language-row {
+    height: auto;
+    align: left middle;
+    margin-bottom: 1;
+}
+
+#task-source-language-label {
+    width: 8;
+    color: $text-muted;
+    padding-top: 1;
+}
+
 #task-title {
     text-style: bold;
     color: $accent;

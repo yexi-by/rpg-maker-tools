@@ -79,9 +79,10 @@ CREATE_GLOSSARY_STATE_TABLE: str = f"""
 CREATE_METADATA_TABLE: str = f"""
 --sql
     CREATE TABLE IF NOT EXISTS [{METADATA_TABLE_NAME}] (
-        metadata_key TEXT PRIMARY KEY,
-        game_title   TEXT NOT NULL,
-        game_path    TEXT NOT NULL
+        metadata_key    TEXT PRIMARY KEY,
+        game_title      TEXT NOT NULL,
+        game_path       TEXT NOT NULL,
+        source_language TEXT NOT NULL
     )
 ;
 """
@@ -135,8 +136,16 @@ UPSERT_GLOSSARY_STATE: str = f"""
 UPSERT_METADATA: str = f"""
 --sql
     INSERT OR REPLACE INTO [{METADATA_TABLE_NAME}]
-    (metadata_key, game_title, game_path)
-    VALUES (?, ?, ?)
+    (metadata_key, game_title, game_path, source_language)
+    VALUES (?, ?, ?, ?)
+;
+"""
+
+UPDATE_METADATA_SOURCE_LANGUAGE: str = f"""
+--sql
+    UPDATE [{METADATA_TABLE_NAME}]
+    SET source_language = ?
+    WHERE metadata_key = ?
 ;
 """
 
@@ -206,7 +215,7 @@ SELECT_LATEST_TABLE_NAME_BY_PREFIX: str = """
 # 读取当前数据库对应的游戏元数据。
 SELECT_METADATA: str = f"""
 --sql
-    SELECT game_title, game_path
+    SELECT game_title, game_path, source_language
     FROM [{METADATA_TABLE_NAME}]
     WHERE metadata_key = ?
     LIMIT 1
@@ -254,6 +263,7 @@ __all__: list[str] = [
     "SELECT_TRANSLATED_ITEMS",
     "SELECT_TRANSLATION_PATHS",
     "TRANSLATION_TABLE_NAME",
+    "UPDATE_METADATA_SOURCE_LANGUAGE",
     "UPSERT_GLOSSARY_STATE",
     "UPSERT_METADATA",
 ]

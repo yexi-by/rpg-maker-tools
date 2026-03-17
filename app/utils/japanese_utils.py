@@ -20,12 +20,12 @@ type JapaneseDetectMode = Literal["strict", "non_strict"]
 # 3. \u30A1-\u30FA 为常用片假名字符。
 # 4. \u30FD-\u30FF 为片假名迭代符等扩展字符。
 STRICT_JAPANESE_PATTERN: re.Pattern[str] = re.compile(
-    r"[\u3041-\u3096\u309D-\u309F\u30A1-\u30FA\u30FD-\u30FF]"
+    "[ぁ-ゖゝ-ゟァ-ヺヽ-ヿ]"
 )
 
 # 非严格模式：在严格模式基础上额外判断汉字。
 NON_STRICT_JAPANESE_PATTERN: re.Pattern[str] = re.compile(
-    r"[\u3041-\u3096\u309D-\u309F\u30A1-\u30FA\u30FD-\u30FF\u4E00-\u9FFF]"
+    "[ぁ-ゖゝ-ゟァ-ヺヽ-ヿ一-鿿]"
 )
 
 
@@ -49,12 +49,10 @@ def has_japanese(text: str, mode: JapaneseDetectMode) -> bool:
         return False
 
     # 步骤 2: 选择对应的编译好的正则模式
-    pattern: re.Pattern[str]
-    match mode:
-        case "strict":
-            pattern = STRICT_JAPANESE_PATTERN
-        case "non_strict":
-            pattern = NON_STRICT_JAPANESE_PATTERN
+    if mode == "strict":
+        pattern = STRICT_JAPANESE_PATTERN
+    else:
+        pattern = NON_STRICT_JAPANESE_PATTERN
 
     # 步骤 3: 执行正则搜索，如果找到匹配即说明含有相应字符
     return pattern.search(text) is not None

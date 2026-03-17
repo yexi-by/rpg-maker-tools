@@ -41,7 +41,8 @@ from textual.widgets import (
 from app.config.schemas import Setting
 from app.core.di import TranslationProvider
 from app.core.handler import TranslationHandler
-from app.utils import LogLine, logger, setup_logger
+from app.models.schemas import SourceLanguage
+from app.utils import LogLine, get_source_language_label, logger, setup_logger
 from app.utils.config_loader_utils import load_setting_document, save_setting_value
 from tomlkit.toml_document import TOMLDocument
 
@@ -92,6 +93,10 @@ PROVIDER_OPTIONS: tuple[tuple[str, str], ...] = (
     ("OpenAI 兼容接口", "openai"),
     ("Gemini 接口", "gemini"),
     ("火山引擎接口", "volcengine"),
+)
+SOURCE_LANGUAGE_OPTIONS: tuple[tuple[str, SourceLanguage], ...] = (
+    ("日文 (ja)", "ja"),
+    ("英文 (en)", "en"),
 )
 
 SETTING_CARDS: tuple[SettingCardSpec, ...] = (
@@ -171,12 +176,21 @@ SETTING_CARDS: tuple[SettingCardSpec, ...] = (
                 ),
             ),
             SettingSectionSpec(
-                title="角色名翻译",
+                title="术语并发",
                 fields=(
                     SettingFieldSpec(
-                        path=("glossary_translation", "role_name", "chunk_size"),
+                        path=("glossary_translation", "worker_count"),
                         kind="int",
                     ),
+                    SettingFieldSpec(
+                        path=("glossary_translation", "rpm"),
+                        kind="int",
+                    ),
+                ),
+            ),
+            SettingSectionSpec(
+                title="角色名翻译",
+                fields=(
                     SettingFieldSpec(
                         path=("glossary_translation", "role_name", "retry_count"),
                         kind="int",
@@ -321,7 +335,7 @@ def _iter_setting_fields() -> tuple[SettingFieldSpec, ...]:
 ALL_SETTING_FIELDS: tuple[SettingFieldSpec, ...] = _iter_setting_fields()
 
 
-class AddGamePathScreen(ModalScreen[str | None]):
+class AddGamePathScreen(ModalScreen[tuple[str, SourceLanguage] | None]):
     """
     添加游戏路径输入弹窗。
     """
@@ -336,6 +350,13 @@ class AddGamePathScreen(ModalScreen[str | None]):
             yield Static("添加 RPG Maker 游戏", id="dialog-title")
             yield Static("请输入游戏根目录路径。")
             yield Input(placeholder="例如：D:/games/your-project", id="game-path-input")
+            yield Static("请选择源语言。")
+            yield Select(
+                options=SOURCE_LANGUAGE_OPTIONS,
+                allow_blank=False,
+                value="ja",
+                id="dialog-source-language-select",
+            )
             with Vertical(id="dialog-actions"):
                 yield Button("确认", id="confirm")
                 yield Button("取消", id="cancel")
@@ -378,7 +399,66 @@ class AddGamePathScreen(ModalScreen[str | None]):
         game_path = self.query_one("#game-path-input", Input).value.strip()
         if not game_path:
             return
-        self.dismiss(game_path)
+        source_language = self.query_one(
+            "#dialog-source-language-select",
+            Select,
+        ).value
+        self.dismiss((game_path, cast(SourceLanguage, str(source_language))))
+
+
+class GlossaryRebuildConfirmScreen(ModalScreen[tuple[str, bool] | None]):
+    """
+    术语表重建确认弹窗。
+
+    当当前游戏已经存在完整术语表时，构建操作不会立即开始，而是先由这个弹窗
+    询问用户是否重建。这里明确告知覆盖语义，避免用户误以为一旦点击重建就会
+    立刻删除旧表。
+    """
+
+    BINDINGS = [("escape", "cancel", "关闭")]
+
+    def __init__(self, game_title: str) -> None:
+        """
+        初始化重建确认弹窗。
+
+        Args:
+            game_title: 当前准备重建术语表的游戏标题。
+        """
+        super().__init__()
+        self.game_title = game_title
+
+    def compose(self) -> ComposeResult:
+        """
+        组装重建确认弹窗控件。
+        """
+        with Vertical(id="dialog"):
+            yield Static("检测到已存在完整术语表", id="dialog-title")
+            yield Static(f"游戏：{self.game_title}")
+            yield Static("是否重建术语表？")
+            yield Static(
+                "只有新术语表构建成功后才会覆盖旧术语表；如果中途失败，将继续沿用旧术语表。"
+            )
+            with Vertical(id="dialog-actions"):
+                yield Button("重建", id="confirm-glossary-rebuild")
+                yield Button("取消", id="cancel-glossary-rebuild")
+
+    def action_cancel(self) -> None:
+        """
+        关闭弹窗并返回空结果。
+        """
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """
+        处理确认弹窗按钮点击。
+
+        Args:
+            event: 按钮点击事件。
+        """
+        if event.button.id == "confirm-glossary-rebuild":
+            self.dismiss((self.game_title, True))
+            return
+        self.dismiss(None)
 
 
 class HomeDashboard(Vertical):
@@ -425,13 +505,16 @@ class TranslationWorkbenchApp(App[None]):
         self.handler: TranslationHandler | None = None
         self.current_view: Literal["home", "settings", "actions"] = "home"
         self.selected_game_title: str | None = None
+        self.selected_game_source_language: SourceLanguage | None = None
         self.selected_action_id: str = "build_glossary"
         self.task_running: bool = False
+        self.source_language_updating: bool = False
+        self._glossary_rebuild_checking: bool = False
         self.progress_current: int = 0
         self.progress_total: int = 0
         self.home_status_text: str = "请选择一个游戏，按 Enter 进入。"
         self.task_title_text: str = "当前任务：未开始"
-        self.task_phase_text: str = "游戏：未选择"
+        self.task_phase_text: str = "游戏：未选择 | 源语言：未选择"
         self.task_status_text: str = "状态：请选择功能"
         self.task_detail_text: str = "细节：使用上下键选择功能，Enter 执行，Esc 返回"
         self.settings_dirty_fields: set[str] = set()
@@ -442,6 +525,7 @@ class TranslationWorkbenchApp(App[None]):
         self._ui_queue: SimpleQueue[tuple[Any, ...]] = SimpleQueue()
         self._shutdown_started: bool = False
         self._settings_event_suspended: bool = False
+        self._actions_source_language_ready: bool = False
         self._setting_document: TOMLDocument | None = None
         self._setting_specs_by_widget_id: dict[str, SettingFieldSpec] = {
             spec.widget_id: spec for spec in ALL_SETTING_FIELDS
@@ -491,6 +575,15 @@ class TranslationWorkbenchApp(App[None]):
 
                             with Vertical(id="actions-workspace"):
                                 with Vertical(id="actions-task-panel"):
+                                    with Horizontal(id="task-source-language-row"):
+                                        yield Static("源语言", id="task-source-language-label")
+                                        yield Select(
+                                            options=SOURCE_LANGUAGE_OPTIONS,
+                                            allow_blank=False,
+                                            value="ja",
+                                            id="actions-source-language-select",
+                                            classes="setting-select",
+                                        )
                                     yield Static(self.task_title_text, id="task-title")
                                     yield Static(self.task_phase_text, id="task-phase")
                                     yield Static(self.task_status_text, id="task-status")
@@ -641,7 +734,7 @@ class TranslationWorkbenchApp(App[None]):
         if self.current_view == "home":
             return
 
-        if self.task_running:
+        if self.task_running or self._glossary_rebuild_checking:
             self.bell()
             return
 
@@ -748,16 +841,20 @@ class TranslationWorkbenchApp(App[None]):
 
     def on_select_changed(self, event: Select.Changed) -> None:
         """
-        处理设置页枚举选择变化。
+        处理下拉选择变化。
 
         Args:
             event: 下拉选择变化事件。
         """
-        if self._settings_event_suspended:
-            return
-
         widget_id = event.select.id
         if widget_id is None:
+            return
+
+        if widget_id == "actions-source-language-select":
+            self._handle_actions_source_language_change(event)
+            return
+
+        if self._settings_event_suspended:
             return
 
         field_spec = self._setting_specs_by_widget_id.get(widget_id)
@@ -765,6 +862,53 @@ class TranslationWorkbenchApp(App[None]):
             return
 
         self._try_save_setting(field_spec=field_spec, raw_value=str(event.value))
+
+    def _handle_actions_source_language_change(self, event: Select.Changed) -> None:
+        """
+        处理任务页源语言切换。
+
+        Args:
+            event: 源语言下拉选择变化事件。
+        """
+        if self._settings_event_suspended:
+            return
+        if not self._actions_source_language_ready:
+            return
+        if not event.select.has_focus:
+            return
+        if self.task_running or self.source_language_updating:
+            self._sync_actions_source_language_select()
+            return
+        if self.handler is None or self.selected_game_title is None:
+            self._sync_actions_source_language_select()
+            return
+
+        new_source_language = cast(SourceLanguage, str(event.value))
+        old_source_language = self.selected_game_source_language
+        if old_source_language is None:
+            old_source_language = self.handler.get_game_source_language(
+                self.selected_game_title
+            )
+        if new_source_language == old_source_language:
+            return
+
+        self.source_language_updating = True
+        self.task_detail_text = (
+            "细节：正在保存源语言为 "
+            f"{get_source_language_label(new_source_language)} ({new_source_language})"
+        )
+        self._refresh_action_list()
+        self._refresh_action_panel()
+        self.run_worker(
+            self._run_update_source_language_task(
+                game_title=self.selected_game_title,
+                old_source_language=old_source_language,
+                new_source_language=new_source_language,
+            ),
+            group="translation-workbench",
+            exclusive=False,
+            exit_on_error=False,
+        )
 
     def on_descendant_focus(self, event: events.DescendantFocus) -> None:
         """
@@ -813,6 +957,7 @@ class TranslationWorkbenchApp(App[None]):
         """
         切换到首页。
         """
+        self._actions_source_language_ready = False
         self.current_view = "home"
         self.query_one("#view-switcher", ContentSwitcher).current = "home-view"
         self._refresh_home_view()
@@ -835,7 +980,9 @@ class TranslationWorkbenchApp(App[None]):
         """
         切换到二级翻译页。
         """
+        self._actions_source_language_ready = False
         self.current_view = "actions"
+        self.selected_game_source_language = self._load_game_source_language(game_title)
         self._reset_task_panel(game_title)
         self.query_one("#view-switcher", ContentSwitcher).current = "actions-view"
         self._refresh_action_list()
@@ -857,6 +1004,17 @@ class TranslationWorkbenchApp(App[None]):
         if self.current_view == "settings":
             return "设置页面"
         if self.current_view == "actions":
+            if (
+                self.selected_game_title is not None
+                and self.selected_game_source_language is not None
+            ):
+                language_label = get_source_language_label(
+                    self.selected_game_source_language
+                )
+                return (
+                    f"游戏：{self.selected_game_title} | "
+                    f"源语言：{language_label} ({self.selected_game_source_language})"
+                )
             return f"游戏：{self.selected_game_title or '未选择'}"
         return "选择游戏"
 
@@ -929,9 +1087,16 @@ class TranslationWorkbenchApp(App[None]):
         """
         for btn in self.query(".action-btn"):
             if isinstance(btn, Button):
-                btn.disabled = self.task_running
+                btn.disabled = self.task_running or self._glossary_rebuild_checking
 
-        self.query_one("#actions-back-button", Button).disabled = self.task_running
+        self.query_one("#actions-back-button", Button).disabled = (
+            self.task_running or self._glossary_rebuild_checking
+        )
+        self.query_one("#actions-source-language-select", Select).disabled = (
+            self.task_running
+            or self.source_language_updating
+            or self._glossary_rebuild_checking
+        )
 
     def _refresh_action_panel(self) -> None:
         """
@@ -941,6 +1106,7 @@ class TranslationWorkbenchApp(App[None]):
         self.query_one("#task-phase", Static).update(self.task_phase_text)
         self.query_one("#task-status", Static).update(self.task_status_text)
         self.query_one("#task-detail", Static).update(self.task_detail_text)
+        self._sync_actions_source_language_select()
 
         progress = self.query_one("#task-progress", ProgressBar)
         total = max(self.progress_total, 1)
@@ -1018,13 +1184,17 @@ class TranslationWorkbenchApp(App[None]):
         first_widget_id = ALL_SETTING_FIELDS[0].widget_id
         self.query_one(f"#{first_widget_id}").focus()
 
-    def _handle_add_game_result(self, game_path: str | None) -> None:
+    def _handle_add_game_result(
+        self,
+        result: tuple[str, SourceLanguage] | None,
+    ) -> None:
         """
         处理添加游戏弹窗返回值。
         """
-        if not game_path:
+        if result is None:
             return
-        self.start_add_game(game_path)
+        game_path, source_language = result
+        self.start_add_game(game_path, source_language)
 
     def _open_selected_game(self) -> None:
         """
@@ -1038,11 +1208,19 @@ class TranslationWorkbenchApp(App[None]):
         """
         执行当前选中的翻译功能。
         """
-        if self.selected_game_title is None or self.task_running:
+        if (
+            self.selected_game_title is None
+            or self.task_running
+            or self._glossary_rebuild_checking
+        ):
             return
         self.start_game_task(self.selected_action_id, self.selected_game_title)
 
-    def start_add_game(self, game_path: str) -> None:
+    def start_add_game(
+        self,
+        game_path: str,
+        source_language: SourceLanguage,
+    ) -> None:
         """
         启动添加游戏任务。
         """
@@ -1053,7 +1231,7 @@ class TranslationWorkbenchApp(App[None]):
         self._refresh_home_view()
         self._refresh_header()
         self.run_worker(
-            self._run_add_game_task(game_path),
+            self._run_add_game_task(game_path, source_language),
             group="translation-workbench",
             exclusive=True,
             exit_on_error=False,
@@ -1063,14 +1241,44 @@ class TranslationWorkbenchApp(App[None]):
         """
         针对当前游戏启动指定任务。
         """
-        if self.task_running:
+        self._start_game_task(
+            action_id=action_id,
+            game_title=game_title,
+            force_rebuild=False,
+            skip_glossary_confirmation=False,
+        )
+
+    def _start_game_task(
+        self,
+        action_id: str,
+        game_title: str,
+        force_rebuild: bool,
+        skip_glossary_confirmation: bool,
+    ) -> None:
+        """
+        按当前上下文真正启动任务，或在术语构建前先进入重建确认分支。
+
+        Args:
+            action_id: 当前动作标识。
+            game_title: 目标游戏标题。
+            force_rebuild: 是否强制重建术语表。
+            skip_glossary_confirmation: 是否跳过“已有术语表”检查。
+        """
+        if self.task_running or self._glossary_rebuild_checking:
+            return
+
+        if action_id == "build_glossary" and not skip_glossary_confirmation:
+            self._start_glossary_rebuild_check(game_title)
             return
 
         coroutine: Awaitable[None] | None = None
         task_label = ""
         if action_id == "build_glossary":
             task_label = "构建术语"
-            coroutine = self._run_build_glossary_task(game_title)
+            coroutine = self._run_build_glossary_task(
+                game_title,
+                force_rebuild=force_rebuild,
+            )
         elif action_id == "translate_text":
             task_label = "正文翻译"
             coroutine = self._run_translate_text_task(game_title)
@@ -1096,7 +1304,65 @@ class TranslationWorkbenchApp(App[None]):
             exit_on_error=False,
         )
 
-    async def _run_add_game_task(self, game_path: str) -> None:
+    def _start_glossary_rebuild_check(self, game_title: str) -> None:
+        """
+        在真正启动术语构建前，先检查当前游戏是否已经存在完整术语表。
+
+        这里要用异步 worker 做检查，避免在 UI 线程里直接等待数据库与提取逻辑。
+
+        Args:
+            game_title: 目标游戏标题。
+        """
+        if self._glossary_rebuild_checking or self.task_running:
+            return
+
+        self._glossary_rebuild_checking = True
+        self.task_title_text = "当前任务：构建术语"
+        self.task_phase_text = self._build_task_phase_text(game_title)
+        self.task_status_text = "状态：正在检查现有术语表"
+        self.task_detail_text = "细节：如果已存在完整术语表，将先询问是否重建。"
+        self._refresh_action_list()
+        self._refresh_action_panel()
+        self._refresh_header()
+        self.run_worker(
+            self._run_glossary_rebuild_check_task(game_title),
+            group="translation-workbench",
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    def _handle_glossary_rebuild_confirm(
+        self,
+        result: tuple[str, bool] | None,
+    ) -> None:
+        """
+        处理术语表重建确认弹窗结果。
+
+        Args:
+            result: 用户确认结果；为 `None` 表示取消。
+        """
+        if result is None:
+            self.task_status_text = "状态：已取消重建"
+            self.task_detail_text = "细节：继续沿用已有术语表。"
+            self._refresh_action_list()
+            self._refresh_action_panel()
+            self._refresh_header()
+            self.query_one("#btn-build_glossary", Button).focus()
+            return
+
+        game_title, force_rebuild = result
+        self._start_game_task(
+            action_id="build_glossary",
+            game_title=game_title,
+            force_rebuild=force_rebuild,
+            skip_glossary_confirmation=True,
+        )
+
+    async def _run_add_game_task(
+        self,
+        game_path: str,
+        source_language: SourceLanguage,
+    ) -> None:
         """
         执行添加游戏任务。
         """
@@ -1106,9 +1372,16 @@ class TranslationWorkbenchApp(App[None]):
             return
 
         try:
-            game_title = await self.handler.add_game(game_path)
-            self._ui_queue.put(("reload_games", game_title))
-            self._ui_queue.put(("home_status", f"已添加游戏：{game_title}"))
+            game_title = await self.handler.add_game(game_path, source_language)
+            self._ui_queue.put(("reload_games", game_title, source_language))
+            self._ui_queue.put(
+                (
+                    "home_status",
+                    "已添加游戏："
+                    f"{game_title}（源语言："
+                    f"{get_source_language_label(source_language)} ({source_language})）",
+                )
+            )
         except Exception as error:
             error_summary = self._format_exception_summary(error)
             logger.exception(
@@ -1118,19 +1391,108 @@ class TranslationWorkbenchApp(App[None]):
         finally:
             self._ui_queue.put(("task_done",))
 
-    async def _run_build_glossary_task(self, game_title: str) -> None:
+    async def _run_update_source_language_task(
+        self,
+        game_title: str,
+        old_source_language: SourceLanguage,
+        new_source_language: SourceLanguage,
+    ) -> None:
+        """
+        执行任务页源语言更新任务。
+
+        Args:
+            game_title: 目标游戏标题。
+            old_source_language: 变更前的源语言。
+            new_source_language: 用户刚选择的新源语言。
+        """
+        if self.handler is None:
+            self._ui_queue.put(
+                (
+                    "source_language_update_failed",
+                    game_title,
+                    old_source_language,
+                    "编排器未初始化",
+                )
+            )
+            return
+
+        try:
+            await self.handler.update_game_source_language(
+                game_title=game_title,
+                source_language=new_source_language,
+            )
+            self._ui_queue.put(
+                (
+                    "source_language_updated",
+                    game_title,
+                    new_source_language,
+                )
+            )
+        except Exception as error:
+            error_summary = self._format_exception_summary(error)
+            logger.exception(
+                f"[tag.exception]更新源语言失败[/tag.exception]：{error_summary}"
+            )
+            self._ui_queue.put(
+                (
+                    "source_language_update_failed",
+                    game_title,
+                    old_source_language,
+                    error_summary,
+                )
+            )
+
+    async def _run_glossary_rebuild_check_task(self, game_title: str) -> None:
+        """
+        检查当前游戏是否已经存在完整术语表。
+
+        Args:
+            game_title: 目标游戏标题。
+        """
+        if self.handler is None:
+            self._ui_queue.put(
+                ("glossary_rebuild_check_failed", "编排器未初始化，无法检查术语表")
+            )
+            return
+
+        try:
+            has_complete_glossary = await self.handler.has_complete_glossary(game_title)
+            if has_complete_glossary:
+                self._ui_queue.put(("prompt_glossary_rebuild", game_title))
+                return
+            self._ui_queue.put(("start_glossary_build", game_title, False))
+        except Exception as error:
+            error_summary = self._format_exception_summary(error)
+            logger.exception(
+                f"[tag.exception]术语表重建检查失败[/tag.exception]：{error_summary}"
+            )
+            self._ui_queue.put(("glossary_rebuild_check_failed", error_summary))
+
+    async def _run_build_glossary_task(
+        self,
+        game_title: str,
+        force_rebuild: bool,
+    ) -> None:
         """
         执行术语构建任务。
+
+        Args:
+            game_title: 目标游戏标题。
+            force_rebuild: 是否按用户要求强制重建术语表。
         """
         if self.handler is None:
             self._ui_queue.put(("finished", "术语构建失败：编排器未初始化"))
             return
 
         try:
-            self._queue_detail("开始构建术语")
+            if force_rebuild:
+                self._queue_detail("开始重建术语，旧术语表将在成功后再被替换")
+            else:
+                self._queue_detail("开始构建术语")
             await self.handler.build_glossary(
                 game_title=game_title,
                 callbacks=(self._queue_set_progress, self._queue_advance_progress),
+                force_rebuild=force_rebuild,
             )
             self._ui_queue.put(("finished", "术语构建完成"))
         except Exception as error:
@@ -1404,7 +1766,75 @@ class TranslationWorkbenchApp(App[None]):
 
             if kind == "reload_games":
                 self.selected_game_title = cast(str, item[1])
+                self.selected_game_source_language = cast(SourceLanguage, item[2])
                 self._refresh_home_view()
+                self._refresh_header()
+                continue
+
+            if kind == "source_language_updated":
+                game_title = cast(str, item[1])
+                source_language = cast(SourceLanguage, item[2])
+                self.source_language_updating = False
+                if self.selected_game_title == game_title:
+                    self.selected_game_source_language = source_language
+                self.task_detail_text = (
+                    "细节：源语言已更新为 "
+                    f"{get_source_language_label(source_language)} ({source_language})"
+                )
+                self._refresh_action_list()
+                self._refresh_action_panel()
+                self._refresh_header()
+                continue
+
+            if kind == "source_language_update_failed":
+                game_title = cast(str, item[1])
+                source_language = cast(SourceLanguage, item[2])
+                error_summary = str(item[3])
+                self.source_language_updating = False
+                if self.selected_game_title == game_title:
+                    self.selected_game_source_language = source_language
+                self.task_detail_text = f"细节：源语言保存失败：{error_summary}"
+                self._refresh_action_list()
+                self._refresh_action_panel()
+                self._refresh_header()
+                continue
+
+            if kind == "prompt_glossary_rebuild":
+                self._glossary_rebuild_checking = False
+                game_title = cast(str, item[1])
+                self.task_status_text = "状态：等待确认是否重建"
+                self.task_detail_text = "细节：当前游戏已有完整术语表，确认后才会开始重建。"
+                self.push_screen(
+                    GlossaryRebuildConfirmScreen(game_title),
+                    self._handle_glossary_rebuild_confirm,
+                )
+                self._refresh_action_list()
+                self._refresh_action_panel()
+                self._refresh_header()
+                continue
+
+            if kind == "start_glossary_build":
+                self._glossary_rebuild_checking = False
+                game_title = cast(str, item[1])
+                force_rebuild = bool(item[2])
+                self._refresh_action_list()
+                self._refresh_action_panel()
+                self._refresh_header()
+                self._start_game_task(
+                    action_id="build_glossary",
+                    game_title=game_title,
+                    force_rebuild=force_rebuild,
+                    skip_glossary_confirmation=True,
+                )
+                continue
+
+            if kind == "glossary_rebuild_check_failed":
+                self._glossary_rebuild_checking = False
+                error_summary = str(item[1])
+                self.task_status_text = "状态：术语表检查失败"
+                self.task_detail_text = f"细节：{error_summary}"
+                self._refresh_action_list()
+                self._refresh_action_panel()
                 self._refresh_header()
                 continue
 
@@ -1412,6 +1842,7 @@ class TranslationWorkbenchApp(App[None]):
                 self.task_running = False
                 self._refresh_home_view()
                 self._refresh_action_list()
+                self._refresh_action_panel()
                 self._refresh_header()
 
     def _drain_log_queue(self) -> None:
@@ -1438,7 +1869,7 @@ class TranslationWorkbenchApp(App[None]):
         self.progress_current = 0
         self.progress_total = 0
         self.task_title_text = "当前任务：未开始"
-        self.task_phase_text = f"游戏：{game_title}"
+        self.task_phase_text = self._build_task_phase_text(game_title)
         self.task_status_text = "状态：请选择功能"
         self.task_detail_text = "细节：使用上下键选择功能，Enter 执行，Esc 返回"
 
@@ -1449,9 +1880,77 @@ class TranslationWorkbenchApp(App[None]):
         self.progress_current = 0
         self.progress_total = 0
         self.task_title_text = f"当前任务：{task_label}"
-        self.task_phase_text = f"游戏：{game_title}"
+        self.task_phase_text = self._build_task_phase_text(game_title)
         self.task_status_text = "状态：执行中"
         self.task_detail_text = "细节：等待进度更新"
+
+    def _load_game_source_language(self, game_title: str) -> SourceLanguage:
+        """
+        从编排器读取指定游戏的源语言。
+
+        Args:
+            game_title: 目标游戏标题。
+
+        Returns:
+            当前游戏已登记的源语言。
+
+        Raises:
+            RuntimeError: 编排器未初始化，或当前游戏缺少可用源语言元数据时抛出。
+        """
+        if self.handler is None:
+            raise RuntimeError("编排器未初始化，无法读取游戏源语言")
+
+        source_language = self.handler.get_game_source_language(game_title)
+        if source_language not in {"ja", "en"}:
+            raise RuntimeError(
+                f"游戏源语言元数据非法，无法进入任务页：{game_title} -> {source_language}"
+            )
+        return source_language
+
+    def _build_task_phase_text(self, game_title: str) -> str:
+        """
+        生成任务面板中的游戏与源语言摘要文本。
+
+        Args:
+            game_title: 当前任务对应的游戏标题。
+
+        Returns:
+            面板阶段文本。
+
+        Raises:
+            RuntimeError: 当前动作页缺少源语言元数据时抛出。
+        """
+        if self.selected_game_source_language is None:
+            raise RuntimeError(
+                f"游戏缺少源语言元数据，无法构建任务面板：{game_title}"
+            )
+
+        language_label = get_source_language_label(self.selected_game_source_language)
+        return (
+            f"游戏：{game_title} | "
+            f"源语言：{language_label} ({self.selected_game_source_language})"
+        )
+
+    def _sync_actions_source_language_select(self) -> None:
+        """
+        把当前内存中的源语言状态同步到任务页下拉框。
+
+        Raises:
+            RuntimeError: 已进入动作页但当前游戏缺少源语言元数据时抛出。
+        """
+        if self.current_view != "actions":
+            return
+
+        if self.selected_game_source_language is None:
+            raise RuntimeError("动作页缺少源语言元数据，无法同步源语言下拉框")
+
+        select = self.query_one("#actions-source-language-select", Select)
+        self._settings_event_suspended = True
+        try:
+            select.value = self.selected_game_source_language
+        finally:
+            self._settings_event_suspended = False
+            self._actions_source_language_ready = True
 
     def _update_progress_status(self) -> None:
         """
@@ -1522,4 +2021,8 @@ class TranslationWorkbenchApp(App[None]):
             log_output.write(Text(log_line.plain_text))
 
 
-__all__: list[str] = ["AddGamePathScreen", "TranslationWorkbenchApp"]
+__all__: list[str] = [
+    "AddGamePathScreen",
+    "GlossaryRebuildConfirmScreen",
+    "TranslationWorkbenchApp",
+]

@@ -12,11 +12,11 @@ from collections.abc import AsyncIterator
 from dishka import Provider, Scope, provide
 
 from app.config.schemas import LLMServiceSetting, Setting
-from app.core.game_data_manager import GameDataManager
 from app.database.db import GameDatabaseManager
 from app.services.llm import LLMHandler, LLMSettings
 from app.translation import GlossaryTranslation, TextTranslation, TranslationCache
 from app.utils.config_loader_utils import load_setting
+from app.utils.game_loader_utils import GameDataManager
 
 
 def _build_llm_settings(name: str, service_setting: LLMServiceSetting) -> LLMSettings:

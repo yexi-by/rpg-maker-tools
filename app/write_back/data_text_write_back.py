@@ -13,6 +13,7 @@ from app.models.schemas import (
     GameData,
     MAP_PATTERN,
     PLUGINS_FILE_NAME,
+    QUESTS_FILE_NAME,
     SYSTEM_FILE_NAME,
     TROOPS_FILE_NAME,
     TranslationItem,
@@ -40,6 +41,10 @@ def write_data_text(game_data: GameData, items: list[TranslationItem]) -> None:
 
         if file_name == SYSTEM_FILE_NAME:
             _write_system_item(game_data=game_data, item=item)
+            continue
+
+        if file_name == QUESTS_FILE_NAME:
+            _write_quest_item(game_data=game_data, item=item)
             continue
 
         if MAP_PATTERN.fullmatch(file_name) or file_name in {
@@ -377,6 +382,65 @@ def _write_base_item(game_data: GameData, item: TranslationItem) -> None:
         return
 
     raise ValueError(f"未找到基础数据库条目: {item.location_path}")
+
+
+def _write_quest_item(game_data: GameData, item: TranslationItem) -> None:
+    """
+    将 `Quests.json` 中的任务文本写回数据副本。
+
+    当前只支持四类可翻译字段：
+    1. `title_cte`
+    2. `summaries_cte`
+    3. `rewards_cte`
+    4. `objectives_cte`
+
+    其余字段即便存在于原始 JSON，也不应该走正文翻译写回通路。
+
+    Args:
+        game_data: 游戏数据聚合对象。
+        item: 当前归属于 `Quests.json` 的翻译条目。
+
+    Raises:
+        ValueError: 当任务 ID、字段路径、目标容器或目标键不存在时抛出。
+    """
+    parts: list[str] = item.location_path.split("/")
+    if len(parts) < 3:
+        raise ValueError(f"未知的 Quests 路径: {item.location_path}")
+
+    quests_data = game_data.writable_data.get(QUESTS_FILE_NAME)
+    if not isinstance(quests_data, dict):
+        raise ValueError(f"缺少 Quests.json 可写数据: {item.location_path}")
+
+    quest_id: str = parts[1]
+    quest = quests_data.get(quest_id)
+    if not isinstance(quest, dict):
+        raise ValueError(f"未找到任务条目: {item.location_path}")
+
+    translated_text: str = item.translation_lines[0] if item.translation_lines else ""
+    field_name: str = parts[2]
+
+    if field_name == "title_cte":
+        if len(parts) != 3:
+            raise ValueError(f"title_cte 路径层级错误: {item.location_path}")
+        if field_name not in quest:
+            raise ValueError(f"任务字段不存在: {item.location_path}")
+        quest[field_name] = translated_text
+        return
+
+    if field_name not in {"summaries_cte", "rewards_cte", "objectives_cte"}:
+        raise ValueError(f"未知的任务文本字段: {item.location_path}")
+    if len(parts) != 4:
+        raise ValueError(f"任务子文本路径层级错误: {item.location_path}")
+
+    text_map = quest.get(field_name)
+    if not isinstance(text_map, dict):
+        raise ValueError(f"任务子文本容器不存在: {item.location_path}")
+
+    entry_id: str = parts[3]
+    if entry_id not in text_map:
+        raise ValueError(f"任务子文本键不存在: {item.location_path}")
+
+    text_map[entry_id] = translated_text
 
 
 __all__: list[str] = ["write_data_text"]

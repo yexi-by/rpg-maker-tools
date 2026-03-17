@@ -140,16 +140,63 @@ class GlossaryTranslationTaskSetting(StrictBaseModel):
     )
 
 
+class GlossaryRoleNameTranslationSetting(StrictBaseModel):
+    """
+    角色名术语翻译配置。
+
+    Attributes:
+        retry_count: 网络请求失败时的重试次数。
+        retry_delay: 网络请求重试延迟，单位为秒。
+        response_retry_count: 响应结构校验失败时的纠错轮数。
+        system_prompt: 角色名翻译使用的系统提示词。
+    """
+
+    retry_count: int = Field(
+        ge=0,
+        title="网络重试次数",
+        description="角色名翻译请求失败后允许自动重试的次数。",
+    )
+    retry_delay: int = Field(
+        ge=0,
+        title="重试间隔秒数",
+        description="角色名翻译请求重试时两次请求之间的等待秒数。",
+    )
+    response_retry_count: int = Field(
+        gt=0,
+        title="响应纠错轮数",
+        description="模型返回结构不合法时允许自动纠错的最大轮数。",
+    )
+    system_prompt_file: str = Field(
+        title="提示词文件",
+        description="角色名翻译使用的系统提示词文件路径。",
+    )
+    system_prompt: str = Field(
+        title="提示词正文",
+        description="运行时注入后的角色名系统提示词文本。",
+    )
+
 class GlossaryTranslationSetting(StrictBaseModel):
     """
     术语翻译配置。
 
     Attributes:
+        worker_count: 术语翻译共享并发 worker 数量。
+        rpm: 术语翻译共享 RPM 上限，为空表示不限速。
         role_name: 角色名翻译配置。
         display_name: 地图显示名翻译配置。
     """
 
-    role_name: GlossaryTranslationTaskSetting = Field(
+    worker_count: int = Field(
+        gt=0,
+        title="并发工作数",
+        description="角色名和地点名术语翻译共享的并发 worker 数量。",
+    )
+    rpm: int | None = Field(
+        gt=0,
+        title="每分钟请求上限",
+        description="术语翻译共享的每分钟请求上限，空值表示不限速。",
+    )
+    role_name: GlossaryRoleNameTranslationSetting = Field(
         title="角色名翻译",
         description="角色名术语翻译阶段的运行参数。",
     )
@@ -298,6 +345,7 @@ class Setting(StrictBaseModel):
 __all__: list[str] = [
     "ErrorTranslationSetting",
     "GlossaryExtractionSetting",
+    "GlossaryRoleNameTranslationSetting",
     "GlossaryTranslationSetting",
     "GlossaryTranslationTaskSetting",
     "LLMServiceSetting",

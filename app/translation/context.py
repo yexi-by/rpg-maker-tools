@@ -12,10 +12,20 @@
 
 from collections.abc import Iterator
 
-from app.models.schemas import ErrorRetryItem, Glossary, Place, Role, TranslationData, TranslationItem
+from app.models.schemas import (
+    ErrorRetryItem,
+    Glossary,
+    Place,
+    Role,
+    SourceLanguage,
+    TranslationData,
+    TranslationItem,
+)
 from app.services.llm.schemas import ChatMessage
+from app.utils import get_source_language_label
 
 USER_PROMPT_TEMPLATE: str = (
+    "[[源语言]]\n{source_language}\n\n"
     "[[术语表-角色]]\n{role_glossary}\n\n"
     "[[术语表-地点]]\n{place_glossary}\n\n"
     "[[地图名]]\n{display_name}\n\n"
@@ -47,6 +57,7 @@ SHORT_TEXT_CONTEXT_TEMPLATE: str = (
 )
 
 ERROR_RETRY_USER_PROMPT_TEMPLATE: str = (
+    "[[源语言]]\n{source_language}\n\n"
     "[[术语表-角色]]\n{role_glossary}\n\n"
     "[[术语表-地点]]\n{place_glossary}\n\n"
     "[[需要重翻译的错误正文]]\n{unit_text}"
@@ -75,6 +86,7 @@ def iter_translation_context_batches(
     max_command_items: int,
     system_prompt: str,
     glossary: Glossary | None,
+    source_language: SourceLanguage,
 ) -> Iterator[tuple[list[TranslationItem], list[ChatMessage]]]:
     """
     为单文件的翻译数据（`TranslationData`）生成上下文切批，并组装给大模型的消息。
@@ -92,6 +104,7 @@ def iter_translation_context_batches(
         max_command_items: 在动态延伸阶段，最多允许强行多吞并几条同角色的对话。
         system_prompt: 配置中定义的正文翻译专用系统提示词。
         glossary: 结构化的术语表。组装批次时，仅当正文命中了这些术语时，才会把对应的术语写入上下文，以节约 Token。
+        source_language: 当前游戏的源语言。
 
     Yields:
         一个元组，第一项是属于该批次的 `TranslationItem` 列表，第二项是组装完毕直接可发给 LLM 的 `list[ChatMessage]`。
@@ -138,6 +151,7 @@ def iter_translation_context_batches(
                 current_glossary=current_glossary,
                 display_name=display_name,
                 main_bodies=main_bodies,
+                source_language=source_language,
             )
             current_length = 0
             current_items = []
@@ -175,6 +189,7 @@ def iter_translation_context_batches(
             current_glossary=current_glossary,
             display_name=display_name,
             main_bodies=main_bodies,
+            source_language=source_language,
         )
         current_length = 0
         current_items = []
@@ -188,6 +203,7 @@ def iter_translation_context_batches(
             current_glossary=current_glossary,
             display_name=display_name,
             main_bodies=main_bodies,
+            source_language=source_language,
         )
 
 
@@ -196,6 +212,7 @@ def iter_error_retry_context_batches(
     chunk_size: int,
     system_prompt: str,
     glossary: Glossary | None,
+    source_language: SourceLanguage,
 ) -> Iterator[tuple[list[TranslationItem], list[ChatMessage]]]:
     """
     将之前翻译失败并在数据库里留下记录的错误条目切分成重试批次。
@@ -209,6 +226,7 @@ def iter_error_retry_context_batches(
         chunk_size: 每个批次固定处理的错误条目数量。
         system_prompt: 配置中定义的专门用于指导模型“修Bug”的系统提示词。
         glossary: 结构化的术语表，同样按需进行动态筛选。
+        source_language: 当前游戏的源语言。
 
     Yields:
         与正文翻译同构的返回元组，但其消息结构中额外包含了错误详情的模板。
@@ -242,6 +260,7 @@ def iter_error_retry_context_batches(
                     text=_create_error_retry_user_prompt(
                         glossary=current_glossary,
                         main_bodies=main_bodies,
+                        source_language=source_language,
                     ),
                 ),
             ],
@@ -260,6 +279,7 @@ def iter_error_retry_context_batches(
                     text=_create_error_retry_user_prompt(
                         glossary=current_glossary,
                         main_bodies=main_bodies,
+                        source_language=source_language,
                     ),
                 ),
             ],
@@ -272,6 +292,7 @@ def _build_translation_batch(
     current_glossary: Glossary,
     display_name: str,
     main_bodies: list[str],
+    source_language: SourceLanguage,
 ) -> tuple[list[TranslationItem], list[ChatMessage]]:
     """
     根据给定的片段组装出单个批次的完整 ChatMessage 历史与控制对象。
@@ -282,6 +303,7 @@ def _build_translation_batch(
         current_glossary: 经过命中筛选后，当前批次专用的术语小集合。
         display_name: 当前文件所处的地图名（如有），为翻译提供宏观空间背景。
         main_bodies: 将原始对象格式化后的待翻译纯文本列表。
+        source_language: 当前游戏的源语言。
 
     Returns:
         (当前条目列表, [系统消息, 包含了术语和正文的用户消息])
@@ -296,6 +318,7 @@ def _build_translation_batch(
                     display_name=display_name,
                     glossary=current_glossary,
                     main_bodies=main_bodies,
+                    source_language=source_language,
                 ),
             ),
         ],
@@ -306,6 +329,7 @@ def _create_user_prompt(
     display_name: str,
     glossary: Glossary,
     main_bodies: list[str],
+    source_language: SourceLanguage,
 ) -> str:
     """
     利用模板将筛选后的上下文组合成发送给大模型的用户提示词文本。
@@ -314,11 +338,13 @@ def _create_user_prompt(
         display_name: 游戏内地图/文件的显示名称。
         glossary: 已经精准过滤过的，仅与当前片段相关的术语集。
         main_bodies: 包含了经过占位符替换和特定结构化编排的正文片段数组。
+        source_language: 当前游戏的源语言。
 
     Returns:
         最终发送给模型的长文本。
     """
     return USER_PROMPT_TEMPLATE.format(
+        source_language=get_source_language_label(source_language),
         role_glossary=_format_roles(glossary.roles),
         place_glossary=_format_places(glossary.places),
         display_name=display_name,
@@ -329,6 +355,7 @@ def _create_user_prompt(
 def _create_error_retry_user_prompt(
     glossary: Glossary,
     main_bodies: list[str],
+    source_language: SourceLanguage,
 ) -> str:
     """
     构建错误重翻译专属用户提示词。
@@ -336,11 +363,13 @@ def _create_error_retry_user_prompt(
     Args:
         glossary: 当前批次命中的结构化术语子集。
         main_bodies: 当前批次正文块列表。
+        source_language: 当前游戏的源语言。
 
     Returns:
         错误重翻译专属用户提示词字符串。
     """
     return ERROR_RETRY_USER_PROMPT_TEMPLATE.format(
+        source_language=get_source_language_label(source_language),
         role_glossary=_format_roles(glossary.roles),
         place_glossary=_format_places(glossary.places),
         unit_text="".join(main_bodies),
