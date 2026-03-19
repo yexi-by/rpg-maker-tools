@@ -7,7 +7,7 @@ RPG Maker 原始数据结构模型模块。
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class BaseItem(BaseModel):
@@ -56,6 +56,36 @@ class EventCommand(BaseModel):
 
     code: int
     parameters: list[int | str | dict | list | Any]
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_end_command_parameters(cls, data: Any) -> Any:
+        """
+        兼容少量缺失 `parameters` 的事件结束指令。
+
+        设计意图：
+            RPG Maker 的事件指令 `code == 0` 表示当前指令列表结束。
+            正常情况下它通常会带一个空数组 `parameters: []`，但部分解包或导出后的游戏数据
+            会把这个空数组字段省略掉。这里仅对这一个明确可判定的结束指令做补全，
+            其他指令依旧保持严格校验，避免把真实脏数据静默吞掉。
+
+        参数:
+            data: Pydantic 在模型构建前收到的原始事件命令对象。
+
+        返回:
+            Any: 对 `code == 0` 且缺少 `parameters` 的字典补上空数组后的对象；
+            其他输入保持原样返回。
+        """
+
+        if not isinstance(data, dict):
+            return data
+        if data.get("code") != 0:
+            return data
+        if "parameters" in data:
+            return data
+        normalized_data = dict(data)
+        normalized_data["parameters"] = []
+        return normalized_data
 
 
 class Page(BaseModel):

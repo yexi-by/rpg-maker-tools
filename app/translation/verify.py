@@ -10,6 +10,7 @@
 
 import asyncio
 import json
+import re
 
 from json_repair import repair_json
 from pydantic import RootModel
@@ -22,12 +23,12 @@ from app.models.schemas import (
 )
 from app.utils import check_source_language_residual, logger
 
-
 ERR_MISSING_KEY: ErrorType = "AI漏翻"
 ERR_PLACEHOLDER_MISMATCH: ErrorType = "控制符不匹配"
 ERR_SOURCE_LANGUAGE_RESIDUAL: ErrorType = "源语言残留"
-LONG_TEXT_LINE_LIMIT: int = 20
+LONG_TEXT_HANZI_LIMIT: int = 30
 LINE_SPLIT_PUNCTUATIONS: tuple[str, ...] = ("，", "。", ",", ".")
+HANZI_PATTERN: re.Pattern[str] = re.compile(r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]")
 
 
 class TranslationResponse(RootModel[dict[str, str]]):
@@ -50,6 +51,25 @@ def _build_warning_preview(text: str, max_length: int = 40) -> str:
     return f"{text[:max_length]}..."
 
 
+def _count_hanzi(text: str) -> int:
+    """
+    统计文本中的汉字数量。
+
+    设计意图：
+        长文本补切行的 warning 只服务于中文译文排版。
+        这里明确只统计汉字，不把英文、空格、标点、占位符和控制符长度算进限制，
+        避免 `[S_1]` 这类中间态占位符把“行长”虚高。
+
+    Args:
+        text: 待统计的单行文本。
+
+    Returns:
+        int: 文本中的汉字数量。
+    """
+
+    return len(HANZI_PATTERN.findall(text))
+
+
 def _find_preferred_split_position(text: str) -> int | None:
     """
     在单行上限内寻找优先切分点。
@@ -61,15 +81,18 @@ def _find_preferred_split_position(text: str) -> int | None:
         text: 待切分的单行文本。
 
     Returns:
-        合适的切分位置；如果前 `LONG_TEXT_LINE_LIMIT` 个字符内没有可用标点则返回 `None`。
+        合适的切分位置；如果前 `LONG_TEXT_HANZI_LIMIT` 个汉字范围内没有可用标点则返回 `None`。
     """
     best_index: int = -1
-    for punctuation in LINE_SPLIT_PUNCTUATIONS:
-        candidate_index: int = text.rfind(
-            punctuation, 0, LONG_TEXT_LINE_LIMIT
-        )
-        if candidate_index > best_index:
-            best_index = candidate_index
+    hanzi_count: int = 0
+
+    for index, char in enumerate(text):
+        if HANZI_PATTERN.fullmatch(char):
+            hanzi_count += 1
+        if hanzi_count > LONG_TEXT_HANZI_LIMIT:
+            break
+        if char in LINE_SPLIT_PUNCTUATIONS:
+            best_index = index
 
     if best_index < 0:
         return None
@@ -91,10 +114,10 @@ def _log_align_warning(
         reason: 具体告警原因。
     """
     logger.warning(
-        "长文本自动补切行告警: 路径={}，行长={}，上限={}，原因={}，内容预览={}",
+        "长文本自动补切行告警: 路径={}，汉字数={}，上限={}，原因={}，内容预览={}",
         location_path or "<unknown>",
-        len(line),
-        LONG_TEXT_LINE_LIMIT,
+        _count_hanzi(line),
+        LONG_TEXT_HANZI_LIMIT,
         reason,
         _build_warning_preview(line),
     )
@@ -122,18 +145,13 @@ def _expand_long_lines(
 
     for line in lines:
         pending_line: str = line
-        while (
-            len(pending_line) > LONG_TEXT_LINE_LIMIT
-            and remaining_extra_lines > 0
-        ):
-            split_position: int | None = _find_preferred_split_position(
-                pending_line
-            )
+        while _count_hanzi(pending_line) > LONG_TEXT_HANZI_LIMIT and remaining_extra_lines > 0:
+            split_position: int | None = _find_preferred_split_position(pending_line)
             if split_position is None:
                 _log_align_warning(
                     location_path=location_path,
                     line=pending_line,
-                    reason="前 20 个字符内没有逗号或句号，无法安全补切分",
+                    reason=f"前 {LONG_TEXT_HANZI_LIMIT} 个汉字内没有逗号或句号，无法安全补切分",
                 )
                 break
 
@@ -146,10 +164,7 @@ def _expand_long_lines(
             pending_line = tail
             remaining_extra_lines -= 1
 
-        if (
-            len(pending_line) > LONG_TEXT_LINE_LIMIT
-            and remaining_extra_lines <= 0
-        ):
+        if _count_hanzi(pending_line) > LONG_TEXT_HANZI_LIMIT and remaining_extra_lines <= 0:
             _log_align_warning(
                 location_path=location_path,
                 line=pending_line,
@@ -197,9 +212,7 @@ def _align_lines(
 
     if current_count > normalized_target_lines:
         keep_lines: list[str] = lines[: max(normalized_target_lines - 1, 0)]
-        merged_tail: str = " ".join(
-            lines[max(normalized_target_lines - 1, 0) :]
-        )
+        merged_tail: str = " ".join(lines[max(normalized_target_lines - 1, 0) :])
         keep_lines.append(merged_tail)
         lines = keep_lines
 
@@ -211,7 +224,7 @@ def _align_lines(
         )
     else:
         for line in lines:
-            if len(line) > LONG_TEXT_LINE_LIMIT:
+            if _count_hanzi(line) > LONG_TEXT_HANZI_LIMIT:
                 _log_align_warning(
                     location_path=location_path,
                     line=line,

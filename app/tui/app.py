@@ -17,7 +17,6 @@ from queue import Empty, SimpleQueue
 from typing import Any, Literal, cast, get_args, get_origin
 
 from pydantic import BaseModel
-from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -33,9 +32,9 @@ from textual.widgets import (
     ListItem,
     ListView,
     ProgressBar,
-    RichLog,
     Select,
     Static,
+    TextArea,
 )
 
 from app.config.schemas import Setting
@@ -47,7 +46,7 @@ from app.utils.config_loader_utils import load_setting_document, save_setting_va
 from tomlkit.toml_document import TOMLDocument
 
 
-SettingFieldKind = Literal["string", "int", "float", "enum"]
+SettingFieldKind = Literal["string", "int", "float", "enum", "optional_int"]
 
 
 @dataclass(slots=True)
@@ -157,6 +156,33 @@ SETTING_CARDS: tuple[SettingCardSpec, ...] = (
                     ),
                 ),
             ),
+            SettingSectionSpec(
+                title="插件解析服务",
+                fields=(
+                    SettingFieldSpec(
+                        path=("llm_services", "plugin_text", "provider_type"),
+                        kind="enum",
+                        options=PROVIDER_OPTIONS,
+                    ),
+                    SettingFieldSpec(
+                        path=("llm_services", "plugin_text", "base_url"),
+                        kind="string",
+                    ),
+                    SettingFieldSpec(
+                        path=("llm_services", "plugin_text", "api_key"),
+                        kind="string",
+                        secret=True,
+                    ),
+                    SettingFieldSpec(
+                        path=("llm_services", "plugin_text", "model"),
+                        kind="string",
+                    ),
+                    SettingFieldSpec(
+                        path=("llm_services", "plugin_text", "timeout"),
+                        kind="int",
+                    ),
+                ),
+            ),
         ),
     ),
     SettingCardSpec(
@@ -184,7 +210,7 @@ SETTING_CARDS: tuple[SettingCardSpec, ...] = (
                     ),
                     SettingFieldSpec(
                         path=("glossary_translation", "rpm"),
-                        kind="int",
+                        kind="optional_int",
                     ),
                 ),
             ),
@@ -273,6 +299,35 @@ SETTING_CARDS: tuple[SettingCardSpec, ...] = (
                 ),
             ),
             SettingSectionSpec(
+                title="插件解析",
+                fields=(
+                    SettingFieldSpec(
+                        path=("plugin_text_analysis", "worker_count"),
+                        kind="int",
+                    ),
+                    SettingFieldSpec(
+                        path=("plugin_text_analysis", "rpm"),
+                        kind="optional_int",
+                    ),
+                    SettingFieldSpec(
+                        path=("plugin_text_analysis", "retry_count"),
+                        kind="int",
+                    ),
+                    SettingFieldSpec(
+                        path=("plugin_text_analysis", "retry_delay"),
+                        kind="int",
+                    ),
+                    SettingFieldSpec(
+                        path=("plugin_text_analysis", "response_retry_count"),
+                        kind="int",
+                    ),
+                    SettingFieldSpec(
+                        path=("plugin_text_analysis", "system_prompt_file"),
+                        kind="string",
+                    ),
+                ),
+            ),
+            SettingSectionSpec(
                 title="正文翻译",
                 fields=(
                     SettingFieldSpec(
@@ -281,7 +336,7 @@ SETTING_CARDS: tuple[SettingCardSpec, ...] = (
                     ),
                     SettingFieldSpec(
                         path=("text_translation", "rpm"),
-                        kind="int",
+                        kind="optional_int",
                     ),
                     SettingFieldSpec(
                         path=("text_translation", "retry_count"),
@@ -521,6 +576,7 @@ class TranslationWorkbenchApp(App[None]):
         self.settings_error_text: str = ""
         self.settings_success_text: str = ""
         self.log_history: list[LogLine] = []
+        self.log_text_buffer: str = ""
         self._log_queue: SimpleQueue[LogLine] = SimpleQueue()
         self._ui_queue: SimpleQueue[tuple[Any, ...]] = SimpleQueue()
         self._shutdown_started: bool = False
@@ -567,6 +623,7 @@ class TranslationWorkbenchApp(App[None]):
                                 yield Static("翻译功能", classes="section-title")
                                 with Vertical(id="action-button-group"):
                                     yield Button("构建术语", id="btn-build_glossary", classes="action-btn")
+                                    yield Button("插件解析", id="btn-analyze_plugin_text", classes="action-btn")
                                     yield Button("正文翻译", id="btn-translate_text", classes="action-btn")
                                     yield Button("错误重翻", id="btn-retry_error_table", classes="action-btn")
                                     yield Button("回写数据", id="btn-write_back", classes="action-btn")
@@ -597,7 +654,13 @@ class TranslationWorkbenchApp(App[None]):
 
             with Vertical(id="right-pane"):
                 yield Static("全局后台日志", id="global-log-title")
-                yield RichLog(id="global-log-output")
+                yield TextArea(
+                    "",
+                    id="global-log-output",
+                    read_only=True,
+                    show_cursor=False,
+                    soft_wrap=False,
+                )
 
         yield Footer(compact=True)
 
@@ -761,7 +824,7 @@ class TranslationWorkbenchApp(App[None]):
         """
         聚焦全局日志窗口。
         """
-        self.query_one("#global-log-output", RichLog).focus()
+        self.query_one("#global-log-output", TextArea).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """
@@ -1279,6 +1342,9 @@ class TranslationWorkbenchApp(App[None]):
                 game_title,
                 force_rebuild=force_rebuild,
             )
+        elif action_id == "analyze_plugin_text":
+            task_label = "插件解析"
+            coroutine = self._run_analyze_plugin_text_task(game_title)
         elif action_id == "translate_text":
             task_label = "正文翻译"
             coroutine = self._run_translate_text_task(game_title)
@@ -1502,6 +1568,32 @@ class TranslationWorkbenchApp(App[None]):
             )
             self._ui_queue.put(("finished", f"术语构建失败：{error_summary}"))
 
+    async def _run_analyze_plugin_text_task(self, game_title: str) -> None:
+        """
+        执行插件文本路径分析任务。
+        """
+        if self.handler is None:
+            self._ui_queue.put(("finished", "插件解析失败：编排器未初始化"))
+            return
+
+        try:
+            self._queue_detail("开始分析 plugins.js 插件文本路径")
+            await self.handler.analyze_plugin_text(
+                game_title=game_title,
+                callbacks=(
+                    self._queue_set_progress,
+                    self._queue_advance_progress,
+                    self._queue_detail,
+                ),
+            )
+            self._ui_queue.put(("finished", "插件解析完成"))
+        except Exception as error:
+            error_summary = self._format_exception_summary(error)
+            logger.exception(
+                f"[tag.exception]插件解析任务失败[/tag.exception]：{error_summary}"
+            )
+            self._ui_queue.put(("finished", f"插件解析失败：{error_summary}"))
+
     async def _run_translate_text_task(self, game_title: str) -> None:
         """
         执行正文翻译任务。
@@ -1612,14 +1704,20 @@ class TranslationWorkbenchApp(App[None]):
         self,
         field_spec: SettingFieldSpec,
         raw_value: str,
-    ) -> str | int | float:
+    ) -> str | int | float | None:
         """
         把界面输入文本转换成可写入配置文件的类型。
         """
+        normalized_value = raw_value.strip()
+
         if field_spec.kind == "int":
-            return int(raw_value)
+            return int(normalized_value)
         if field_spec.kind == "float":
-            return float(raw_value)
+            return float(normalized_value)
+        if field_spec.kind == "optional_int":
+            if not normalized_value:
+                return None
+            return int(normalized_value)
         return raw_value
 
     def _read_document_value(self, field_path: tuple[str, ...]) -> Any:
@@ -1631,6 +1729,8 @@ class TranslationWorkbenchApp(App[None]):
 
         current: Any = self._setting_document
         for key in field_path:
+            if key not in current:
+                return None
             current = current[key]
 
         if hasattr(current, "unwrap"):
@@ -1857,7 +1957,7 @@ class TranslationWorkbenchApp(App[None]):
 
             self.log_history.append(log_line)
             try:
-                log_output = self.query_one("#global-log-output", RichLog)
+                log_output = self.query_one("#global-log-output", TextArea)
                 self._write_log_line(log_output, log_line)
             except Exception:
                 pass
@@ -1990,35 +2090,21 @@ class TranslationWorkbenchApp(App[None]):
             return f"{type(current_error).__name__}: {detail}"
         return type(current_error).__name__
 
-    @staticmethod
-    def _write_log_line(log_output: RichLog, log_line: LogLine) -> None:
+    def _write_log_line(self, log_output: TextArea, log_line: LogLine) -> None:
         """
-        按日志级别写入一条日志，使用 Rich markup 还原终端色彩。
-        """
-        # 尝试将 loguru 的原始带 markup 的 message 重新格式化为终端行
-        # 我们使用 Text.from_markup() 来保留 <cyan> 等标签
-        try:
-            timestamp_text = f"[{log_line.timestamp}] "
-            level_text = f"{log_line.level:<8} "
-            
-            # 对日志级别上色以增强可读性
-            level_style = {
-                "DEBUG": "dim",
-                "INFO": "cyan",
-                "SUCCESS": "bold green",
-                "WARNING": "bold yellow",
-                "ERROR": "bold red",
-                "CRITICAL": "bold white on red",
-            }.get(log_line.level.upper(), "")
+        按纯文本形式写入一条日志到可选中的日志框。
 
-            line = Text()
-            line.append(timestamp_text, style="dim")
-            line.append(level_text, style=level_style)
-            line.append(Text.from_markup(log_line.message))
-            log_output.write(line)
-        except Exception:
-            # 如果解析 markup 失败，回退到纯文本
-            log_output.write(Text(log_line.plain_text))
+        这里刻意不再使用 Rich markup 着色，因为 `RichLog` 不支持鼠标选区复制，
+        而 `TextArea` 的主要价值正是允许用户直接拖拽选中文本并复制。
+        """
+        line_text = log_line.plain_text
+        if self.log_text_buffer:
+            self.log_text_buffer = f"{self.log_text_buffer}\n{line_text}"
+        else:
+            self.log_text_buffer = line_text
+
+        log_output.load_text(self.log_text_buffer)
+        log_output.scroll_end(animate=False, immediate=True)
 
 
 __all__: list[str] = [

@@ -18,6 +18,8 @@ from app.models.schemas import (
     Glossary,
     ItemType,
     Place,
+    PluginTextAnalysisState,
+    PluginTextRuleRecord,
     Role,
     SOURCE_LANGUAGE_VALUES,
     SourceLanguage,
@@ -34,30 +36,39 @@ from .sql import (
     CREATE_GLOSSARY_STATE_TABLE,
     CREATE_METADATA_TABLE,
     CREATE_PLACE_GLOSSARY_TABLE,
+    CREATE_PLUGIN_TEXT_ANALYSIS_STATE_TABLE,
+    CREATE_PLUGIN_TEXT_RULES_TABLE,
     CREATE_ROLE_GLOSSARY_TABLE,
     CREATE_TRANSLATION_TABLE,
     DELETE_ALL_ROWS,
+    DELETE_TRANSLATION_ITEMS_BY_PREFIX,
+    DROP_TABLE,
     GLOSSARY_PLACE_TABLE_NAME,
     GLOSSARY_ROLE_TABLE_NAME,
     INSERT_ERROR,
     INSERT_PLACE_GLOSSARY_ITEM,
     INSERT_ROLE_GLOSSARY_ITEM,
     INSERT_TRANSLATION,
+    SELECT_PLUGIN_TEXT_ANALYSIS_STATE,
+    SELECT_PLUGIN_TEXT_RULES,
     SELECT_ALL,
     SELECT_GLOSSARY_STATE,
-    SELECT_LATEST_TABLE_NAME_BY_PREFIX,
     SELECT_METADATA,
     SELECT_PLACE_GLOSSARY_ITEMS,
     SELECT_ROLE_GLOSSARY_ITEMS,
+    SELECT_TABLE_NAMES_BY_PREFIX,
     SELECT_TRANSLATED_ITEMS,
     SELECT_TRANSLATION_PATHS,
     UPDATE_METADATA_SOURCE_LANGUAGE,
     UPSERT_GLOSSARY_STATE,
     UPSERT_METADATA,
+    UPSERT_PLUGIN_TEXT_ANALYSIS_STATE,
+    UPSERT_PLUGIN_TEXT_RULE,
     METADATA_KEY,
 )
 
 GLOSSARY_STATE_KEY: str = "current_glossary"
+PLUGIN_TEXT_ANALYSIS_STATE_KEY: str = "current_plugin_text_analysis"
 DEFAULT_ERROR_TABLE_PREFIX: str = "translation_errors"
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 DB_DIRECTORY: Path = PROJECT_ROOT / "data" / "db"
@@ -148,6 +159,8 @@ async def create_static_tables(connection: aiosqlite.Connection) -> None:
     _ = await connection.execute(CREATE_PLACE_GLOSSARY_TABLE)
     _ = await connection.execute(CREATE_GLOSSARY_STATE_TABLE)
     _ = await connection.execute(CREATE_METADATA_TABLE)
+    _ = await connection.execute(CREATE_PLUGIN_TEXT_ANALYSIS_STATE_TABLE)
+    _ = await connection.execute(CREATE_PLUGIN_TEXT_RULES_TABLE)
     await connection.commit()
 
 
@@ -324,6 +337,10 @@ class GameDatabaseManager:
         Args:
             game_path: RPG Maker 游戏根目录路径。
             source_language: 当前游戏的源语言。
+
+        Side Effects:
+            新建数据库过程中如果任一步骤失败，会主动删除本次刚创建的数据库文件，
+            避免调用方看到“创建失败但磁盘上残留空库文件”的状态。
         """
         ensure_db_directory()
 
@@ -371,6 +388,8 @@ class GameDatabaseManager:
             )
         except Exception:
             await connection.close()
+            if not db_already_exists and db_path.exists():
+                db_path.unlink(missing_ok=True)
             raise
 
         self.items[game_title] = GameDatabaseItem(
@@ -563,6 +582,228 @@ class GameDatabaseManager:
             for row in rows
         ]
 
+    async def read_plugin_text_analysis_state(
+        self,
+        game_title: str,
+    ) -> PluginTextAnalysisState | None:
+        """
+        读取当前游戏最近一次插件文本分析的汇总状态。
+
+        Args:
+            game_title: 目标游戏标题。
+
+        Returns:
+            已存在时返回汇总状态，否则返回 `None`。
+        """
+        item = self._get_item(game_title)
+
+        async with item.connection.execute(
+            SELECT_PLUGIN_TEXT_ANALYSIS_STATE,
+            (PLUGIN_TEXT_ANALYSIS_STATE_KEY,),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if row is None:
+            return None
+
+        return PluginTextAnalysisState(
+            plugins_file_hash=row["plugins_file_hash"],
+            prompt_hash=row["prompt_hash"],
+            total_plugins=row["total_plugins"],
+            success_plugins=row["success_plugins"],
+            failed_plugins=row["failed_plugins"],
+            updated_at=row["updated_at"],
+        )
+
+    async def write_plugin_text_analysis_state(
+        self,
+        game_title: str,
+        state: PluginTextAnalysisState,
+    ) -> None:
+        """
+        写入当前游戏最近一次插件文本分析的汇总状态。
+
+        Args:
+            game_title: 目标游戏标题。
+            state: 待写入的汇总状态。
+        """
+        item = self._get_item(game_title)
+
+        _ = await item.connection.execute(
+            UPSERT_PLUGIN_TEXT_ANALYSIS_STATE,
+            (
+                PLUGIN_TEXT_ANALYSIS_STATE_KEY,
+                state.plugins_file_hash,
+                state.prompt_hash,
+                state.total_plugins,
+                state.success_plugins,
+                state.failed_plugins,
+                state.updated_at,
+            ),
+        )
+        await item.connection.commit()
+
+    async def read_plugin_text_rules(
+        self,
+        game_title: str,
+    ) -> list[PluginTextRuleRecord]:
+        """
+        读取当前游戏保存的全部插件文本规则快照。
+
+        Args:
+            game_title: 目标游戏标题。
+
+        Returns:
+            按插件索引排序后的规则快照列表。
+        """
+        item = self._get_item(game_title)
+
+        async with item.connection.execute(SELECT_PLUGIN_TEXT_RULES) as cursor:
+            rows = await cursor.fetchall()
+
+        return [
+            PluginTextRuleRecord(
+                plugin_index=row["plugin_index"],
+                plugin_name=row["plugin_name"],
+                plugin_hash=row["plugin_hash"],
+                prompt_hash=row["prompt_hash"],
+                status=row["status"],
+                plugin_reason=row["plugin_reason"],
+                translate_rules=json.loads(row["translate_rules_json"]),
+                last_error=row["last_error"],
+                updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
+
+    async def upsert_plugin_text_rule(
+        self,
+        game_title: str,
+        rule_record: PluginTextRuleRecord,
+    ) -> None:
+        """
+        写入或更新单个插件的文本路径规则快照。
+
+        Args:
+            game_title: 目标游戏标题。
+            rule_record: 当前插件的最新规则快照。
+        """
+        item = self._get_item(game_title)
+
+        _ = await item.connection.execute(
+            UPSERT_PLUGIN_TEXT_RULE,
+            (
+                rule_record.plugin_index,
+                rule_record.plugin_name,
+                rule_record.plugin_hash,
+                rule_record.prompt_hash,
+                rule_record.status,
+                rule_record.plugin_reason,
+                json.dumps(
+                    [rule.model_dump(mode="json") for rule in rule_record.translate_rules],
+                    ensure_ascii=False,
+                ),
+                rule_record.last_error,
+                rule_record.updated_at,
+            ),
+        )
+        await item.connection.commit()
+
+    async def delete_translation_items_by_prefixes(
+        self,
+        game_title: str,
+        prefixes: list[str],
+    ) -> int:
+        """
+        按路径前缀批量删除正文翻译表中的旧记录。
+
+        Args:
+            game_title: 目标游戏标题。
+            prefixes: 待删除的 `location_path` 前缀列表。
+
+        Returns:
+            实际删除的记录数量。
+        """
+        item = self._get_item(game_title)
+        deleted_rows = 0
+
+        for prefix in prefixes:
+            cursor = await item.connection.execute(
+                DELETE_TRANSLATION_ITEMS_BY_PREFIX,
+                (f"{prefix}%",),
+            )
+            if cursor.rowcount > 0:
+                deleted_rows += cursor.rowcount
+
+        await item.connection.commit()
+        return deleted_rows
+
+    async def read_error_table_names(
+        self,
+        game_title: str,
+        prefix: str = DEFAULT_ERROR_TABLE_PREFIX,
+    ) -> list[str]:
+        """
+        读取指定前缀下的全部错误表名，并按名称升序返回。
+
+        Args:
+            game_title: 目标游戏标题。
+            prefix: 错误表名前缀。
+
+        Returns:
+            已按名称升序排序的错误表名列表。
+        """
+        item = self._get_item(game_title)
+
+        async with item.connection.execute(
+            SELECT_TABLE_NAMES_BY_PREFIX,
+            (f"{prefix}_%",),
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        return [row["name"] for row in rows]
+
+    async def delete_error_tables(
+        self,
+        game_title: str,
+        table_names: list[str],
+    ) -> int:
+        """
+        批量删除指定错误表，并在一次提交后返回实际删除数量。
+
+        Args:
+            game_title: 目标游戏标题。
+            table_names: 待删除的错误表名列表。
+
+        Returns:
+            实际删除的唯一表数量。
+        """
+        item = self._get_item(game_title)
+        unique_table_names = [name for name in dict.fromkeys(table_names) if name]
+        if not unique_table_names:
+            return 0
+
+        async with item.connection.execute(
+            SELECT_TABLE_NAMES_BY_PREFIX,
+            ("%",),
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        existing_table_names = {row["name"] for row in rows}
+        deletable_table_names = [
+            table_name
+            for table_name in unique_table_names
+            if table_name in existing_table_names
+        ]
+        if not deletable_table_names:
+            return 0
+
+        for table_name in deletable_table_names:
+            _ = await item.connection.execute(DROP_TABLE.format(table_name=table_name))
+
+        await item.connection.commit()
+        return len(deletable_table_names)
+
     async def read_latest_error_table_name(
         self,
         game_title: str,
@@ -578,18 +819,11 @@ class GameDatabaseManager:
         Returns:
             最新错误表名；不存在时返回 `None`。
         """
-        item = self._get_item(game_title)
-
-        async with item.connection.execute(
-            SELECT_LATEST_TABLE_NAME_BY_PREFIX,
-            (f"{prefix}_%",),
-        ) as cursor:
-            row = await cursor.fetchone()
-
-        if row is None:
+        table_names = await self.read_error_table_names(game_title, prefix)
+        if not table_names:
             return None
 
-        return row["name"]
+        return table_names[-1]
 
     async def read_error_retry_items(
         self,

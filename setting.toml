@@ -13,10 +13,17 @@ timeout = 600
 # timeout = 600
 
 [llm_services.text]
-provider_type = "openai"
+provider_type = "volcengine"
 base_url = "https://api.deepseek.com"
 api_key = "sk-f677192f3675409dbb1e0a49761d48c1"
 model = "deepseek-chat"
+timeout = 600
+
+[llm_services.plugin_text]
+provider_type = "openai"
+base_url = "https://api.deepseek.com"
+api_key = "sk-f677192f3675409dbb1e0a49761d48c1"
+model = "deepseek-reasoner"
 timeout = 600
 
 [glossary_extraction]
@@ -49,9 +56,17 @@ max_command_items = 5
 chunk_size = 10
 system_prompt_file = "prompts/error_retry_system.txt"
 
+[plugin_text_analysis]
+worker_count = 50
+rpm = 50
+retry_count = 3
+retry_delay = 2
+response_retry_count = 3
+system_prompt_file = "prompts/plugin_text_analysis_system.txt"
+
 [text_translation]
-worker_count = 60
-rpm = 60
+worker_count = 200
+rpm = 200
 retry_count = 3
 retry_delay = 2
 system_prompt_file = "prompts/text_translation_system.txt"

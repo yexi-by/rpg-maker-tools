@@ -280,6 +280,34 @@ def is_plugin_text_candidate(text: str, source_language: SourceLanguage) -> bool
     )
 
 
+def passes_plugin_text_language_filter(
+    text: str,
+    source_language: SourceLanguage,
+) -> bool:
+    """
+    判断插件文本是否通过“源语言额外放行规则”。
+
+    这是一层叠加在通用配置值过滤之上的轻量语言规则：
+    1. 日文游戏只放行包含日文的字符串。
+    2. 英文游戏不额外做语言收缩，统一放行。
+
+    Args:
+        text: 已通过通用过滤后的插件文本。
+        source_language: 当前游戏源语言。
+
+    Returns:
+        通过当前源语言放行规则时返回 `True`。
+    """
+    normalized_text = text.strip()
+    if not normalized_text:
+        return False
+
+    if source_language == "en":
+        return True
+
+    return has_japanese(text=normalized_text, mode="non_strict")
+
+
 def check_source_language_residual(
     translation_lines: list[str],
     source_language: SourceLanguage,
@@ -416,6 +444,7 @@ def _strip_non_content_for_residual(text: str) -> str:
     """
     cleaned_text = strip_rm_control_sequences(text)
     cleaned_text = PLACEHOLDER_PATTERN.sub("", cleaned_text)
+    cleaned_text = re.sub(r"\\[nrt]", " ", cleaned_text)
     return cleaned_text
 
 
@@ -706,6 +735,7 @@ __all__: list[str] = [
     "is_glossary_text_candidate",
     "is_plugin_text_candidate",
     "normalize_path_key",
+    "passes_plugin_text_language_filter",
     "should_skip_plugin_like_text",
     "validate_source_language",
 ]

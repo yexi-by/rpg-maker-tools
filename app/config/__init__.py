@@ -1,8 +1,7 @@
 """
-配置模块导出。
+配置模型统一导出入口。
 
-主线已经切换到多游戏新栈，
-这里统一导出不包含 `project` 段的新配置模型和新的配置加载器。
+本模块只负责把运行时配置模型集中导出，避免业务层深层引用具体文件路径。
 """
 
 from .schemas import (
@@ -11,8 +10,9 @@ from .schemas import (
     GlossaryRoleNameTranslationSetting,
     GlossaryTranslationSetting,
     GlossaryTranslationTaskSetting,
-    LLMServicesSetting,
     LLMServiceSetting,
+    LLMServicesSetting,
+    PluginTextAnalysisSetting,
     Setting,
     TextTranslationSetting,
     TranslationContextSetting,
@@ -24,8 +24,9 @@ __all__: list[str] = [
     "GlossaryRoleNameTranslationSetting",
     "GlossaryTranslationSetting",
     "GlossaryTranslationTaskSetting",
-    "LLMServicesSetting",
     "LLMServiceSetting",
+    "LLMServicesSetting",
+    "PluginTextAnalysisSetting",
     "Setting",
     "TextTranslationSetting",
     "TranslationContextSetting",

@@ -103,7 +103,7 @@ def validate_setting_document(
 
 def save_setting_value(
     field_path: tuple[str, ...],
-    value: str | int | float,
+    value: str | int | float | None,
     setting_path: str | Path | None = None,
 ) -> Setting:
     """
@@ -162,7 +162,7 @@ def _update_document_value(
     *,
     document: TOMLDocument,
     field_path: tuple[str, ...],
-    value: str | int | float,
+    value: str | int | float | None,
 ) -> None:
     """
     按路径更新 TOML 文档里的单个字段。
@@ -178,7 +178,13 @@ def _update_document_value(
             raise KeyError(f"配置路径不存在: {'.'.join(field_path)}")
         current = current[key]
 
-    current[field_path[-1]] = value
+    field_key = field_path[-1]
+    if value is None:
+        if field_key in current:
+            del current[field_key]
+        return
+
+    current[field_key] = value
 
 
 def _write_setting_document(document: TOMLDocument, setting_path: Path) -> None:
@@ -206,6 +212,7 @@ def _inject_prompt_texts(raw_config: dict[str, Any], base_dir: Path) -> None:
     _inject_glossary_prompt_texts(raw_config=raw_config, base_dir=base_dir)
     _inject_text_translation_prompt_text(raw_config=raw_config, base_dir=base_dir)
     _inject_error_translation_prompt_text(raw_config=raw_config, base_dir=base_dir)
+    _inject_plugin_text_analysis_prompt_text(raw_config=raw_config, base_dir=base_dir)
 
 
 def _inject_glossary_prompt_texts(raw_config: dict[str, Any], base_dir: Path) -> None:
@@ -281,6 +288,30 @@ def _inject_error_translation_prompt_text(
     error_translation["system_prompt"] = _read_prompt_text(base_dir, prompt_file)
 
 
+def _inject_plugin_text_analysis_prompt_text(
+    raw_config: dict[str, Any],
+    base_dir: Path,
+) -> None:
+    """
+    注入插件文本分析提示词文本。
+
+    Args:
+        raw_config: TOML 原始字典。
+        base_dir: 配置文件所在目录。
+    """
+    plugin_text_analysis = raw_config.get("plugin_text_analysis")
+    if not isinstance(plugin_text_analysis, dict):
+        raise ValueError("配置文件中缺少 plugin_text_analysis 配置段")
+
+    prompt_file = plugin_text_analysis.get("system_prompt_file")
+    if not isinstance(prompt_file, str) or not prompt_file.strip():
+        raise ValueError(
+            "配置文件中缺少 plugin_text_analysis.system_prompt_file 配置项"
+        )
+
+    plugin_text_analysis["system_prompt"] = _read_prompt_text(base_dir, prompt_file)
+
+
 def _read_prompt_text(base_dir: Path, prompt_file: str) -> str:
     """
     读取提示词文件文本。
@@ -321,6 +352,7 @@ def _build_setting_summary(
     """
     glossary_service = setting.llm_services.glossary
     text_service = setting.llm_services.text
+    plugin_text_service = setting.llm_services.plugin_text
 
     role_prompt_file = _read_prompt_file_name(
         raw_config=raw_config,
@@ -337,6 +369,10 @@ def _build_setting_summary(
     error_prompt_file = _read_prompt_file_name(
         raw_config=raw_config,
         section_path=["error_translation"],
+    )
+    plugin_text_prompt_file = _read_prompt_file_name(
+        raw_config=raw_config,
+        section_path=["plugin_text_analysis"],
     )
 
     lines = [
@@ -355,6 +391,13 @@ def _build_setting_summary(
             f"模型 [tag.count]{text_service.model}[/tag.count] / "
             f"地址 [tag.path]{text_service.base_url}[/tag.path] / "
             f"超时 [tag.count]{text_service.timeout}[/tag.count] 秒"
+        ),
+        (
+            "插件解析接口: "
+            f"{_describe_provider(plugin_text_service.provider_type)} / "
+            f"模型 [tag.count]{plugin_text_service.model}[/tag.count] / "
+            f"地址 [tag.path]{plugin_text_service.base_url}[/tag.path] / "
+            f"超时 [tag.count]{plugin_text_service.timeout}[/tag.count] 秒"
         ),
         (
             "术语采样: "
@@ -385,11 +428,19 @@ def _build_setting_summary(
             f"每批 [tag.count]{setting.error_translation.chunk_size}[/tag.count] 条"
         ),
         (
+            "插件解析: "
+            f"[tag.count]{setting.plugin_text_analysis.worker_count}[/tag.count] 个 worker，"
+            f"RPM [tag.count]{setting.plugin_text_analysis.rpm or '不限'}[/tag.count]，"
+            f"网络重试 [tag.count]{setting.plugin_text_analysis.retry_count}[/tag.count] 次，"
+            f"结构重试 [tag.count]{setting.plugin_text_analysis.response_retry_count}[/tag.count] 次"
+        ),
+        (
             "提示词文件: "
             f"角色术语=[tag.path]{role_prompt_file}[/tag.path]，"
             f"地点术语=[tag.path]{display_prompt_file}[/tag.path]，"
             f"正文=[tag.path]{text_prompt_file}[/tag.path]，"
-            f"错误重翻=[tag.path]{error_prompt_file}[/tag.path]"
+            f"错误重翻=[tag.path]{error_prompt_file}[/tag.path]，"
+            f"插件解析=[tag.path]{plugin_text_prompt_file}[/tag.path]"
         ),
     ]
     return "\n".join(lines)

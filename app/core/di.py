@@ -108,6 +108,12 @@ class TranslationProvider(Provider):
                 service_setting=setting.llm_services.text,
             )
         )
+        llm_handler.register_service(
+            llm_setting=_build_llm_settings(
+                name="plugin_text",
+                service_setting=setting.llm_services.plugin_text,
+            )
+        )
         return setting
 
     @provide(scope=Scope.REQUEST)

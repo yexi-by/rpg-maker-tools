@@ -15,6 +15,7 @@ import json
 import shutil
 import tempfile
 from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Self
 
@@ -38,12 +39,15 @@ from app.models.schemas import (
     JS_DIRECTORY_NAME,
     PLUGINS_FILE_NAME,
     PLUGINS_ORIGIN_FILE_NAME,
+    PluginTextAnalysisState,
+    PluginTextRuleRecord,
     Role,
     SourceLanguage,
     TranslationData,
     TranslationErrorItem,
     TranslationItem,
 )
+from app.plugin_text import PluginTextAnalysis, build_plugin_hash, build_prompt_hash
 from app.services.llm import LLMHandler
 from app.services.llm.schemas import ChatMessage
 from app.translation import (
@@ -169,17 +173,22 @@ class TranslationHandler:
 
         Returns:
             最终登记到管理器中的 `game_title`。
+
+        Side Effects:
+            只有当游戏数据成功加载且数据库注册成功后，才会保留内存与数据库状态。
+            如果任一环节失败，会恢复 `GameDataManager` 的旧状态，避免出现“添加失败但游戏已被部分注册”的脏状态。
         """
         resolved_game_path = resolve_game_directory(game_path)
         game_title = read_game_title(resolved_game_path)
+        previous_game_data = self.game_data_manager.items.get(game_title)
 
         try:
+            await self.game_data_manager.load_game_data(resolved_game_path)
             await self.game_database_manager.create_database(
                 resolved_game_path,
                 source_language,
             )
             game_database_item = self._get_game_database_item(game_title)
-            await self.game_data_manager.load_game_data(game_database_item.game_path)
 
             logger.success(
                 f"[tag.success]游戏已加入新栈[/tag.success] "
@@ -188,6 +197,10 @@ class TranslationHandler:
             )
             return game_title
         except Exception:
+            if previous_game_data is None:
+                self.game_data_manager.items.pop(game_title, None)
+            else:
+                self.game_data_manager.items[game_title] = previous_game_data
             raise
 
     async def build_glossary(
@@ -350,6 +363,149 @@ class TranslationHandler:
                 expected_display_names=set(display_names),
             )
 
+    async def analyze_plugin_text(
+        self,
+        game_title: str,
+        callbacks: tuple[
+            Callable[[int, int], None],
+            Callable[[int], None],
+            Callable[[str], None],
+        ],
+    ) -> None:
+        """
+        为指定游戏执行插件文本路径分析。
+
+        Args:
+            game_title: 目标游戏标题。
+            callbacks: 插件分析回调元组。
+        """
+        set_progress, advance_progress, set_status = callbacks
+
+        try:
+            async with self._container() as request_container:
+                setting = await request_container.get(Setting)
+
+                source_language = self.get_game_source_language(game_title)
+                game_data = self._get_game_data(game_title)
+                existing_rules = {
+                    rule.plugin_index: rule
+                    for rule in await self.game_database_manager.read_plugin_text_rules(
+                        game_title
+                    )
+                }
+                plugin_text_analysis = PluginTextAnalysis(setting)
+                analysis_plan = plugin_text_analysis.build_plan(
+                    plugins=game_data.plugins_js,
+                    source_language=source_language,
+                    existing_rules=existing_rules,
+                )
+                set_progress(
+                    analysis_plan.reused_success_count,
+                    analysis_plan.total_plugins,
+                )
+
+                if analysis_plan.total_plugins == 0:
+                    logger.info(
+                        f"[tag.skip]plugins.js 中没有插件可供分析[/tag.skip] "
+                        f"游戏 [tag.count]{game_title}[/tag.count]"
+                    )
+                    set_status("plugins.js 中没有插件可供分析")
+                    return
+
+                if not analysis_plan.jobs:
+                    await self.game_database_manager.write_plugin_text_analysis_state(
+                        game_title,
+                        PluginTextAnalysisState(
+                            plugins_file_hash=analysis_plan.plugins_file_hash,
+                            prompt_hash=analysis_plan.prompt_hash,
+                            total_plugins=analysis_plan.total_plugins,
+                            success_plugins=analysis_plan.reused_success_count,
+                            failed_plugins=0,
+                            updated_at=datetime.now(timezone.utc).isoformat(),
+                        ),
+                    )
+                    logger.info(
+                        f"[tag.skip]插件规则已是最新[/tag.skip] "
+                        f"游戏 [tag.count]{game_title}[/tag.count]"
+                    )
+                    set_status("插件规则已是最新")
+                    return
+
+                logger.info(
+                    f"[tag.phase]插件文本分析[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] "
+                    f"待分析 [tag.count]{len(analysis_plan.jobs)}[/tag.count] 个插件，"
+                    f"复用 [tag.count]{analysis_plan.reused_success_count}[/tag.count] 个插件"
+                )
+                set_status(
+                    f"待分析 {len(analysis_plan.jobs)} 个插件，"
+                    f"复用 {analysis_plan.reused_success_count} 个插件"
+                )
+
+                plugin_text_analysis.start_analysis(
+                    llm_handler=self.llm_handler,
+                    plan=analysis_plan,
+                )
+
+                success_plugins = analysis_plan.reused_success_count
+                failed_plugins = 0
+                deleted_translation_items = 0
+
+                async for execution in plugin_text_analysis.iter_results():
+                    rule_record = execution.rule_record
+                    previous_rule = existing_rules.get(rule_record.plugin_index)
+                    await self.game_database_manager.upsert_plugin_text_rule(
+                        game_title,
+                        rule_record,
+                    )
+
+                    if rule_record.status == "success":
+                        success_plugins += 1
+                        if self._should_refresh_plugin_translation_items(
+                            previous_rule=previous_rule,
+                            current_rule=rule_record,
+                        ):
+                            deleted_translation_items += (
+                                await self.game_database_manager.delete_translation_items_by_prefixes(
+                                    game_title,
+                                    [f"{PLUGINS_FILE_NAME}/{rule_record.plugin_index}/"],
+                                )
+                            )
+                    else:
+                        failed_plugins += 1
+
+                    existing_rules[rule_record.plugin_index] = rule_record
+                    advance_progress(1)
+                    set_status(
+                        f"插件 {rule_record.plugin_index} 分析{self._format_plugin_rule_status(rule_record)}，"
+                        f"成功 {success_plugins} 个，失败 {failed_plugins} 个"
+                    )
+
+                await self.game_database_manager.write_plugin_text_analysis_state(
+                    game_title,
+                    PluginTextAnalysisState(
+                        plugins_file_hash=analysis_plan.plugins_file_hash,
+                        prompt_hash=analysis_plan.prompt_hash,
+                        total_plugins=analysis_plan.total_plugins,
+                        success_plugins=success_plugins,
+                        failed_plugins=failed_plugins,
+                        updated_at=datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
+                logger.success(
+                    f"[tag.success]插件文本分析完成[/tag.success] "
+                    f"游戏 [tag.count]{game_title}[/tag.count] "
+                    f"成功 [tag.count]{success_plugins}[/tag.count] 个插件，"
+                    f"失败 [tag.count]{failed_plugins}[/tag.count] 个插件，"
+                    f"清理旧插件译文 [tag.count]{deleted_translation_items}[/tag.count] 条"
+                )
+                set_status(
+                    f"插件分析完成，成功 {success_plugins} 个，"
+                    f"失败 {failed_plugins} 个，清理旧插件译文 {deleted_translation_items} 条"
+                )
+        except Exception as error:
+            set_status(f"插件解析失败：{error}")
+            raise
+
     async def _translate_roles_with_progress(
         self,
         *,
@@ -511,10 +667,6 @@ class TranslationHandler:
                 game_data = self._get_game_data(game_title)
                 glossary_extraction = GlossaryExtraction(game_data, source_language)
                 data_text_extraction = DataTextExtraction(game_data)
-                plugin_text_extraction = PluginTextExtraction(
-                    game_data,
-                    source_language,
-                )
 
                 glossary = await self.game_database_manager.read_glossary(game_title)
                 role_lines = glossary_extraction.extract_role_dialogue_chunks(
@@ -538,7 +690,26 @@ class TranslationHandler:
 
                 translation_data_map: dict[str, TranslationData] = {}
                 translation_data_map.update(data_text_extraction.extract_all_text())
-                translation_data_map.update(plugin_text_extraction.extract_all_text())
+                plugin_rule_records = await self._read_fresh_plugin_text_rules(
+                    game_title=game_title,
+                    setting=setting,
+                    game_data=game_data,
+                    source_language=source_language,
+                )
+                if plugin_rule_records:
+                    plugin_text_extraction = PluginTextExtraction(
+                        game_data,
+                        plugin_rule_records,
+                        source_language,
+                    )
+                    translation_data_map.update(
+                        plugin_text_extraction.extract_all_text()
+                    )
+                else:
+                    logger.warning(
+                        f"[tag.warning]未找到可用的插件文本规则，已跳过 plugins.js 正文提取[/tag.warning] "
+                        f"游戏 [tag.count]{game_title}[/tag.count]"
+                    )
 
                 total_extracted_items = self._count_translation_items(
                     translation_data_map
@@ -619,6 +790,26 @@ class TranslationHandler:
                 )
                 set_status(f"已构建 {len(batches)} 个翻译批次")
 
+                existing_error_table_names = (
+                    await self.game_database_manager.read_error_table_names(
+                        game_title,
+                        self.ERROR_TABLE_PREFIX,
+                    )
+                )
+                if existing_error_table_names:
+                    deleted_error_table_count = (
+                        await self.game_database_manager.delete_error_tables(
+                            game_title,
+                            existing_error_table_names,
+                        )
+                    )
+                    logger.info(
+                        f"[tag.phase]旧错误表已清理[/tag.phase] "
+                        f"游戏 [tag.count]{game_title}[/tag.count] "
+                        f"共删除 [tag.count]{deleted_error_table_count}[/tag.count] 张错误表"
+                    )
+                    set_status(f"已清理 {deleted_error_table_count} 张旧错误表")
+
                 success_count, error_count = await self._run_text_translation_batches(
                     game_title=game_title,
                     text_translation=text_translation,
@@ -684,12 +875,15 @@ class TranslationHandler:
                     set_status("术语表缺失或不完整，错误表重翻译流程已终止")
                     return
 
-                latest_error_table_name = (
-                    await self.game_database_manager.read_latest_error_table_name(
+                existing_error_table_names = (
+                    await self.game_database_manager.read_error_table_names(
                         game_title,
                         self.ERROR_TABLE_PREFIX,
                     )
                 )
+                latest_error_table_name = None
+                if existing_error_table_names:
+                    latest_error_table_name = existing_error_table_names[-1]
                 if latest_error_table_name is None:
                     logger.info(
                         f"[tag.skip]数据库中没有可重翻译的错误表[/tag.skip] "
@@ -757,8 +951,21 @@ class TranslationHandler:
                     source_language=source_language,
                     translation_cache=translation_cache,
                 )
+                deleted_error_table_count = (
+                    await self.game_database_manager.delete_error_tables(
+                        game_title,
+                        existing_error_table_names,
+                    )
+                )
+                if deleted_error_table_count > 0:
+                    logger.info(
+                        f"[tag.phase]历史错误表已清理[/tag.phase] "
+                        f"游戏 [tag.count]{game_title}[/tag.count] "
+                        f"共删除 [tag.count]{deleted_error_table_count}[/tag.count] 张旧错误表"
+                    )
                 set_status(
-                    f"错误表重翻译完成，成功 {success_count} 条，失败 {error_count} 条"
+                    f"错误表重翻译完成，成功 {success_count} 条，失败 {error_count} 条，"
+                    f"清理旧错误表 {deleted_error_table_count} 张"
                 )
         except Exception as error:
             set_status(f"错误表重翻译失败：{error}")
@@ -940,6 +1147,102 @@ class TranslationHandler:
         if any(not place.translated_name.strip() for place in glossary.places):
             return False
         return True
+
+    async def _read_fresh_plugin_text_rules(
+        self,
+        *,
+        game_title: str,
+        setting: Setting,
+        game_data: GameData,
+        source_language: SourceLanguage,
+    ) -> list[PluginTextRuleRecord]:
+        """
+        读取当前仍然新鲜可用的插件路径规则。
+
+        Args:
+            game_title: 目标游戏标题。
+            setting: 当前请求配置。
+            game_data: 当前游戏已加载的数据对象。
+            source_language: 当前游戏源语言。
+
+        Returns:
+            当前仍然与插件结构和提示词匹配的成功规则列表。
+        """
+
+        prompt_hash = build_prompt_hash(
+            setting.plugin_text_analysis.system_prompt,
+            source_language=source_language,
+        )
+        stored_rules = await self.game_database_manager.read_plugin_text_rules(game_title)
+        fresh_rules: list[PluginTextRuleRecord] = []
+        stale_count = 0
+
+        for rule in stored_rules:
+            if rule.status != "success":
+                continue
+            if rule.plugin_index >= len(game_data.plugins_js):
+                stale_count += 1
+                continue
+
+            current_plugin_hash = build_plugin_hash(
+                game_data.plugins_js[rule.plugin_index]
+            )
+            if rule.prompt_hash != prompt_hash or rule.plugin_hash != current_plugin_hash:
+                stale_count += 1
+                continue
+
+            fresh_rules.append(rule)
+
+        if stale_count > 0:
+            logger.warning(
+                f"[tag.warning]检测到过期插件规则，正文翻译阶段将自动跳过这些插件[/tag.warning] "
+                f"游戏 [tag.count]{game_title}[/tag.count] "
+                f"过期规则 [tag.count]{stale_count}[/tag.count] 条"
+            )
+
+        fresh_rules.sort(key=lambda rule: rule.plugin_index)
+        return fresh_rules
+
+    @staticmethod
+    def _should_refresh_plugin_translation_items(
+        *,
+        previous_rule: PluginTextRuleRecord | None,
+        current_rule: PluginTextRuleRecord,
+    ) -> bool:
+        """
+        判断新规则是否需要清理该插件旧的正文译文。
+
+        这里选择偏安全策略：
+        1. 首次成功、从失败恢复成功、插件哈希变化或提示词变化都清理旧译文。
+        2. 两次成功规则列表不一致时也清理旧译文。
+        3. 只有两次成功且规则列表完全一致时才保留原有译文。
+        """
+
+        if current_rule.status != "success":
+            return False
+        if previous_rule is None:
+            return True
+        if previous_rule.status != "success":
+            return True
+        if previous_rule.plugin_hash != current_rule.plugin_hash:
+            return True
+        if previous_rule.prompt_hash != current_rule.prompt_hash:
+            return True
+        if previous_rule.translate_rules != current_rule.translate_rules:
+            return True
+        return False
+
+    @staticmethod
+    def _format_plugin_rule_status(rule_record: PluginTextRuleRecord) -> str:
+        """
+        生成适合状态栏展示的插件规则状态文本。
+        """
+
+        if rule_record.status == "success":
+            return f"成功，命中 {len(rule_record.translate_rules)} 条规则"
+        if rule_record.last_error:
+            return f"失败：{rule_record.last_error}"
+        return "失败"
 
     @staticmethod
     def _filter_pending_translation_data(

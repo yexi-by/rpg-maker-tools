@@ -18,8 +18,14 @@ CONTROL_CHARS_PATTERN = re.compile(
     r"\\([A-Za-z]+)(?:\[([^\]]*)\])?|\\([^\w\s])|%([0-9]+)"
 )
 SIMPLE_CONTROL_PARAM_PATTERN = re.compile(r"[A-Za-z0-9_]+")
+NO_PARAM_ALPHA_CONTROL_CODES: set[str] = {"G"}
+TRANSLATION_PLACEHOLDER_PATTERN = re.compile(
+    r"\[[A-Z]+(?:_[^\]]+)?\]",
+    re.IGNORECASE,
+)
 type ItemType = Literal["long_text", "array", "short_text"]
 type SourceLanguage = Literal["ja", "en"]
+type PluginTextAnalysisStatus = Literal["success", "failed"]
 type ErrorType = Literal["AI漏翻", "控制符不匹配", "源语言残留"]
 type TranslationErrorItem = tuple[
     str,
@@ -74,6 +80,33 @@ def _find_matching_delimiter_end(
     depth: int = 0
     active_quote: str | None = None
 
+    def can_start_quote(index: int, quote_char: str) -> bool:
+        """
+        判断当前位置的引号是否应视为真正的字符串边界。
+
+        设计意图：
+            `\\js[...]` 参数里经常会混入英文短语，例如 `male's manhood`。
+            其中的 `'` 只是单词内部撇号，不应该把整个 `[...]` 误判成
+            “进入了字符串引号上下文”，否则控制符会退化成只识别 `\\js`
+            前缀，后面的参数残留在正文里。
+
+        Args:
+            index: 当前引号字符的位置。
+            quote_char: 当前命中的引号字符。
+
+        Returns:
+            bool: 只有在该引号更像真正的字符串边界时才返回 `True`。
+        """
+
+        previous_char = text[index - 1] if index > start_index else ""
+        next_char = text[index + 1] if index + 1 < len(text) else ""
+
+        if previous_char == "\\":
+            return False
+        if quote_char == "'" and previous_char.isalnum() and next_char.isalnum():
+            return False
+        return True
+
     for index in range(start_index, len(text)):
         char = text[index]
         previous_char = text[index - 1] if index > start_index else ""
@@ -83,7 +116,7 @@ def _find_matching_delimiter_end(
                 active_quote = None
             continue
 
-        if char in {'"', "'"} and previous_char != "\\":
+        if char in {'"', "'"} and can_start_quote(index, char):
             active_quote = char
             continue
 
@@ -219,11 +252,17 @@ def _iter_control_sequence_spans(text: str) -> list[ControlSequenceSpan]:
                     index = match_end + 1
                     continue
 
-            original = text[index:code_end]
-            spans.append(
-                (index, code_end, original, "code", code, None, False)
-            )
-            index = code_end
+            if next_char.upper() in NO_PARAM_ALPHA_CONTROL_CODES:
+                original = text[index : index + 2]
+                spans.append(
+                    (index, index + 2, original, "code", next_char, None, False)
+                )
+                index += 2
+                continue
+
+            # 没有参数定界符、也不属于明确支持的无参数控制符时，
+            # 视为普通文本。这样 `\nAll` 这类字面量换行转义不会被误吞成伪控制符。
+            index += 1
             continue
 
         original = text[index : index + 2]
@@ -530,9 +569,26 @@ class TranslationItem(BaseModel):
         对 `translation_lines_with_placeholders` 的自定义占位符总量进行校验。
         如果校验失败，抛出 ValueError 包含详细的错误信息。
         """
-        if not self.placeholder_map:
-            return None
         errors: list[str] = []
+        original_placeholders = self._collect_placeholder_tokens(
+            self.original_lines_with_placeholders
+        )
+        translated_placeholders = self._collect_placeholder_tokens(
+            self.translation_lines_with_placeholders
+        )
+
+        if not original_placeholders and translated_placeholders:
+            joined_placeholders = "、".join(sorted(translated_placeholders))
+            errors.append(
+                "原文不包含任何占位符，但译文新增了以下占位符: "
+                f"{joined_placeholders}"
+            )
+
+        if not self.placeholder_map:
+            if errors:
+                raise ValueError(";\n".join(errors))
+            return None
+
         combined_text: str = "".join(self.translation_lines_with_placeholders).lower()
         for placeholder, expected_count in self.placeholder_counts.items():
             actual_count: int = combined_text.count(placeholder.lower())
@@ -542,6 +598,27 @@ class TranslationItem(BaseModel):
                 )
         if errors:
             raise ValueError(";\n".join(errors))
+
+    def _collect_placeholder_tokens(self, lines: list[str]) -> set[str]:
+        """
+        收集给定文本行列表中的占位符集合。
+
+        这里专门用于“原文没有占位符，但译文凭空新增占位符”的异常检测。
+        由于正文翻译阶段看到的是已经过遮蔽处理的 `original_lines_with_placeholders`，
+        所以此处必须直接针对遮蔽后的文本和模型返回结果做字面量扫描。
+
+        Args:
+            lines: 待扫描的文本行列表。
+
+        Returns:
+            当前文本里出现过的占位符集合。
+        """
+        placeholders: set[str] = set()
+        for line in lines:
+            placeholders.update(
+                TRANSLATION_PLACEHOLDER_PATTERN.findall(line)
+            )
+        return placeholders
 
     def restore_placeholders(self) -> None:
         """
@@ -580,6 +657,67 @@ class TranslationData(BaseModel):
 
     display_name: str | None
     translation_items: list[TranslationItem] = Field(default_factory=list)
+ 
+ 
+class PluginTextTranslateRule(BaseModel):
+    """
+    插件文本路径规则。
+
+    Attributes:
+        path_template: 当前规则对应的受限 JSONPath 模板。
+        reason: AI 对当前路径为何应进入翻译流程的解释。
+    """
+
+    path_template: str
+    reason: str
+
+
+class PluginTextRuleRecord(BaseModel):
+    """
+    单个插件的最新文本路径规则快照。
+
+    Attributes:
+        plugin_index: 插件在 `plugins.js` 数组中的索引。
+        plugin_name: 插件名称。
+        plugin_hash: 当前插件对象的结构哈希，用于判断规则是否过期。
+        prompt_hash: 当前插件分析提示词哈希，用于判断规则是否需要重跑。
+        status: 当前插件分析状态，仅允许成功或失败。
+        plugin_reason: 插件级分析结论。
+        translate_rules: 当前插件生效的路径规则列表。
+        last_error: 最近一次分析失败时的错误摘要；成功时允许为空。
+        updated_at: 当前快照写入数据库的时间戳。
+    """
+
+    plugin_index: int
+    plugin_name: str
+    plugin_hash: str
+    prompt_hash: str
+    status: PluginTextAnalysisStatus
+    plugin_reason: str = ""
+    translate_rules: list[PluginTextTranslateRule] = Field(default_factory=list)
+    last_error: str | None = None
+    updated_at: str
+
+
+class PluginTextAnalysisState(BaseModel):
+    """
+    当前游戏最近一次插件文本分析的汇总状态。
+
+    Attributes:
+        plugins_file_hash: 当前整份 `plugins.js` 的结构哈希。
+        prompt_hash: 当前插件分析提示词哈希。
+        total_plugins: 当前游戏中的插件总数。
+        success_plugins: 当前最新规则中分析成功的插件数量。
+        failed_plugins: 当前最新规则中分析失败的插件数量。
+        updated_at: 当前汇总状态写入数据库的时间戳。
+    """
+
+    plugins_file_hash: str
+    prompt_hash: str
+    total_plugins: int
+    success_plugins: int
+    failed_plugins: int
+    updated_at: str
 
 
 # ==================== 文件名常量 ====================
@@ -687,6 +825,10 @@ __all__: list[str] = [
     "MAP_INFOS_FILE_NAME",
     "MAP_PATTERN",
     "Place",
+    "PluginTextAnalysisState",
+    "PluginTextAnalysisStatus",
+    "PluginTextRuleRecord",
+    "PluginTextTranslateRule",
     "PLUGINS_FILE_NAME",
     "PLUGINS_ORIGIN_FILE_NAME",
     "QUESTS_FILE_NAME",
