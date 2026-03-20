@@ -147,6 +147,8 @@ class DataTextExtraction:
 
         该方法会逐个读取游戏标题、属性名、技能类型、武器/防具类型、装备槽，
         以及各种 UI terms 和 messages 文本，并将非空的项封装为短文本翻译条目。
+        `variables` 和 `switches` 虽然仍会被加载到模型中，但根据用户反馈，
+        它们经常承担脚本标识作用，翻译后容易破坏游戏逻辑，因此在正文提取阶段显式跳过。
 
         Returns:
             包含 System.json 提取结果的字典，如果没有任何提取项则返回空字典。
@@ -172,8 +174,6 @@ class DataTextExtraction:
             "weaponTypes": system.weaponTypes,
             "armorTypes": system.armorTypes,
             "equipTypes": system.equipTypes,
-            "variables": system.variables,
-            "switches": system.switches,
         }
         for key, text_list in lists_to_extract.items():
             for index, text in enumerate(text_list):

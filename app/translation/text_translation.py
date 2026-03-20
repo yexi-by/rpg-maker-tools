@@ -34,7 +34,7 @@ class TextTranslation:
     设计约定：
     为了状态管理的清晰，这个类被设计为“一次性会话（One-off Session）”对象。
     即一个 `TextTranslation` 实例在它的生命周期内只能调用一次 `start_translation`。
-    如果需要执行另一波翻译（如错误表重翻），需要抛弃旧实例，重新实例化一个新的 `TextTranslation`。
+    如果需要执行新一轮正文翻译，需要抛弃旧实例，重新实例化一个新的 `TextTranslation`。
     """
 
     def __init__(self, setting: Setting) -> None:

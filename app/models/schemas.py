@@ -388,7 +388,7 @@ class Glossary(BaseModel):
     结构化术语表聚合模型。
 
     统一承接角色术语与地点术语的完整结构化结果，
-    供数据库、正文翻译、错误重翻与回写流程共享。
+    供数据库、正文翻译与回写流程共享。
     """
 
     roles: list[Role] = Field(default_factory=list)
@@ -721,20 +721,6 @@ class PluginTextAnalysisState(BaseModel):
 
 
 # ==================== 文件名常量 ====================
-
-
-class ErrorRetryItem(BaseModel):
-    """
-    错误表重翻译条目。
-
-    承载了之前翻译失败的所有上下文状态（包括旧译文、错误类型、具体错误详情），
-    作为重新构建 prompt 和执行翻译的重要输入。
-    """
-
-    translation_item: TranslationItem
-    previous_translation_lines: list[str] = Field(default_factory=list)
-    error_type: ErrorType
-    error_detail: list[str] = Field(default_factory=list)
 
 
 DATA_DIRECTORY_NAME: str = "data"

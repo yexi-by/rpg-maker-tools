@@ -52,10 +52,6 @@ token_size = 1024
 factor = 3.5
 max_command_items = 5
 
-[error_translation]
-chunk_size = 10
-system_prompt_file = "prompts/error_retry_system.txt"
-
 [plugin_text_analysis]
 worker_count = 50
 rpm = 50

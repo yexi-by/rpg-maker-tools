@@ -211,7 +211,6 @@ def _inject_prompt_texts(raw_config: dict[str, Any], base_dir: Path) -> None:
     """
     _inject_glossary_prompt_texts(raw_config=raw_config, base_dir=base_dir)
     _inject_text_translation_prompt_text(raw_config=raw_config, base_dir=base_dir)
-    _inject_error_translation_prompt_text(raw_config=raw_config, base_dir=base_dir)
     _inject_plugin_text_analysis_prompt_text(raw_config=raw_config, base_dir=base_dir)
 
 
@@ -264,28 +263,6 @@ def _inject_text_translation_prompt_text(
         raise ValueError("配置文件中缺少 text_translation.system_prompt_file 配置项")
 
     text_translation["system_prompt"] = _read_prompt_text(base_dir, prompt_file)
-
-
-def _inject_error_translation_prompt_text(
-    raw_config: dict[str, Any],
-    base_dir: Path,
-) -> None:
-    """
-    注入错误重翻提示词文本。
-
-    Args:
-        raw_config: TOML 原始字典。
-        base_dir: 配置文件所在目录。
-    """
-    error_translation = raw_config.get("error_translation")
-    if not isinstance(error_translation, dict):
-        raise ValueError("配置文件中缺少 error_translation 配置段")
-
-    prompt_file = error_translation.get("system_prompt_file")
-    if not isinstance(prompt_file, str) or not prompt_file.strip():
-        raise ValueError("配置文件中缺少 error_translation.system_prompt_file 配置项")
-
-    error_translation["system_prompt"] = _read_prompt_text(base_dir, prompt_file)
 
 
 def _inject_plugin_text_analysis_prompt_text(
@@ -366,10 +343,6 @@ def _build_setting_summary(
         raw_config=raw_config,
         section_path=["text_translation"],
     )
-    error_prompt_file = _read_prompt_file_name(
-        raw_config=raw_config,
-        section_path=["error_translation"],
-    )
     plugin_text_prompt_file = _read_prompt_file_name(
         raw_config=raw_config,
         section_path=["plugin_text_analysis"],
@@ -424,10 +397,6 @@ def _build_setting_summary(
             f"间隔 [tag.count]{setting.text_translation.retry_delay}[/tag.count] 秒"
         ),
         (
-            "错误重翻: "
-            f"每批 [tag.count]{setting.error_translation.chunk_size}[/tag.count] 条"
-        ),
-        (
             "插件解析: "
             f"[tag.count]{setting.plugin_text_analysis.worker_count}[/tag.count] 个 worker，"
             f"RPM [tag.count]{setting.plugin_text_analysis.rpm or '不限'}[/tag.count]，"
@@ -439,7 +408,6 @@ def _build_setting_summary(
             f"角色术语=[tag.path]{role_prompt_file}[/tag.path]，"
             f"地点术语=[tag.path]{display_prompt_file}[/tag.path]，"
             f"正文=[tag.path]{text_prompt_file}[/tag.path]，"
-            f"错误重翻=[tag.path]{error_prompt_file}[/tag.path]，"
             f"插件解析=[tag.path]{plugin_text_prompt_file}[/tag.path]"
         ),
     ]

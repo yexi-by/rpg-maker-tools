@@ -5,7 +5,6 @@
 """
 
 from .schemas import (
-    ErrorTranslationSetting,
     GlossaryExtractionSetting,
     GlossaryRoleNameTranslationSetting,
     GlossaryTranslationSetting,
@@ -19,7 +18,6 @@ from .schemas import (
 )
 
 __all__: list[str] = [
-    "ErrorTranslationSetting",
     "GlossaryExtractionSetting",
     "GlossaryRoleNameTranslationSetting",
     "GlossaryTranslationSetting",

@@ -313,6 +313,10 @@ def _write_system_item(game_data: GameData, item: TranslationItem) -> None:
     """
     将 System.json 文本写回数据副本。
 
+    当前会显式跳过 `variables` 和 `switches`。
+    原因是历史数据库中可能残留这两类路径的译文，而它们在不少项目里承担脚本标识作用，
+    一旦继续回写，会直接破坏事件或插件逻辑。
+
     Args:
         game_data: 游戏数据聚合对象。
         item: 当前翻译条目。
@@ -327,6 +331,8 @@ def _write_system_item(game_data: GameData, item: TranslationItem) -> None:
 
     if len(parts) == 3:
         key = parts[1]
+        if key in {"variables", "switches"}:
+            return
         index = int(parts[2])
         system_data[key][index] = translated_text
         return

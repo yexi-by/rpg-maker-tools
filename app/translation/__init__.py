@@ -6,7 +6,7 @@
 """
 
 from .cache import TranslationCache
-from .context import iter_error_retry_context_batches, iter_translation_context_batches
+from .context import iter_translation_context_batches
 from .glossary_translation import GlossaryTranslation
 from .text_translation import TextTranslation
 from .verify import verify_translation_batch
@@ -16,7 +16,6 @@ __all__: list[str] = [
     "GlossaryTranslation",
     "TranslationCache",
     "TextTranslation",
-    "iter_error_retry_context_batches",
     "iter_translation_context_batches",
     "verify_translation_batch",
 ]

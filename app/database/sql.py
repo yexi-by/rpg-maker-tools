@@ -227,16 +227,6 @@ SELECT_TRANSLATED_ITEMS: str = f"""
 ;
 """
 
-SELECT_LATEST_TABLE_NAME_BY_PREFIX: str = """
---sql
-    SELECT name
-    FROM sqlite_master
-    WHERE type = 'table' AND name LIKE ?
-    ORDER BY name DESC
-    LIMIT 1
-;
-"""
-
 SELECT_TABLE_NAMES_BY_PREFIX: str = """
 --sql
     SELECT name
@@ -323,7 +313,6 @@ __all__: list[str] = [
     "PLUGIN_TEXT_RULES_TABLE_NAME",
     "SELECT_ALL",
     "SELECT_GLOSSARY_STATE",
-    "SELECT_LATEST_TABLE_NAME_BY_PREFIX",
     "SELECT_METADATA",
     "SELECT_PLACE_GLOSSARY_ITEMS",
     "SELECT_PLUGIN_TEXT_ANALYSIS_STATE",

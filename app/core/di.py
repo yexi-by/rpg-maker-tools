@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 from dishka import Provider, Scope, provide
 
 from app.config.schemas import LLMServiceSetting, Setting
-from app.database.db import GameDatabaseManager
+from app.database import GameDatabaseManager
 from app.services.llm import LLMHandler, LLMSettings
 from app.translation import GlossaryTranslation, TextTranslation, TranslationCache
 from app.utils.config_loader_utils import load_setting

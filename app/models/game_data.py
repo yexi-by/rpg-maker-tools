@@ -164,7 +164,10 @@ class System(BaseModel):
     系统全局配置（System）模型。
     
     对应整个游戏唯一的 `data/System.json`。
-    它掌管着游戏最核心的基础分类定义以及 UI 词汇。这里的每一个分类名称都必须作为短文本提交给大模型翻译。
+    它掌管着游戏最核心的基础分类定义以及 UI 词汇。
+    当前正文提取只会翻译玩家可见且相对安全的系统术语；
+    `variables`、`switches` 会保留在原始 JSON 中，但当前模型不声明这两个字段，
+    从源头避免它们进入翻译通路。
 
     Attributes:
         gameTitle: 全局游戏标题（显示在窗口边框）。
@@ -174,8 +177,8 @@ class System(BaseModel):
         weaponTypes: 武器分类列表。
         armorTypes: 护甲分类列表。
         equipTypes: 装备槽位列表（如 头部、饰品）。
-        variables: 全局游戏变量名称（常常被插件通过名称调用，属于重灾区）。
-        switches: 全局游戏开关名称。
+        variables: 全局游戏变量名称。原始 JSON 可能存在，但当前模型不声明，也不参与翻译。
+        switches: 全局游戏开关名称。原始 JSON 可能存在，但当前模型不声明，也不参与翻译。
     """
 
     gameTitle: str
@@ -186,8 +189,10 @@ class System(BaseModel):
     weaponTypes: list[str]
     armorTypes: list[str]
     equipTypes: list[str]
-    variables: list[str]  
-    switches: list[str]  
+    # `variables`、`switches` 常被脚本或插件按名称引用。
+    # 这里故意不声明到模型中，依赖 Pydantic 忽略额外字段，从源头避免进入翻译流程。
+    # variables: list[str]
+    # switches: list[str]
 
 
 class Troop(BaseModel):

@@ -352,19 +352,6 @@ SETTING_CARDS: tuple[SettingCardSpec, ...] = (
                     ),
                 ),
             ),
-            SettingSectionSpec(
-                title="错误重翻",
-                fields=(
-                    SettingFieldSpec(
-                        path=("error_translation", "chunk_size"),
-                        kind="int",
-                    ),
-                    SettingFieldSpec(
-                        path=("error_translation", "system_prompt_file"),
-                        kind="string",
-                    ),
-                ),
-            ),
         ),
     ),
 )
@@ -625,7 +612,6 @@ class TranslationWorkbenchApp(App[None]):
                                     yield Button("构建术语", id="btn-build_glossary", classes="action-btn")
                                     yield Button("插件解析", id="btn-analyze_plugin_text", classes="action-btn")
                                     yield Button("正文翻译", id="btn-translate_text", classes="action-btn")
-                                    yield Button("错误重翻", id="btn-retry_error_table", classes="action-btn")
                                     yield Button("回写数据", id="btn-write_back", classes="action-btn")
                                 yield Static("", classes="sidebar-spacer")
                                 yield Button("返回首页", id="actions-back-button", variant="error")
@@ -1348,9 +1334,6 @@ class TranslationWorkbenchApp(App[None]):
         elif action_id == "translate_text":
             task_label = "正文翻译"
             coroutine = self._run_translate_text_task(game_title)
-        elif action_id == "retry_error_table":
-            task_label = "错误重翻"
-            coroutine = self._run_retry_error_table_task(game_title)
         elif action_id == "write_back":
             task_label = "回写"
             coroutine = self._run_write_back_task(game_title)
@@ -1619,32 +1602,6 @@ class TranslationWorkbenchApp(App[None]):
                 f"[tag.exception]正文翻译任务失败[/tag.exception]：{error_summary}"
             )
             self._ui_queue.put(("finished", f"正文翻译失败：{error_summary}"))
-
-    async def _run_retry_error_table_task(self, game_title: str) -> None:
-        """
-        执行错误重翻任务。
-        """
-        if self.handler is None:
-            self._ui_queue.put(("finished", "错误重翻失败：编排器未初始化"))
-            return
-
-        try:
-            self._queue_detail("开始错误重翻")
-            await self.handler.retry_error_table(
-                game_title=game_title,
-                callbacks=(
-                    self._queue_set_progress,
-                    self._queue_advance_progress,
-                    self._queue_detail,
-                ),
-            )
-            self._ui_queue.put(("finished", "错误重翻完成"))
-        except Exception as error:
-            error_summary = self._format_exception_summary(error)
-            logger.exception(
-                f"[tag.exception]错误重翻任务失败[/tag.exception]：{error_summary}"
-            )
-            self._ui_queue.put(("finished", f"错误重翻失败：{error_summary}"))
 
     async def _run_write_back_task(self, game_title: str) -> None:
         """

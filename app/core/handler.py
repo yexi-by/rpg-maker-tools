@@ -5,7 +5,7 @@
 它以 `game_title` 作为显式目标参数，统一串起：
 1. 游戏注册与预加载。
 2. 术语构建。
-3. 正文翻译与错误表重翻。
+3. 正文翻译与错误记录。
 4. 译文回写。
 """
 
@@ -23,7 +23,7 @@ from dishka import AsyncContainer, make_async_container
 
 from app.config.schemas import Setting
 from app.core.di import TranslationProvider
-from app.database.db import (
+from app.database import (
     DEFAULT_ERROR_TABLE_PREFIX,
     GameDatabaseItem,
     GameDatabaseManager,
@@ -32,7 +32,6 @@ from app.extraction import DataTextExtraction, GlossaryExtraction, PluginTextExt
 from app.models.schemas import (
     DATA_DIRECTORY_NAME,
     DATA_ORIGIN_DIRECTORY_NAME,
-    ErrorRetryItem,
     GameData,
     Glossary,
     ItemType,
@@ -54,7 +53,6 @@ from app.translation import (
     GlossaryTranslation,
     TextTranslation,
     TranslationCache,
-    iter_error_retry_context_batches,
     iter_translation_context_batches,
 )
 from app.utils.game_loader_utils import (
@@ -828,149 +826,6 @@ class TranslationHandler:
             set_status(f"正文翻译失败：{error}")
             raise
 
-    async def retry_error_table(
-        self,
-        game_title: str,
-        callbacks: tuple[
-            Callable[[int, int], None],
-            Callable[[int], None],
-            Callable[[str], None],
-        ],
-    ) -> None:
-        """
-        为指定游戏重翻最近一张错误表。
-
-        Args:
-            game_title: 目标游戏标题。
-            callbacks: 错误重翻回调元组。
-        """
-        set_progress, advance_progress, set_status = callbacks
-
-        try:
-            async with self._container() as request_container:
-                setting = await request_container.get(Setting)
-                text_translation = await request_container.get(TextTranslation)
-                translation_cache = await request_container.get(TranslationCache)
-
-                source_language = self.get_game_source_language(game_title)
-                game_data = self._get_game_data(game_title)
-                glossary_extraction = GlossaryExtraction(game_data, source_language)
-                glossary = await self.game_database_manager.read_glossary(game_title)
-                role_lines = glossary_extraction.extract_role_dialogue_chunks(
-                    chunk_blocks=setting.glossary_extraction.role_chunk_blocks,
-                    chunk_lines=setting.glossary_extraction.role_chunk_lines,
-                )
-                display_names = glossary_extraction.extract_display_names()
-
-                if glossary is None or not self._is_glossary_complete(
-                    glossary=glossary,
-                    expected_role_names=set(role_lines),
-                    expected_display_names=set(display_names),
-                ):
-                    logger.warning(
-                        f"[tag.warning]术语表缺失或不完整，错误表重翻译流程已终止[/tag.warning] "
-                        f"游戏 [tag.count]{game_title}[/tag.count]"
-                    )
-                    set_progress(0, 0)
-                    set_status("术语表缺失或不完整，错误表重翻译流程已终止")
-                    return
-
-                existing_error_table_names = (
-                    await self.game_database_manager.read_error_table_names(
-                        game_title,
-                        self.ERROR_TABLE_PREFIX,
-                    )
-                )
-                latest_error_table_name = None
-                if existing_error_table_names:
-                    latest_error_table_name = existing_error_table_names[-1]
-                if latest_error_table_name is None:
-                    logger.info(
-                        f"[tag.skip]数据库中没有可重翻译的错误表[/tag.skip] "
-                        f"游戏 [tag.count]{game_title}[/tag.count]"
-                    )
-                    set_progress(0, 0)
-                    set_status("数据库中没有可重翻译的错误表")
-                    return
-
-                error_retry_items = (
-                    await self.game_database_manager.read_error_retry_items(
-                        game_title,
-                        latest_error_table_name,
-                    )
-                )
-                set_progress(0, len(error_retry_items))
-
-                if not error_retry_items:
-                    logger.info(
-                        f"[tag.skip]最新错误表中没有可重翻译记录[/tag.skip] "
-                        f"游戏 [tag.count]{game_title}[/tag.count] "
-                        f"表名 [tag.path]{latest_error_table_name}[/tag.path]"
-                    )
-                    set_status("最新错误表中没有可重翻译记录")
-                    return
-
-                logger.info(
-                    f"[tag.phase]错误表读取[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] "
-                    f"表名 [tag.path]{latest_error_table_name}[/tag.path] "
-                    f"共 [tag.count]{len(error_retry_items)}[/tag.count] 条记录"
-                )
-                set_status(
-                    f"错误表读取完成，表名 {latest_error_table_name}，"
-                    f"共 {len(error_retry_items)} 条记录"
-                )
-
-                batches = self._build_error_retry_batches(
-                    error_retry_items=error_retry_items,
-                    glossary=glossary,
-                    setting=setting,
-                    source_language=source_language,
-                )
-                if not batches:
-                    logger.warning(
-                        f"[tag.warning]没有构建出可用的错误重翻译批次[/tag.warning] "
-                        f"游戏 [tag.count]{game_title}[/tag.count]"
-                    )
-                    set_status("没有构建出可用的错误重翻译批次")
-                    return
-
-                logger.info(
-                    f"[tag.phase]错误重翻译上下文[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] "
-                    f"共构建 [tag.count]{len(batches)}[/tag.count] 个翻译批次"
-                )
-                set_status(f"已构建 {len(batches)} 个错误重翻译批次")
-
-                success_count, error_count = await self._run_text_translation_batches(
-                    game_title=game_title,
-                    text_translation=text_translation,
-                    batches=batches,
-                    start_log_message="错误表重翻译任务已启动",
-                    finish_log_message="错误表重翻译流程结束",
-                    advance_progress=advance_progress,
-                    set_status=set_status,
-                    source_language=source_language,
-                    translation_cache=translation_cache,
-                )
-                deleted_error_table_count = (
-                    await self.game_database_manager.delete_error_tables(
-                        game_title,
-                        existing_error_table_names,
-                    )
-                )
-                if deleted_error_table_count > 0:
-                    logger.info(
-                        f"[tag.phase]历史错误表已清理[/tag.phase] "
-                        f"游戏 [tag.count]{game_title}[/tag.count] "
-                        f"共删除 [tag.count]{deleted_error_table_count}[/tag.count] 张旧错误表"
-                    )
-                set_status(
-                    f"错误表重翻译完成，成功 {success_count} 条，失败 {error_count} 条，"
-                    f"清理旧错误表 {deleted_error_table_count} 张"
-                )
-        except Exception as error:
-            set_status(f"错误表重翻译失败：{error}")
-            raise
-
     async def write_back(
         self,
         game_title: str,
@@ -1363,34 +1218,6 @@ class TranslationHandler:
             )
 
         return batches
-
-    @staticmethod
-    def _build_error_retry_batches(
-        error_retry_items: list[ErrorRetryItem],
-        glossary: Glossary,
-        setting: Setting,
-        source_language: SourceLanguage,
-    ) -> list[tuple[list[TranslationItem], list[ChatMessage]]]:
-        """
-        把错误表条目构造成错误重翻译批次。
-
-        Args:
-            error_retry_items: 当前错误表读取出的全部错误条目。
-            glossary: 已完成的术语表。
-            setting: 当前请求配置。
-
-        Returns:
-            可直接送入正文翻译器的错误重翻译批次列表。
-        """
-        return list(
-            iter_error_retry_context_batches(
-                error_retry_items=error_retry_items,
-                chunk_size=setting.error_translation.chunk_size,
-                system_prompt=setting.error_translation.system_prompt,
-                glossary=glossary,
-                source_language=source_language,
-            )
-        )
 
     async def _run_text_translation_batches(
         self,

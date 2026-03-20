@@ -2,7 +2,7 @@
 
 一个面向 RPG Maker 项目的终端翻译工具仓库。
 
-当前版本以 **Textual TUI 工作台** 为默认入口，围绕“多游戏管理 + 术语构建 + 正文翻译 + 错误重翻 + 回写”组织完整流程。每个游戏会在仓库本地维护独立 SQLite 数据库，用于保存术语、正文译文、错误表和元数据，支持断点续跑与多次回写。
+当前版本以 **Textual TUI 工作台** 为默认入口，围绕“多游戏管理 + 术语构建 + 正文翻译 + 回写”组织完整流程。每个游戏会在仓库本地维护独立 SQLite 数据库，用于保存术语、正文译文、错误表和元数据，支持断点续跑与多次回写。
 
 ## 1. 项目定位
 
@@ -11,7 +11,7 @@
 - 从游戏目录提取可翻译文本
 - 使用术语表约束正文翻译
 - 使用 SQLite 保存进度、译文和错误记录
-- 在失败批次基础上进行错误重翻
+- 将失败批次记录到错误表，便于后续排查
 - 将最终译文回写到原始游戏目录
 
 当前实现已经移除旧版 GUI/旧版单游戏配置思路，运行方式和文档都以现有 TUI 新栈为准。
@@ -38,10 +38,6 @@
   - 校验占位符与控制符
   - 校验源语言残留（当前支持日文 / 英文）
   - 校验失败条目自动落入错误表
-- 错误重翻
-  - 自动读取最近一张错误表
-  - 重新构造批次并再次送模
-  - 重翻成功后只保留最新结果表
 - 回写
   - 术语、正文统一回写到游戏原目录
   - 支持写回 `data/*.json`
@@ -54,14 +50,12 @@
 1. 添加游戏
 2. 构建术语
 3. 正文翻译
-4. 错误重翻（可选）
-5. 回写
+4. 回写
 
 其中有几个关键前提：
 
 - 正文翻译依赖完整术语表；术语表缺失或不完整时，正文流程会直接终止
 - 正文翻译启动前会清理当前游戏已有错误表，并为本轮新建一张错误表
-- 错误重翻只读取最近一次翻译任务生成的最新错误表；重翻成功后会清理旧错误表，只保留本轮最新结果表
 - 回写使用的是数据库中的最终结果，而不是内存中的临时状态
 
 ## 4. 运行环境
@@ -104,7 +98,7 @@ launch_tui.bat
 
 1. 首页点击“添加游戏”，输入 RPG Maker 游戏根目录
 2. 选中游戏后按 `Enter` 进入任务页
-3. 依次执行“构建术语”“正文翻译”“错误重翻”“回写”
+3. 依次执行“构建术语”“正文翻译”“回写”
 
 ## 6. 游戏目录要求
 
@@ -183,10 +177,6 @@ token_size = 512
 factor = 3.5
 max_command_items = 5
 
-[error_translation]
-chunk_size = 10
-system_prompt_file = "prompts/error_retry_system.txt"
-
 [text_translation]
 worker_count = 60
 rpm = 60
@@ -204,7 +194,7 @@ system_prompt_file = "prompts/text_translation_system.txt"
 | 字段 | 说明 |
 | --- | --- |
 | `llm_services.glossary` | 构建术语时使用的模型服务 |
-| `llm_services.text` | 正文翻译与错误重翻时使用的模型服务 |
+| `llm_services.text` | 正文翻译时使用的模型服务 |
 
 单个服务支持以下字段：
 
@@ -263,15 +253,6 @@ system_prompt_file = "prompts/text_translation_system.txt"
 | `retry_delay` | 网络失败重试间隔秒数 |
 | `system_prompt_file` | 正文翻译提示词文件 |
 
-#### `error_translation`
-
-控制错误重翻：
-
-| 字段 | 说明 |
-| --- | --- |
-| `chunk_size` | 每批错误条目数 |
-| `system_prompt_file` | 错误重翻提示词文件 |
-
 ### 7.4 配置安全建议
 
 - `setting.toml` 当前以明文形式保存密钥
@@ -292,7 +273,7 @@ system_prompt_file = "prompts/text_translation_system.txt"
   - 直接编辑 `setting.toml`
   - 输入校验失败时不会覆盖最后一次合法值
 - 任务页
-  - 对当前游戏执行构建术语、正文翻译、错误重翻、回写
+  - 对当前游戏执行构建术语、正文翻译、回写
   - 展示进度条、状态文本和实时日志
 
 日志历史由应用统一维护，切换页面后不会丢失。
@@ -319,8 +300,7 @@ system_prompt_file = "prompts/text_translation_system.txt"
 2. 先进入设置页确认模型配置和提示词路径
 3. 进入任务页构建术语
 4. 术语成功后再执行正文翻译
-5. 如有失败项，再执行错误重翻
-6. 确认无误后执行回写
+5. 确认无误后执行回写
 
 ## 9. 支持的提取与回写范围
 
@@ -331,7 +311,7 @@ system_prompt_file = "prompts/text_translation_system.txt"
 - 事件对白
 - 选项文本
 - 滚动文本
-- `System.json` 内的系统术语、提示消息、游戏标题等
+- `System.json` 内的系统术语、提示消息、游戏标题等（默认跳过 `variables`、`switches` 名称）
 - 基础数据库中的名称、昵称、简介、说明、战斗消息
 - 可选 `Quests.json` 中的 `title_cte`、`summaries_cte`、`rewards_cte`、`objectives_cte`
 - 事件中的插件命令文本参数
@@ -350,6 +330,9 @@ system_prompt_file = "prompts/text_translation_system.txt"
 
 - `data/*.json`
 - `js/plugins.js`
+
+其中 `System.json/variables/*` 与 `System.json/switches/*` 会被显式忽略，
+用于规避旧数据库残留译文继续污染游戏逻辑。
 
 数据库中不存在的数据不会被凭空生成，因此回写前应先确保术语或正文结果已经写入数据库。
 
@@ -424,11 +407,7 @@ rpg-maker-tools/
 
 因为数据库文件名直接来自 `package.json.window.title`。如果标题包含 Windows 非法字符，就无法创建数据库文件。
 
-### 12.4 为什么错误重翻没有执行？
-
-因为数据库里没有最近错误表，或者最新错误表中已经没有可重翻条目。
-
-### 12.5 修改 `setting.toml` 后要不要重启程序？
+### 12.4 修改 `setting.toml` 后要不要重启程序？
 
 通常不需要。下一次任务执行时会重新读取配置。但已经在运行中的任务不会中途切换到新配置。
 
@@ -446,7 +425,7 @@ uv run python main.py
 - 工作台是否能正常启动
 - 设置页是否能正常保存 `setting.toml`
 - 添加游戏后是否成功生成 `data/db/*.db`
-- 术语构建、正文翻译、错误重翻、回写的日志是否符合预期
+- 术语构建、正文翻译、回写的日志是否符合预期
 
 ## 14. 适用范围说明
 

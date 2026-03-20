@@ -65,7 +65,7 @@ class LLMServicesSetting(StrictBaseModel):
 
     Attributes:
         glossary: 术语相关任务使用的模型服务配置。
-        text: 正文翻译与错误重翻使用的模型服务配置。
+        text: 正文翻译使用的模型服务配置。
         plugin_text: plugins.js 插件文本路径分析使用的模型服务配置。
     """
 
@@ -75,7 +75,7 @@ class LLMServicesSetting(StrictBaseModel):
     )
     text: LLMServiceSetting = Field(
         title="正文服务",
-        description="用于正文翻译和错误重翻时使用的模型服务配置。",
+        description="用于正文翻译时使用的模型服务配置。",
     )
     plugin_text: LLMServiceSetting = Field(
         title="插件解析服务",
@@ -243,31 +243,6 @@ class TranslationContextSetting(StrictBaseModel):
     )
 
 
-class ErrorTranslationSetting(StrictBaseModel):
-    """
-    错误重翻配置。
-
-    Attributes:
-        chunk_size: 每批发送的错误条目数。
-        system_prompt_file: 系统提示词文件路径。
-        system_prompt: 运行时注入的错误重翻提示词文本。
-    """
-
-    chunk_size: int = Field(
-        gt=0,
-        title="每批错误条目数",
-        description="错误重翻阶段每次发送给模型的条目数量。",
-    )
-    system_prompt_file: str = Field(
-        title="提示词文件",
-        description="错误重翻阶段使用的系统提示词文件路径。",
-    )
-    system_prompt: str = Field(
-        title="提示词内容",
-        description="运行时注入的错误重翻提示词文本。",
-    )
-
-
 class PluginTextAnalysisSetting(StrictBaseModel):
     """
     插件文本 AI 路径分析配置。
@@ -375,7 +350,6 @@ class Setting(StrictBaseModel):
         glossary_extraction: 术语提取配置。
         glossary_translation: 术语翻译配置。
         translation_context: 正文切批配置。
-        error_translation: 错误重翻配置。
         plugin_text_analysis: 插件文本路径分析配置。
         text_translation: 正文翻译配置。
     """
@@ -396,10 +370,6 @@ class Setting(StrictBaseModel):
         title="正文切批配置",
         description="正文切批时使用的 token 上限和连续命令合并参数。",
     )
-    error_translation: ErrorTranslationSetting = Field(
-        title="错误重翻配置",
-        description="错误重翻阶段的批量大小和提示词参数。",
-    )
     plugin_text_analysis: PluginTextAnalysisSetting = Field(
         title="插件解析配置",
         description="plugins.js 插件文本路径分析阶段的并发、限速、重试和提示词参数。",
@@ -411,7 +381,6 @@ class Setting(StrictBaseModel):
 
 
 __all__: list[str] = [
-    "ErrorTranslationSetting",
     "GlossaryExtractionSetting",
     "GlossaryRoleNameTranslationSetting",
     "GlossaryTranslationSetting",

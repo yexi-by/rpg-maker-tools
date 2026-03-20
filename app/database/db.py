@@ -14,7 +14,6 @@ from typing import Any, Self
 import aiosqlite
 
 from app.models.schemas import (
-    ErrorRetryItem,
     Glossary,
     ItemType,
     Place,
@@ -51,12 +50,12 @@ from .sql import (
     INSERT_TRANSLATION,
     SELECT_PLUGIN_TEXT_ANALYSIS_STATE,
     SELECT_PLUGIN_TEXT_RULES,
-    SELECT_ALL,
     SELECT_GLOSSARY_STATE,
-    SELECT_METADATA,
     SELECT_PLACE_GLOSSARY_ITEMS,
     SELECT_ROLE_GLOSSARY_ITEMS,
     SELECT_TABLE_NAMES_BY_PREFIX,
+    SELECT_ALL,
+    SELECT_METADATA,
     SELECT_TRANSLATED_ITEMS,
     SELECT_TRANSLATION_PATHS,
     UPDATE_METADATA_SOURCE_LANGUAGE,
@@ -803,60 +802,6 @@ class GameDatabaseManager:
 
         await item.connection.commit()
         return len(deletable_table_names)
-
-    async def read_latest_error_table_name(
-        self,
-        game_title: str,
-        prefix: str,
-    ) -> str | None:
-        """
-        读取指定前缀下按名称排序最新的一张错误表。
-
-        Args:
-            game_title: 目标游戏标题。
-            prefix: 错误表名前缀。
-
-        Returns:
-            最新错误表名；不存在时返回 `None`。
-        """
-        table_names = await self.read_error_table_names(game_title, prefix)
-        if not table_names:
-            return None
-
-        return table_names[-1]
-
-    async def read_error_retry_items(
-        self,
-        game_title: str,
-        table_name: str,
-    ) -> list[ErrorRetryItem]:
-        """
-        读取指定错误表，并转换为错误重翻译条目列表。
-
-        Args:
-            game_title: 目标游戏标题。
-            table_name: 错误表名。
-
-        Returns:
-            错误重翻译条目列表。
-        """
-        rows = await self.read_table(game_title, table_name)
-        retry_items = [
-            ErrorRetryItem(
-                translation_item=TranslationItem(
-                    location_path=row["location_path"],
-                    item_type=row["item_type"],
-                    role=row["role"],
-                    original_lines=json.loads(row["original_lines"]),
-                ),
-                previous_translation_lines=json.loads(row["translation_lines"]),
-                error_type=row["error_type"],
-                error_detail=json.loads(row["error_detail"]),
-            )
-            for row in rows
-        ]
-        retry_items.sort(key=lambda item: item.translation_item.location_path)
-        return retry_items
 
     async def start_error_table(
         self,
