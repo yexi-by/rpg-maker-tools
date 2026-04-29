@@ -1,51 +1,16 @@
-[llm_services.glossary]
-provider_type = "openai"
-base_url = "https://api.deepseek.com"
-api_key = "sk-f677192f3675409dbb1e0a49761d48c1"
-model = "deepseek-chat"
-timeout = 600
-
-# [llm_services.text]
-# provider_type = "openai"
-# base_url = "http://192.168.31.158:8800/v1"
-# api_key = "yexi12345"
-# model = "gemini-3.1-pro"
-# timeout = 600
-
 [llm_services.text]
 provider_type = "volcengine"
 base_url = "https://api.deepseek.com"
-api_key = "sk-f677192f3675409dbb1e0a49761d48c1"
+api_key = "YOUR_TEXT_API_KEY"
 model = "deepseek-chat"
 timeout = 600
 
 [llm_services.plugin_text]
 provider_type = "openai"
 base_url = "https://api.deepseek.com"
-api_key = "sk-f677192f3675409dbb1e0a49761d48c1"
+api_key = "YOUR_PLUGIN_TEXT_API_KEY"
 model = "deepseek-reasoner"
 timeout = 600
-
-[glossary_extraction]
-role_chunk_blocks = 10
-role_chunk_lines = 3
-
-[glossary_translation]
-worker_count = 300
-rpm = 300
-
-[glossary_translation.role_name]
-retry_count = 3
-retry_delay = 1
-response_retry_count = 3
-system_prompt_file = "prompts/glossary_role_name_system.txt"
-
-[glossary_translation.display_name]
-chunk_size = 60
-retry_count = 3
-retry_delay = 1
-response_retry_count = 3
-system_prompt_file = "prompts/glossary_display_name_system.txt"
 
 [translation_context]
 token_size = 1024
@@ -66,3 +31,57 @@ rpm = 200
 retry_count = 3
 retry_delay = 2
 system_prompt_file = "prompts/text_translation_system.txt"
+
+[text_rules]
+strip_wrapping_punctuation_pairs = [["「", "」"]]
+plugin_command_text_keywords = ["text", "message", "name", "desc"]
+plugin_command_excluded_keys = ["filename", "fontname"]
+non_translatable_path_keywords = [
+  "file",
+  "filename",
+  "filepath",
+  "font",
+  "fontface",
+  "fontname",
+  "icon",
+  "id",
+  "image",
+  "img",
+  "path",
+  "picture",
+  "source",
+  "src",
+  "symbol",
+  "url",
+]
+excluded_plugin_names = []
+excluded_plugin_command_fields = []
+boolean_texts = ["true", "false"]
+generic_enum_texts = ["auto", "bottom", "center", "default", "false", "left", "none", "off", "on", "right", "top", "true"]
+file_like_suffixes = [
+  ".aac", ".avi", ".bmp", ".css", ".csv", ".flac", ".gif", ".jpeg", ".jpg",
+  ".js", ".json", ".m4a", ".mid", ".midi", ".mov", ".mp3", ".mp4", ".ogg",
+  ".otf", ".png", ".svg", ".tif", ".ttf", ".txt", ".wav", ".webm", ".webp",
+  ".woff", ".woff2",
+]
+no_param_alpha_control_codes = ["G"]
+allowed_japanese_chars = ["っ", "ッ", "ー", "・", "。", "～", "…"]
+allowed_japanese_tail_chars = ["あ", "い", "う", "え", "お", "っ", "ッ", "ん", "ー", "よ", "ね", "な", "か"]
+line_split_punctuations = ["，", "。", ",", "."]
+long_text_hanzi_limit = 30
+simple_control_param_pattern = "[A-Za-z0-9_]+"
+translation_placeholder_pattern = "\\[[A-Z]+(?:_[^\\]]+)?\\]"
+japanese_segment_pattern = "[\\u3040-\\u309F\\u30A0-\\u30FF]+"
+placeholder_pattern = "\\[[A-Z]+(?:_[^\\]]+)?\\]"
+resource_like_pattern = "(?:[A-Za-z]:)?[A-Za-z0-9_./\\\\:-]+\\.[A-Za-z0-9]{1,8}"
+pure_number_pattern = "[-+]?\\d+(?:\\.\\d+)?"
+hex_color_pattern = "#[0-9A-Fa-f]{6,8}"
+css_color_function_pattern = "(?:rgb|rgba|hsl|hsla)\\([^)]*\\)"
+resource_path_pattern = "(?:[A-Za-z]:)?(?:[A-Za-z0-9_.-]+[\\\\/])+[A-Za-z0-9_.-]+"
+snake_case_pattern = "[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+"
+camel_case_pattern = "(?:[a-z]+(?:[A-Z][a-z0-9]+)+|[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+)"
+bracket_identifier_pattern = "\\$?[A-Za-z_][A-Za-z0-9_]*\\[[^\\]]+\\](?:\\.[A-Za-z_][A-Za-z0-9_]*)*"
+dot_identifier_pattern = "\\$?[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)+"
+script_concat_pattern = "(?:['\\\"].*['\\\"]\\s*\\+\\s*|\\+\\s*['\\\"].*['\\\"])"
+script_call_pattern = "\\$?[A-Za-z_][A-Za-z0-9_]*\\([^)]*\\)"
+non_content_after_control_pattern = "[\\s\\.\\,\\:\\;\\-\\+\\*\\/\\\\\\(\\)\\[\\]\\{\\}<>=!?'\\\"%]*"

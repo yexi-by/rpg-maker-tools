@@ -1,0 +1,3 @@
+"""demjson3 的最小本地类型存根。"""
+
+def decode(txt: str, encoding: str | None = None, **kwargs: object) -> object: ...

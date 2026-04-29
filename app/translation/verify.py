@@ -1,33 +1,23 @@
 """
 正文翻译校验模块。
 
-负责承接正文翻译结果的解析与校验流程。
-
-这一层会把模型返回的 JSON 结果映射回对应的 `TranslationItem`，
-并使用 `TranslationItem` 自带的占位符校验、控制符恢复和源语言残留检查能力，
-再把正确结果与错误结果分别推入对应队列。
+负责解析模型返回的 JSON，按 `location_path` 映射回翻译条目，并执行漏翻、
+占位符和日文残留校验。英文残留兼容已删除。
 """
 
 import asyncio
-import json
 import re
 
 from json_repair import repair_json
 from pydantic import RootModel
 
-from app.models.schemas import (
-    ErrorType,
-    SourceLanguage,
-    TranslationErrorItem,
-    TranslationItem,
-)
-from app.utils import check_source_language_residual, logger
+from app.rmmz.schema import ErrorType, TranslationErrorItem, TranslationItem
+from app.rmmz.text_rules import TextRules
+from app.observability import logger
 
 ERR_MISSING_KEY: ErrorType = "AI漏翻"
 ERR_PLACEHOLDER_MISMATCH: ErrorType = "控制符不匹配"
-ERR_SOURCE_LANGUAGE_RESIDUAL: ErrorType = "源语言残留"
-LONG_TEXT_HANZI_LIMIT: int = 30
-LINE_SPLIT_PUNCTUATIONS: tuple[str, ...] = ("，", "。", ",", ".")
+ERR_JAPANESE_RESIDUAL: ErrorType = "日文残留"
 HANZI_PATTERN: re.Pattern[str] = re.compile(r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]")
 
 
@@ -36,62 +26,29 @@ class TranslationResponse(RootModel[dict[str, str]]):
 
 
 def _build_warning_preview(text: str, max_length: int = 40) -> str:
-    """
-    生成日志预览文本，避免把整段长文本直接打进告警日志。
-
-    Args:
-        text: 需要截断预览的原始文本。
-        max_length: 预览最大字符数。
-
-    Returns:
-        适合写入日志的简短预览字符串。
-    """
+    """生成日志预览文本，避免告警刷屏。"""
     if len(text) <= max_length:
         return text
     return f"{text[:max_length]}..."
 
 
 def _count_hanzi(text: str) -> int:
-    """
-    统计文本中的汉字数量。
-
-    设计意图：
-        长文本补切行的 warning 只服务于中文译文排版。
-        这里明确只统计汉字，不把英文、空格、标点、占位符和控制符长度算进限制，
-        避免 `[S_1]` 这类中间态占位符把“行长”虚高。
-
-    Args:
-        text: 待统计的单行文本。
-
-    Returns:
-        int: 文本中的汉字数量。
-    """
-
+    """统计文本中的汉字数量。"""
     return len(HANZI_PATTERN.findall(text))
 
 
-def _find_preferred_split_position(text: str) -> int | None:
-    """
-    在单行上限内寻找优先切分点。
-
-    这里只允许在逗号或句号后切行，目的不是追求最漂亮的排版，
-    而是避免把 `[N_1]`、`[RM_1]` 这类占位符从中间切断。
-
-    Args:
-        text: 待切分的单行文本。
-
-    Returns:
-        合适的切分位置；如果前 `LONG_TEXT_HANZI_LIMIT` 个汉字范围内没有可用标点则返回 `None`。
-    """
-    best_index: int = -1
-    hanzi_count: int = 0
+def _find_preferred_split_position(text: str, text_rules: TextRules) -> int | None:
+    """在单行上限内寻找优先切分点。"""
+    best_index = -1
+    hanzi_count = 0
+    punctuations = set(text_rules.setting.line_split_punctuations)
 
     for index, char in enumerate(text):
         if HANZI_PATTERN.fullmatch(char):
             hanzi_count += 1
-        if hanzi_count > LONG_TEXT_HANZI_LIMIT:
+        if hanzi_count > text_rules.setting.long_text_hanzi_limit:
             break
-        if char in LINE_SPLIT_PUNCTUATIONS:
+        if char in punctuations:
             best_index = index
 
     if best_index < 0:
@@ -99,25 +56,13 @@ def _find_preferred_split_position(text: str) -> int | None:
     return best_index + 1
 
 
-def _log_align_warning(
-    *,
-    location_path: str | None,
-    line: str,
-    reason: str,
-) -> None:
-    """
-    记录长文本自动补切行失败的告警日志。
-
-    Args:
-        location_path: 当前翻译条目的路径，用于日志定位。
-        line: 未能安全处理的文本行。
-        reason: 具体告警原因。
-    """
+def _log_align_warning(*, location_path: str | None, line: str, reason: str, text_rules: TextRules) -> None:
+    """记录长文本自动补切行失败的告警日志。"""
     logger.warning(
         "长文本自动补切行告警: 路径={}，汉字数={}，上限={}，原因={}，内容预览={}",
         location_path or "<unknown>",
         _count_hanzi(line),
-        LONG_TEXT_HANZI_LIMIT,
+        text_rules.setting.long_text_hanzi_limit,
         reason,
         _build_warning_preview(line),
     )
@@ -128,35 +73,28 @@ def _expand_long_lines(
     lines: list[str],
     target_lines: int,
     location_path: str | None,
+    text_rules: TextRules,
 ) -> list[str]:
-    """
-    在还有空余行数时，尝试把过长文本按逗号或句号安全切开。
-
-    Args:
-        lines: 当前已经按 LLM 原始换行拆开的行列表。
-        target_lines: 目标行数上限。
-        location_path: 当前条目的路径，用于告警定位。
-
-    Returns:
-        已尽力补切分后的行列表。
-    """
+    """在还有空余行数时尝试把过长文本安全切开。"""
     expanded_lines: list[str] = []
-    remaining_extra_lines: int = max(target_lines - len(lines), 0)
+    remaining_extra_lines = max(target_lines - len(lines), 0)
+    hanzi_limit = text_rules.setting.long_text_hanzi_limit
 
     for line in lines:
-        pending_line: str = line
-        while _count_hanzi(pending_line) > LONG_TEXT_HANZI_LIMIT and remaining_extra_lines > 0:
-            split_position: int | None = _find_preferred_split_position(pending_line)
+        pending_line = line
+        while _count_hanzi(pending_line) > hanzi_limit and remaining_extra_lines > 0:
+            split_position = _find_preferred_split_position(pending_line, text_rules)
             if split_position is None:
                 _log_align_warning(
                     location_path=location_path,
                     line=pending_line,
-                    reason=f"前 {LONG_TEXT_HANZI_LIMIT} 个汉字内没有逗号或句号，无法安全补切分",
+                    reason=f"前 {hanzi_limit} 个汉字内没有可配置切分标点，无法安全补切分",
+                    text_rules=text_rules,
                 )
                 break
 
-            head: str = pending_line[:split_position].rstrip()
-            tail: str = pending_line[split_position:].lstrip()
+            head = pending_line[:split_position].rstrip()
+            tail = pending_line[split_position:].lstrip()
             if not tail:
                 break
 
@@ -164,11 +102,12 @@ def _expand_long_lines(
             pending_line = tail
             remaining_extra_lines -= 1
 
-        if _count_hanzi(pending_line) > LONG_TEXT_HANZI_LIMIT and remaining_extra_lines <= 0:
+        if _count_hanzi(pending_line) > hanzi_limit and remaining_extra_lines <= 0:
             _log_align_warning(
                 location_path=location_path,
                 line=pending_line,
                 reason="建议行数已用尽，无法继续补切分",
+                text_rules=text_rules,
             )
 
         expanded_lines.append(pending_line)
@@ -180,39 +119,20 @@ def _align_lines(
     text: str,
     target_lines: int,
     *,
-    location_path: str | None = None,
+    location_path: str | None,
+    text_rules: TextRules,
 ) -> list[str]:
-    """
-    将从 LLM 解析出的大段文本严格按原内容的行数要求进行对齐。
-
-    在 RPG Maker 的事件指令（长文本）中，对话的气泡显示是强依赖行数控制的。
-    大模型可能会自作主张地增加或减少换行，此函数的作用就是兜底进行强制收敛。
-
-    对齐规则：
-    1. 如果 LLM 给了过多行，多出来的部分会被硬组合到最后一行（用空格分隔），以免丢字。
-    2. 如果 LLM 给了过少行，且某一行超过 20 字，会优先尝试按逗号或句号补切分到空余行。
-    3. 如果超过 20 字但没有可用标点，或目标行数已被用尽，会记录 warning，避免静默溢出。
-    4. 如果仍然少于目标行数，会在尾部补充空字符串，保持整体数组长度恒定。
-    5. 如果返回了完全空的内容，也会至少填补到目标长度。
-
-    Args:
-        text: 大模型返回并被取出对应的纯翻译文本。
-        target_lines: `original_lines` 的数组长度，即预期要输出的数组长度。
-        location_path: 当前翻译条目的路径，用于日志定位。
-
-    Returns:
-        长度刚好等于 target_lines 的列表，可直接赋给 `translation_lines_with_placeholders`。
-    """
-    normalized_target_lines: int = max(1, target_lines)
+    """将大模型返回文本按原内容行数要求进行对齐。"""
+    normalized_target_lines = max(1, target_lines)
     if not text:
         return [""] * normalized_target_lines
 
-    lines: list[str] = text.split("\n")
-    current_count: int = len(lines)
+    lines = text.split("\n")
+    current_count = len(lines)
 
     if current_count > normalized_target_lines:
-        keep_lines: list[str] = lines[: max(normalized_target_lines - 1, 0)]
-        merged_tail: str = " ".join(lines[max(normalized_target_lines - 1, 0) :])
+        keep_lines = lines[: max(normalized_target_lines - 1, 0)]
+        merged_tail = " ".join(lines[max(normalized_target_lines - 1, 0) :])
         keep_lines.append(merged_tail)
         lines = keep_lines
 
@@ -221,14 +141,16 @@ def _align_lines(
             lines=lines,
             target_lines=normalized_target_lines,
             location_path=location_path,
+            text_rules=text_rules,
         )
     else:
         for line in lines:
-            if _count_hanzi(line) > LONG_TEXT_HANZI_LIMIT:
+            if _count_hanzi(line) > text_rules.setting.long_text_hanzi_limit:
                 _log_align_warning(
                     location_path=location_path,
                     line=line,
                     reason="当前结果已经没有多余空行可用于补切分",
+                    text_rules=text_rules,
                 )
 
     if len(lines) < normalized_target_lines:
@@ -238,51 +160,21 @@ def _align_lines(
 
 
 async def verify_translation_batch(
+    *,
     ai_result: str,
     items: list[TranslationItem],
     right_queue: asyncio.Queue[list[TranslationItem] | None],
     error_queue: asyncio.Queue[list[TranslationErrorItem] | None],
-    source_language: SourceLanguage,
+    text_rules: TextRules,
 ) -> None:
-    """
-    承接大模型返回的原始字符串，对其进行反序列化、校验和错误分流。
-
-    该函数会在 TextTranslation 的 Worker 中被调用。由于一次请求打包了多个 `TranslationItem`，
-    所以即使解析 JSON 成功，也要分别去验证每一个小条目的译文质量（如漏翻、占位符是否缺失、是否有源语言残留等）。
-
-    核心流程：
-    1. 使用 `json_repair` 尽可能从模型可能夹杂 Markdown 标记或残缺的废话里把 JSON 字典捞出来。
-    2. 如果连 JSON 都构不成，直接把这批所有的 `items` 标记为 `AI漏翻` 全部塞进错误队列。
-    3. 针对提取成功的 JSON，按 `location_path` 与原本的 `items` 进行一一对应匹配。
-    4. 分别进行行数对齐、占位符总量校验以及底层 RM 控制符的恢复。
-    5. 最后执行日文未翻译残留扫描。如果发现有日文，抛入错误队列并写入错误表，便于后续排查。
-    6. 将全部校验通过的条目放入 `right_queue`。
-
-    Args:
-        ai_result: 模型输出的不确定文本。
-        items: 原本组织给这个批次的翻译项列表，作为校验的基准锚点。
-        right_queue: 用于回写到主翻译表的成果队列。
-        error_queue: 用于落库到专属错误记录表的错误队列。
-        source_language: 当前游戏的源语言。
-    """
+    """解析模型返回并把通过校验/失败条目分别推入队列。"""
     right_items: list[TranslationItem] = []
     error_items: list[TranslationErrorItem] = []
 
     try:
-        repaired_result = repair_json(ai_result, return_objects=False)
-        if isinstance(repaired_result, tuple):
-            repaired_value = repaired_result[0]
-        else:
-            repaired_value = repaired_result
+        clean_result = repair_json(ai_result, return_objects=False)
 
-        if isinstance(repaired_value, str):
-            clean_result: str = repaired_value
-        else:
-            clean_result = json.dumps(repaired_value, ensure_ascii=False)
-
-        translation_map: dict[str, str] = TranslationResponse.model_validate_json(
-            clean_result
-        ).root
+        translation_map = TranslationResponse.model_validate_json(clean_result).root
     except Exception as error:
         for item in items:
             error_items.append(
@@ -293,18 +185,15 @@ async def verify_translation_batch(
                     list(item.original_lines),
                     [],
                     ERR_MISSING_KEY,
-                    [
-                        "模型返回无法解析为 JSON 对象",
-                        f"详细错误: {error}",
-                    ],
+                    ["模型返回无法解析为 JSON 对象", f"详细错误: {error}"],
                 )
             )
         if error_items:
             await error_queue.put(error_items)
-        return None
+        return
 
     for item in items:
-        translation_text: str | None = translation_map.get(item.location_path)
+        translation_text = translation_map.get(item.location_path)
         if translation_text is None:
             error_items.append(
                 (
@@ -320,10 +209,11 @@ async def verify_translation_batch(
             continue
 
         if item.item_type == "long_text":
-            translation_lines: list[str] = _align_lines(
+            translation_lines = _align_lines(
                 text=translation_text,
                 target_lines=len(item.original_lines),
                 location_path=item.location_path,
+                text_rules=text_rules,
             )
         elif item.item_type == "array":
             translation_lines = translation_text.splitlines()
@@ -336,9 +226,7 @@ async def verify_translation_batch(
                         list(item.original_lines),
                         list(translation_lines),
                         ERR_PLACEHOLDER_MISMATCH,
-                        [
-                            f"选项行数不匹配: 期望 {len(item.original_lines)} 行, 实际 {len(translation_lines)} 行"
-                        ],
+                        [f"选项行数不匹配: 期望 {len(item.original_lines)} 行, 实际 {len(translation_lines)} 行"],
                     )
                 )
                 continue
@@ -349,7 +237,7 @@ async def verify_translation_batch(
         item.translation_lines = []
 
         try:
-            item.verify_placeholders()
+            item.verify_placeholders(text_rules)
             item.restore_placeholders()
         except ValueError as error:
             error_items.append(
@@ -366,10 +254,7 @@ async def verify_translation_batch(
             continue
 
         try:
-            check_source_language_residual(
-                translation_lines=item.translation_lines,
-                source_language=source_language,
-            )
+            text_rules.check_japanese_residual(item.translation_lines)
         except ValueError as error:
             error_items.append(
                 (
@@ -378,7 +263,7 @@ async def verify_translation_batch(
                     item.role,
                     list(item.original_lines),
                     list(item.translation_lines),
-                    ERR_SOURCE_LANGUAGE_RESIDUAL,
+                    ERR_JAPANESE_RESIDUAL,
                     [str(error)],
                 )
             )
@@ -390,7 +275,6 @@ async def verify_translation_batch(
         await right_queue.put(right_items)
     if error_items:
         await error_queue.put(error_items)
-    return None
 
 
 __all__: list[str] = ["verify_translation_batch"]

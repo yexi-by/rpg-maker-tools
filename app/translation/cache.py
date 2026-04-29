@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 
-from app.models.schemas import ItemType, TranslationItem
+from app.rmmz.schema import ItemType, TranslationItem
 
 
 class TranslationCache:

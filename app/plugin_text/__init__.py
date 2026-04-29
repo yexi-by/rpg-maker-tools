@@ -11,10 +11,12 @@ from .common import (
     jsonpath_to_location_path,
     resolve_plugin_leaves,
 )
+from .extraction import PluginTextExtraction
 
 __all__: list[str] = [
     "PluginAnalysisExecution",
     "PluginAnalysisPlan",
+    "PluginTextExtraction",
     "PluginTextAnalysis",
     "build_plugin_hash",
     "build_plugins_file_hash",

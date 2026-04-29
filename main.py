@@ -1,14 +1,35 @@
 """
-项目启动入口。
+项目命令行启动入口。
 
-本模块统一管理 CLI 与 TUI 两种启动方式。
-当前默认启动 Textual 工作台，便于直接进入图形化终端界面。
+本模块只负责解析全局参数、初始化日志、分发子命令和统一返回退出码。
+具体业务流程由 `app.cli` 负责适配到 `TranslationHandler`。
 """
 
+from __future__ import annotations
 
+import asyncio
 import argparse
+import sys
+import time
 import warnings
 from collections.abc import Sequence
+from io import TextIOWrapper
+from pathlib import Path
+
+
+def _configure_stdio_encoding() -> None:
+    """
+    尽量把标准输出和标准错误切换为 UTF-8。
+
+    Windows 终端与自动化工具的默认编码不一定一致，提前设置编码可以减少
+    中文帮助信息和日志在命令行中出现乱码的概率。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if isinstance(stream, TextIOWrapper):
+                stream.reconfigure(encoding="utf-8")
+        except Exception:
+            continue
 
 
 def _suppress_known_third_party_warnings() -> None:
@@ -17,7 +38,7 @@ def _suppress_known_third_party_warnings() -> None:
 
     这里不能粗暴关闭全部 `UserWarning`，否则会把真正有价值的运行时提示一起吞掉。
     当前只精确屏蔽 `volcenginesdkarkruntime` 在 Python 3.14 下发出的那一条
-    兼容性提示，避免每次启动 TUI 都污染终端输出。
+    兼容性提示，避免每次启动 CLI 都污染终端输出。
     """
     warnings.filterwarnings(
         action="ignore",
@@ -30,52 +51,100 @@ def _suppress_known_third_party_warnings() -> None:
     )
 
 
+_configure_stdio_encoding()
 _suppress_known_third_party_warnings()
 
-from app.tui import TranslationWorkbenchApp
-from app.utils import logger
+from app.cli import (  # noqa: E402
+    CliBusinessError,
+    build_parser,
+    dispatch_command,
+    format_argv,
+    format_namespace,
+)
+from app.observability import LOG_FILE_PATH, logger, setup_logger  # noqa: E402
 
 
-def build_parser() -> argparse.ArgumentParser:
+def format_exception_summary(error: BaseException) -> str:
     """
-    构建命令行参数解析器。
+    将异常压缩为适合终端首行展示的稳定摘要。
+
+    Args:
+        error: 当前捕获到的异常对象。
 
     Returns:
-        项目启动参数解析器。
+        `异常类型: 异常信息` 形式的简短摘要；若异常消息为空则仅返回类型名。
     """
-    parser = argparse.ArgumentParser(description="RPG Maker 翻译工具启动入口")
-    parser.add_argument(
-        "mode",
-        nargs="?",
-        choices=("tui", "cli"),
-        default="tui",
-        help="启动模式，默认值为 tui",
-    )
-    return parser
+    message = str(error).strip()
+    if message:
+        return f"{type(error).__name__}: {message}"
+    return type(error).__name__
 
 
-def run_tui() -> None:
+def is_debug_enabled(args: argparse.Namespace) -> bool:
     """
-    启动 Textual 工作台。
+    从 argparse 命名空间中读取全局调试开关。
+
+    Args:
+        args: argparse 返回的命名空间对象。
+
+    Returns:
+        用户是否启用了 `--debug`。
     """
-    TranslationWorkbenchApp().run()
+    debug_value = getattr(args, "debug", False)
+    return isinstance(debug_value, bool) and debug_value
 
 
-def main(argv: Sequence[str] | None = None) -> None:
+def main(argv: Sequence[str] | None = None) -> int:
     """
-    根据启动参数选择运行模式。
+    解析参数并执行对应 CLI 子命令。
 
     Args:
         argv: 可选的命令行参数序列。
+
+    Returns:
+        进程退出码。
     """
-    args = build_parser().parse_args(argv)
+    raw_argv = tuple(argv) if argv is not None else tuple(sys.argv[1:])
+    args = build_parser().parse_args(raw_argv)
+    setup_logger(level="DEBUG" if is_debug_enabled(args) else "INFO")
+
+    started_at = time.perf_counter()
+    exit_code = 0
+    status = "成功"
+    logger.info("\n".join((
+        "[tag.phase]CLI 运行开始[/tag.phase]",
+        f"命令参数: [tag.count]{format_argv(raw_argv)}[/tag.count]",
+        f"解析参数: [tag.count]{format_namespace(args)}[/tag.count]",
+        f"工作目录: [tag.path]{Path.cwd()}[/tag.path]",
+        f"日志文件: [tag.path]{LOG_FILE_PATH}[/tag.path]",
+    )))
 
     try:
-        run_tui()
-    except Exception:
-        logger.exception("[tag.exception]程序启动失败[/tag.exception]")
-        raise
+        exit_code = asyncio.run(dispatch_command(args))
+        if exit_code != 0:
+            status = "失败"
+    except CliBusinessError as error:
+        exit_code = 1
+        status = "失败"
+        logger.error(f"[tag.failure]命令执行失败[/tag.failure]：{error}")
+    except KeyboardInterrupt:
+        exit_code = 130
+        status = "中断"
+        logger.warning("[tag.warning]用户中断运行[/tag.warning]")
+    except Exception as error:
+        exit_code = 1
+        status = "异常"
+        summary = format_exception_summary(error)
+        logger.error(f"[tag.exception]未知异常[/tag.exception]：{summary}，完整 traceback 已写入 [tag.path]{LOG_FILE_PATH}[/tag.path]")
+        logger.bind(file_only=True).exception(
+            f"[tag.exception]命令执行失败完整异常[/tag.exception]：{summary}"
+        )
+    finally:
+        duration = time.perf_counter() - started_at
+        logger.info(f"[tag.phase]CLI 运行结束[/tag.phase] 状态 [tag.count]{status}[/tag.count] 退出码 [tag.count]{exit_code}[/tag.count] 耗时 [tag.count]{duration:.2f}[/tag.count] 秒")
+
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
