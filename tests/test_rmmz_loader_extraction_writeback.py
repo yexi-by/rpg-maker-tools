@@ -9,9 +9,10 @@ import pytest
 from app.application.file_writer import reset_writable_copies
 from app.application.file_writer import write_game_files
 from app.application.font_replacement import apply_font_replacement
+from app.config.schemas import TextRulesSetting
 from app.rmmz import DataTextExtraction, load_game_data
 from app.rmmz.schema import PLUGINS_FILE_NAME
-from app.rmmz.text_rules import JsonValue, coerce_json_value, ensure_json_array, ensure_json_object, get_default_text_rules
+from app.rmmz.text_rules import JsonValue, TextRules, coerce_json_value, ensure_json_array, ensure_json_object, get_default_text_rules
 from app.rmmz.write_back import write_data_text
 
 
@@ -149,6 +150,37 @@ async def test_name_text_write_back_inserts_extra_401_lines(minimal_game_dir: Pa
     assert ensure_json_array(first_text["parameters"], "first.parameters")[0] == "你好"
     assert ensure_json_array(second_text["parameters"], "second.parameters")[0] == "第二行"
     assert ensure_json_array(third_text["parameters"], "third.parameters")[0] == "第三行"
+
+
+@pytest.mark.asyncio
+async def test_write_data_text_splits_overwide_long_text_before_write_back(minimal_game_dir: Path) -> None:
+    """写回阶段按当前行宽配置再次切分已有长译文。"""
+    game_data = await load_game_data(minimal_game_dir)
+    extracted = DataTextExtraction(game_data, get_default_text_rules()).extract_all_text()
+    item = next(
+        candidate
+        for candidate in extracted["CommonEvents.json"].translation_items
+        if candidate.location_path == "CommonEvents.json/1/0"
+    )
+    item.translation_lines = ["甲乙丙丁戊己庚辛"]
+    text_rules = TextRules.from_setting(
+        TextRulesSetting(
+            long_text_line_width_limit=3,
+            line_width_count_pattern=r"\S",
+            line_split_punctuations=["，", "。"],
+        )
+    )
+
+    reset_writable_copies(game_data)
+    write_data_text(game_data, [item], text_rules=text_rules)
+
+    common_events = ensure_json_array(game_data.writable_data["CommonEvents.json"], "CommonEvents")
+    common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
+    commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
+
+    assert ensure_json_array(ensure_json_object(commands[1], "command1")["parameters"], "command1.parameters")[0] == "甲乙丙"
+    assert ensure_json_array(ensure_json_object(commands[2], "command2")["parameters"], "command2.parameters")[0] == "丁戊己"
+    assert ensure_json_array(ensure_json_object(commands[3], "command3")["parameters"], "command3.parameters")[0] == "庚辛"
 
 
 @pytest.mark.asyncio

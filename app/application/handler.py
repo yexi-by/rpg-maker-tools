@@ -431,7 +431,7 @@ class TranslationHandler:
                 1 for item in translated_items if not item.location_path.startswith(f"{PLUGINS_FILE_NAME}/")
             )
             plugin_item_count = len(translated_items) - data_item_count
-            write_data_text(game_data, translated_items)
+            write_data_text(game_data, translated_items, text_rules=text_rules)
             if data_item_count:
                 advance_progress(data_item_count)
             write_plugin_text(game_data, translated_items)
@@ -510,7 +510,7 @@ class TranslationHandler:
 
             reset_writable_copies(game_data)
             if translated_items:
-                write_data_text(game_data, translated_items)
+                write_data_text(game_data, translated_items, text_rules=text_rules)
                 write_plugin_text(game_data, translated_items)
 
             registry = await session.read_name_context_registry()

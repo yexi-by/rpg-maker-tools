@@ -107,10 +107,33 @@ class TextRulesSetting(StrictBaseModel):
         ]
     )
     line_split_punctuations: list[str] = Field(
-        default_factory=lambda: ["，", "。", ",", "."]
+        default_factory=lambda: [
+            "，",
+            "。",
+            "、",
+            "；",
+            "：",
+            "！",
+            "？",
+            "…",
+            "～",
+            "—",
+            "♪",
+            "♡",
+            "）",
+            "】",
+            "」",
+            "』",
+            ",",
+            ".",
+            ";",
+            ":",
+            "!",
+            "?",
+        ]
     )
-    long_text_line_width_limit: int = Field(default=47, gt=0)
-    line_width_count_pattern: str = Field(default=r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]")
+    long_text_line_width_limit: int = Field(default=26, gt=0)
+    line_width_count_pattern: str = Field(default=r"\S")
     source_text_required_pattern: str = Field(
         default=r"[\u3040-\u309F\u30A0-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]+"
     )

@@ -18,10 +18,11 @@ from app.rmmz.schema import (
     TROOPS_FILE_NAME,
     TranslationItem,
 )
-from app.rmmz.text_rules import JsonArray, JsonObject, JsonValue, coerce_json_value, ensure_json_array, ensure_json_object
+from app.rmmz.text_rules import JsonArray, JsonObject, JsonValue, TextRules, coerce_json_value, ensure_json_array, ensure_json_object
+from app.translation.line_wrap import split_overwide_lines
 
 
-def write_data_text(game_data: GameData, items: list[TranslationItem]) -> None:
+def write_data_text(game_data: GameData, items: list[TranslationItem], text_rules: TextRules | None = None) -> None:
     """将最终翻译文本写回 `data/` 目录游戏数据的内存副本。"""
     command_items: list[TranslationItem] = []
     for item in items:
@@ -37,7 +38,7 @@ def write_data_text(game_data: GameData, items: list[TranslationItem]) -> None:
         _write_base_item(game_data=game_data, item=item)
 
     for item in sorted(command_items, key=_command_item_sort_key, reverse=True):
-        _write_command_item(game_data=game_data, item=item)
+        _write_command_item(game_data=game_data, item=item, text_rules=text_rules)
 
 
 def _command_item_sort_key(item: TranslationItem) -> tuple[str, tuple[int, ...], int]:
@@ -57,7 +58,7 @@ def _command_item_sort_key(item: TranslationItem) -> tuple[str, tuple[int, ...],
     raise ValueError(f"无法识别的事件定位路径: {anchor_path}")
 
 
-def _write_command_item(game_data: GameData, item: TranslationItem) -> None:
+def _write_command_item(game_data: GameData, item: TranslationItem, text_rules: TextRules | None) -> None:
     """将事件指令相关译文写回数据副本。"""
     commands, command_index = _locate_commands(
         writable_data=game_data.writable_data,
@@ -76,6 +77,7 @@ def _write_command_item(game_data: GameData, item: TranslationItem) -> None:
                 game_data=game_data,
                 item=item,
                 expected_code=Code.TEXT,
+                text_rules=text_rules,
             )
             return
 
@@ -84,6 +86,7 @@ def _write_command_item(game_data: GameData, item: TranslationItem) -> None:
                 game_data=game_data,
                 item=item,
                 expected_code=Code.SCROLL_TEXT,
+                text_rules=text_rules,
             )
             return
 
@@ -107,13 +110,17 @@ def _write_line_commands_by_paths(
     game_data: GameData,
     item: TranslationItem,
     expected_code: Code,
+    text_rules: TextRules | None,
 ) -> None:
     """按提取路径写回长文本，并为额外译文行插入事件指令。"""
     if not item.source_line_paths:
         raise ValueError(f"长文本缺少逐行写回路径: {item.location_path}")
 
     existing_line_count = len(item.source_line_paths)
-    padded_translation_lines = list(item.translation_lines)
+    padded_translation_lines = _prepare_long_text_write_lines(
+        item=item,
+        text_rules=text_rules,
+    )
     if len(padded_translation_lines) < existing_line_count:
         padded_translation_lines.extend([""] * (existing_line_count - len(padded_translation_lines)))
 
@@ -142,6 +149,21 @@ def _write_line_commands_by_paths(
         item=item,
         expected_code=expected_code,
         extra_lines=extra_lines,
+    )
+
+
+def _prepare_long_text_write_lines(
+    *,
+    item: TranslationItem,
+    text_rules: TextRules | None,
+) -> list[str]:
+    """在写回前按当前配置再次执行长文本行宽兜底。"""
+    if text_rules is None:
+        return list(item.translation_lines)
+    return split_overwide_lines(
+        lines=list(item.translation_lines),
+        location_path=item.location_path,
+        text_rules=text_rules,
     )
 
 

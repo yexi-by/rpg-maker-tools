@@ -8,6 +8,7 @@ import pytest
 from app.config.schemas import TextRulesSetting
 from app.rmmz.schema import TranslationErrorItem, TranslationItem
 from app.rmmz.text_rules import TextRules
+from app.translation.line_wrap import count_line_width_chars, split_overwide_lines
 from app.translation.verify import verify_translation_batch
 
 
@@ -109,3 +110,25 @@ async def test_long_text_width_split_does_not_break_placeholders() -> None:
     )
 
     assert item.translation_lines == [r"\C[4]甲乙", r"丙丁\C[0]"]
+
+
+def test_line_width_count_ignores_control_sequences() -> None:
+    """行宽统计忽略控制符，只统计实际可见字符。"""
+    text_rules = _build_text_rules(width_limit=28)
+
+    count = count_line_width_chars(r"\C[4]魔力\C[0]，", text_rules)
+
+    assert count == 3
+
+
+def test_line_width_split_uses_punctuation_near_limit() -> None:
+    """标点切分优先接近宽度上限，避免过早断成碎句。"""
+    text_rules = _build_text_rules(width_limit=8)
+
+    lines = split_overwide_lines(
+        lines=["甲乙丙丁戊己，庚辛壬癸"],
+        location_path="Map001.json/1/0/0",
+        text_rules=text_rules,
+    )
+
+    assert lines == ["甲乙丙丁戊己，", "庚辛壬癸"]
