@@ -7,12 +7,14 @@ from typing import cast
 import aiosqlite
 from pydantic import TypeAdapter
 
-from app.rmmz.schema import ItemType, PluginTextAnalysisStatus, PluginTextTranslateRule
+from app.name_context.schemas import NameLocation
+from app.rmmz.schema import ItemType, PluginTextTranslateRule
 from app.rmmz.text_rules import coerce_json_value, ensure_json_string_list
 
 _PLUGIN_RULE_LIST_ADAPTER: TypeAdapter[list[PluginTextTranslateRule]] = TypeAdapter(
     list[PluginTextTranslateRule]
 )
+_NAME_LOCATION_LIST_ADAPTER: TypeAdapter[list[NameLocation]] = TypeAdapter(list[NameLocation])
 
 
 def decode_string_list(raw_value: object, field_name: str) -> list[str]:
@@ -29,6 +31,13 @@ def decode_plugin_translate_rules(raw_value: str) -> list[PluginTextTranslateRul
     decoded_raw = cast(object, json.loads(raw_value))
     decoded = coerce_json_value(decoded_raw)
     return _PLUGIN_RULE_LIST_ADAPTER.validate_python(decoded)
+
+
+def decode_name_locations(raw_value: str) -> list[NameLocation]:
+    """从数据库 JSON 文本中读取标准名位置列表。"""
+    decoded_raw = cast(object, json.loads(raw_value))
+    decoded = coerce_json_value(decoded_raw)
+    return _NAME_LOCATION_LIST_ADAPTER.validate_python(decoded)
 
 
 def row_to_dict(row: aiosqlite.Row) -> dict[str, object]:
@@ -75,21 +84,13 @@ def row_item_type(row: aiosqlite.Row, key: str, db_path: Path) -> ItemType:
     return value
 
 
-def row_plugin_status(row: aiosqlite.Row, key: str, db_path: Path) -> PluginTextAnalysisStatus:
-    """读取并校验插件分析状态。"""
-    value = row_str(row, key, db_path)
-    if value not in ("success", "failed"):
-        raise TypeError(f"数据库字段 {key} 不是有效插件分析状态: {db_path}")
-    return value
-
-
 __all__: list[str] = [
+    "decode_name_locations",
     "decode_plugin_translate_rules",
     "decode_string_list",
     "row_int",
     "row_item_type",
     "row_optional_str",
-    "row_plugin_status",
     "row_str",
     "row_to_dict",
 ]

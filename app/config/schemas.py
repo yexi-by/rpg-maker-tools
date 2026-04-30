@@ -1,12 +1,12 @@
 """
 配置模型定义模块。
 
-本模块只保留 CLI 核心化重构后仍需要的运行配置：模型服务、正文切批、插件解析、
+本模块定义 CLI 翻译流程的运行配置：正文模型服务、正文切批、
 正文翻译和文本规则。所有配置继续从项目根目录的 `setting.toml` 读取，避免业务代码
 散落硬编码判断。
 """
 
-from typing import ClassVar, Literal
+from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -17,30 +17,13 @@ class StrictBaseModel(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
 
 
-class LLMServiceSetting(StrictBaseModel):
-    """单个 LLM 服务连接配置。"""
+class LLMSetting(StrictBaseModel):
+    """正文翻译使用的 OpenAI 兼容服务连接配置。"""
 
-    provider_type: Literal["openai", "volcengine", "gemini"] = Field(
-        title="服务提供商",
-        description="指定要使用的 LLM API 兼容协议。",
-    )
     base_url: str = Field(title="服务 URL", description="模型服务地址。")
     api_key: str = Field(title="API 密钥", description="访问模型服务所需凭据。")
     model: str = Field(title="模型名称", description="实际调用的模型标识。")
     timeout: int = Field(gt=0, title="超时时间", description="单位为秒。")
-
-
-class LLMServicesSetting(StrictBaseModel):
-    """CLI 核心流程需要的模型服务集合。"""
-
-    text: LLMServiceSetting = Field(
-        title="正文服务",
-        description="用于正文翻译的模型服务配置。",
-    )
-    plugin_text: LLMServiceSetting = Field(
-        title="插件解析服务",
-        description="用于 plugins.js 插件文本路径分析的模型服务配置。",
-    )
 
 
 class TranslationContextSetting(StrictBaseModel):
@@ -49,18 +32,6 @@ class TranslationContextSetting(StrictBaseModel):
     token_size: int = Field(gt=0, title="每批 token 上限")
     factor: float = Field(gt=0, title="字符换算系数")
     max_command_items: int = Field(gt=0, title="连续命令上限")
-
-
-class PluginTextAnalysisSetting(StrictBaseModel):
-    """插件文本 AI 路径分析配置。"""
-
-    worker_count: int = Field(gt=0, title="并发分析数")
-    rpm: int | None = Field(default=None, gt=0, title="每分钟请求数")
-    retry_count: int = Field(ge=0, title="网络重试次数")
-    retry_delay: int = Field(ge=0, title="网络重试间隔")
-    response_retry_count: int = Field(gt=0, title="响应重试次数")
-    system_prompt_file: str = Field(title="提示词文件")
-    system_prompt: str = Field(title="提示词内容")
 
 
 class TextTranslationSetting(StrictBaseModel):
@@ -192,16 +163,36 @@ class TextRulesSetting(StrictBaseModel):
     line_split_punctuations: list[str] = Field(
         default_factory=lambda: ["，", "。", ",", "."]
     )
-    long_text_hanzi_limit: int = Field(default=30, gt=0)
+    long_text_line_width_limit: int = Field(default=30, gt=0)
+    line_width_count_pattern: str = Field(default=r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]")
+    control_code_prefix: str = Field(default="\\")
+    percent_control_prefix: str = Field(default="%")
+    percent_control_param_pattern: str = Field(default=r"\d+")
+    control_code_name_pattern: str = Field(default=r"[A-Za-z]+")
+    control_param_delimiters: list[tuple[str, str]] = Field(
+        default_factory=lambda: [("[", "]"), ("<", ">")]
+    )
+    non_nested_control_param_open_delimiters: list[str] = Field(default_factory=lambda: ["<"])
+    complex_control_open_delimiters: list[str] = Field(default_factory=lambda: ["<"])
+    complex_control_param_markers: list[str] = Field(
+        default_factory=lambda: ["\\", "[", "]", "<", ">"]
+    )
+    enable_symbol_control_placeholders: bool = Field(default=True)
+    placeholder_code_uppercase: bool = Field(default=True)
+    no_param_control_placeholder_param: str = Field(default="0")
+    percent_placeholder_template: str = Field(default="[P_{param}]")
+    symbol_placeholder_template: str = Field(default="[S_{index}]")
+    simple_control_placeholder_template: str = Field(default="[{code}_{param}]")
+    complex_control_placeholder_template: str = Field(default="[RM_{index}]")
+    reuse_identical_complex_controls: bool = Field(default=True)
     simple_control_param_pattern: str = Field(default=r"[A-Za-z0-9_]+")
     translation_placeholder_pattern: str = Field(
         default=r"\[[A-Z]+(?:_[^\]]+)?\]",
     )
     japanese_segment_pattern: str = Field(default=r"[\u3040-\u309F\u30A0-\u30FF]+")
+    plugin_command_language_filter_pattern: str = Field(default=r"[ぁ-ゖゝ-ゟァ-ヺヽ-ヿ一-鿿]")
     placeholder_pattern: str = Field(default=r"\[[A-Z]+(?:_[^\]]+)?\]")
-    resource_like_pattern: str = Field(
-        default=r"(?:[A-Za-z]:)?[A-Za-z0-9_./\\:-]+\.[A-Za-z0-9]{1,8}",
-    )
+    residual_escape_sequence_pattern: str = Field(default=r"\\[nrt]")
     pure_number_pattern: str = Field(default=r"[-+]?\d+(?:\.\d+)?")
     hex_color_pattern: str = Field(default=r"#[0-9A-Fa-f]{6,8}")
     css_color_function_pattern: str = Field(
@@ -222,6 +213,10 @@ class TextRulesSetting(StrictBaseModel):
     )
     script_concat_pattern: str = Field(default=r"(?:['\"].*['\"]\s*\+\s*|\+\s*['\"].*['\"])")
     script_call_pattern: str = Field(default=r"\$?[A-Za-z_][A-Za-z0-9_]*\([^)]*\)")
+    script_expression_markers: list[str] = Field(default_factory=lambda: ["$data", "$game"])
+    script_ternary_markers: list[str] = Field(default_factory=lambda: [" ? ", " : "])
+    script_call_required_markers: list[str] = Field(default_factory=lambda: ["$"])
+    path_key_ignored_chars: list[str] = Field(default_factory=lambda: ["_", "-"])
     non_content_after_control_pattern: str = Field(
         default=r"[\s\.\,\:\;\-\+\*\/\\\(\)\[\]\{\}<>=!?'\"%]*",
     )
@@ -230,17 +225,14 @@ class TextRulesSetting(StrictBaseModel):
 class Setting(StrictBaseModel):
     """项目运行时总配置。"""
 
-    llm_services: LLMServicesSetting = Field(title="模型服务配置")
+    llm: LLMSetting = Field(title="正文模型服务配置")
     translation_context: TranslationContextSetting = Field(title="正文切批配置")
-    plugin_text_analysis: PluginTextAnalysisSetting = Field(title="插件解析配置")
     text_translation: TextTranslationSetting = Field(title="正文翻译配置")
     text_rules: TextRulesSetting = Field(default_factory=TextRulesSetting, title="文本规则")
 
 
 __all__: list[str] = [
-    "LLMServiceSetting",
-    "LLMServicesSetting",
-    "PluginTextAnalysisSetting",
+    "LLMSetting",
     "Setting",
     "StrictBaseModel",
     "TextRulesSetting",

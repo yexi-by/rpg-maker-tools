@@ -1,8 +1,8 @@
 """
 配置加载工具模块。
 
-默认读取项目根目录下的 `setting.toml`，注入正文翻译与插件分析提示词，并输出
-适合排障的中文配置摘要。配置编辑能力保留为底层工具，但 CLI 不提供交互编辑器。
+默认读取项目根目录下的 `setting.toml`，注入正文翻译提示词，并输出
+适合排障的中文配置摘要。配置编辑通过直接修改 TOML 完成。
 """
 
 import copy
@@ -56,7 +56,6 @@ def _read_toml_data(setting_path: Path) -> dict[str, object]:
 def _inject_prompt_texts(raw_config: dict[str, object], base_dir: Path) -> None:
     """把提示词文件内容注入配置字典。"""
     _inject_text_translation_prompt_text(raw_config=raw_config, base_dir=base_dir)
-    _inject_plugin_text_analysis_prompt_text(raw_config=raw_config, base_dir=base_dir)
 
 
 def _inject_text_translation_prompt_text(raw_config: dict[str, object], base_dir: Path) -> None:
@@ -67,19 +66,6 @@ def _inject_text_translation_prompt_text(raw_config: dict[str, object], base_dir
         raise ValueError("配置文件中缺少 text_translation.system_prompt_file 配置项")
 
     text_translation["system_prompt"] = _read_prompt_text(base_dir, prompt_file)
-
-
-def _inject_plugin_text_analysis_prompt_text(
-    raw_config: dict[str, object],
-    base_dir: Path,
-) -> None:
-    """注入插件文本分析提示词文本。"""
-    plugin_text_analysis = _read_config_section(raw_config, "plugin_text_analysis")
-    prompt_file = plugin_text_analysis.get("system_prompt_file")
-    if not isinstance(prompt_file, str) or not prompt_file.strip():
-        raise ValueError("配置文件中缺少 plugin_text_analysis.system_prompt_file 配置项")
-
-    plugin_text_analysis["system_prompt"] = _read_prompt_text(base_dir, prompt_file)
 
 
 def _read_config_section(raw_config: dict[str, object], section_name: str) -> dict[str, object]:
@@ -109,24 +95,17 @@ def _build_setting_summary(
     raw_config: dict[str, object],
 ) -> str:
     """构造适合直接输出到日志的配置摘要。"""
-    text_service = setting.llm_services.text
-    plugin_text_service = setting.llm_services.plugin_text
+    text_service = setting.llm
     text_prompt_file = _read_prompt_file_name(raw_config=raw_config, section_path=["text_translation"])
-    plugin_text_prompt_file = _read_prompt_file_name(
-        raw_config=raw_config,
-        section_path=["plugin_text_analysis"],
-    )
 
     lines = [
         "[tag.phase]当前正在使用的配置[/tag.phase]",
         f"配置文件: [tag.path]{setting_path}[/tag.path]",
-        f"正文接口: {_describe_provider(text_service.provider_type)} / 模型 [tag.count]{text_service.model}[/tag.count] / 地址 [tag.path]{text_service.base_url}[/tag.path] / 超时 [tag.count]{text_service.timeout}[/tag.count] 秒",
-        f"插件解析接口: {_describe_provider(plugin_text_service.provider_type)} / 模型 [tag.count]{plugin_text_service.model}[/tag.count] / 地址 [tag.path]{plugin_text_service.base_url}[/tag.path] / 超时 [tag.count]{plugin_text_service.timeout}[/tag.count] 秒",
+        f"正文接口: OpenAI 兼容 / 模型 [tag.count]{text_service.model}[/tag.count] / 地址 [tag.path]{text_service.base_url}[/tag.path] / 超时 [tag.count]{text_service.timeout}[/tag.count] 秒",
         f"正文切块: 目标 [tag.count]{setting.translation_context.token_size}[/tag.count] token，换算系数 [tag.count]{setting.translation_context.factor}[/tag.count]，同角色最多连续 [tag.count]{setting.translation_context.max_command_items}[/tag.count] 条",
         f"正文翻译: [tag.count]{setting.text_translation.worker_count}[/tag.count] 个 worker，RPM [tag.count]{setting.text_translation.rpm or '不限'}[/tag.count]，失败重试 [tag.count]{setting.text_translation.retry_count}[/tag.count] 次，间隔 [tag.count]{setting.text_translation.retry_delay}[/tag.count] 秒",
-        f"插件解析: [tag.count]{setting.plugin_text_analysis.worker_count}[/tag.count] 个 worker，RPM [tag.count]{setting.plugin_text_analysis.rpm or '不限'}[/tag.count]，网络重试 [tag.count]{setting.plugin_text_analysis.retry_count}[/tag.count] 次，结构重试 [tag.count]{setting.plugin_text_analysis.response_retry_count}[/tag.count] 次",
         f"文本规则: 357 关键词 [tag.count]{len(setting.text_rules.plugin_command_text_keywords)}[/tag.count] 个，不可翻译键 [tag.count]{len(setting.text_rules.non_translatable_path_keywords)}[/tag.count] 个，行切分标点 [tag.count]{len(setting.text_rules.line_split_punctuations)}[/tag.count] 个",
-        f"提示词文件: 正文=[tag.path]{text_prompt_file}[/tag.path]，插件解析=[tag.path]{plugin_text_prompt_file}[/tag.path]",
+        f"提示词文件: 正文=[tag.path]{text_prompt_file}[/tag.path]",
     ]
     return "\n".join(lines)
 
@@ -149,17 +128,6 @@ def _read_prompt_file_name(
     if not isinstance(prompt_file, str) or not prompt_file.strip():
         return "未配置"
     return prompt_file
-
-
-def _describe_provider(provider_type: str) -> str:
-    """将服务提供商类型转成中文可读文本。"""
-    if provider_type == "openai":
-        return "OpenAI 兼容接口"
-    if provider_type == "gemini":
-        return "Gemini 接口"
-    if provider_type == "volcengine":
-        return "火山引擎接口"
-    return provider_type
 
 
 __all__: list[str] = [

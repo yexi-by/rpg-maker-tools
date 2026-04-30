@@ -64,7 +64,7 @@ def _write_command_item(game_data: GameData, item: TranslationItem) -> None:
             _write_first_parameter(command, translated_text)
             return
 
-        raise RuntimeError(f"未知的 long_text 指令类型: {item.location_path}")
+        raise RuntimeError(f"无法识别的 long_text 指令类型: {item.location_path}")
 
     if item.item_type == "array":
         if command.get("code") != Code.CHOICES:
@@ -76,7 +76,7 @@ def _write_command_item(game_data: GameData, item: TranslationItem) -> None:
             parameters.append(list(item.translation_lines))
         return
 
-    raise ValueError(f"事件指令不支持的 item_type: {item.item_type}")
+    raise ValueError(f"事件指令 item_type 无法处理: {item.item_type}")
 
 
 def _write_plugin_command_text_item(command: JsonObject, item: TranslationItem) -> None:
@@ -135,7 +135,7 @@ def _locate_commands(
         commands = _ensure_command_list(page["list"], item_context(location_path, "list"))
         return commands, int(parts[3])
 
-    raise ValueError(f"未知的事件定位路径: {location_path}")
+    raise ValueError(f"无法识别的事件定位路径: {location_path}")
 
 
 def _extract_command_value_path_parts(location_path: str) -> list[str]:
@@ -148,7 +148,7 @@ def _extract_command_value_path_parts(location_path: str) -> list[str]:
         return parts[3:]
     if file_name == TROOPS_FILE_NAME:
         return parts[4:]
-    raise ValueError(f"未知的事件值路径: {location_path}")
+    raise ValueError(f"无法识别的事件值路径: {location_path}")
 
 
 def _set_plugin_command_value(
@@ -231,7 +231,7 @@ def _write_system_item(game_data: GameData, item: TranslationItem) -> None:
         target_list[int(parts[3])] = translated_text
         return
 
-    raise ValueError(f"未知的 System 路径: {item.location_path}")
+    raise ValueError(f"无法识别的 System 路径: {item.location_path}")
 
 
 def _write_base_item(game_data: GameData, item: TranslationItem) -> None:
@@ -257,7 +257,7 @@ def _write_base_item(game_data: GameData, item: TranslationItem) -> None:
         target_value[key] = translated_text
         return
 
-    raise ValueError(f"未找到基础数据库条目: {item.location_path}")
+    raise ValueError(f"基础数据库条目不存在: {item.location_path}")
 
 
 def _ensure_command_list(value: JsonValue, context: str) -> list[JsonObject]:

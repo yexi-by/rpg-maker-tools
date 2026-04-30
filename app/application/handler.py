@@ -1,34 +1,49 @@
 """
 核心 CLI 翻译编排模块。
 
-本模块串起游戏注册、插件分析、正文翻译、缓存断点续传与游戏文件回写。
-术语表、英文兼容和非标准数据文件处理已经从编排层移除。
+本模块串起游戏注册、外部规则导入、正文翻译、缓存断点续传与游戏文件回写。
 """
 
 import asyncio
 from collections.abc import Callable
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import ClassVar, Self
 
 from app.application.file_writer import reset_writable_copies, write_game_files
 from app.application.runtime import load_runtime_setting
-from app.application.summaries import PluginTextAnalysisSummary, TextTranslationSummary
+from app.application.summaries import (
+    NameContextImportSummary,
+    NameContextWriteSummary,
+    PluginJsonExportSummary,
+    PluginRuleImportSummary,
+    TextTranslationSummary,
+)
 from app.config.schemas import Setting
+from app.name_context import (
+    NameContextExportSummary,
+    NamePromptIndex,
+    apply_name_context_translations,
+    export_name_context_files,
+    load_name_context_registry,
+)
 from app.persistence import DEFAULT_ERROR_TABLE_PREFIX, GameDatabaseItem, GameDatabaseManager
-from app.plugin_text import PluginTextExtraction
+from app.plugin_text import (
+    PluginTextExtraction,
+    build_plugin_hash,
+    build_plugin_rule_records_from_import,
+    export_plugins_json_file,
+    load_plugin_rule_import_file,
+)
 from app.rmmz import DataTextExtraction
 from app.rmmz.schema import (
     GameData,
     ItemType,
     PLUGINS_FILE_NAME,
-    PluginTextAnalysisState,
     PluginTextRuleRecord,
     TranslationData,
     TranslationErrorItem,
     TranslationItem,
 )
-from app.plugin_text import PluginTextAnalysis, build_plugin_hash, build_prompt_hash
 from app.llm import ChatMessage, LLMHandler
 from app.rmmz.text_rules import TextRules
 from app.translation import TextTranslation, TranslationCache, iter_translation_context_batches
@@ -104,102 +119,53 @@ class TranslationHandler:
                 self.game_data_manager.items[game_title] = previous_game_data
             raise
 
-    async def analyze_plugin_text(
+    async def import_plugin_rules(
         self,
         game_title: str,
-        callbacks: tuple[
-            Callable[[int, int], None],
-            Callable[[int], None],
-            Callable[[str], None],
-        ],
-    ) -> PluginTextAnalysisSummary:
-        """为指定游戏执行插件文本路径分析。"""
-        set_progress, advance_progress, set_status = callbacks
-        setting = self._load_runtime_setting()
-        text_rules = TextRules.from_setting(setting.text_rules)
+        input_path: Path,
+    ) -> PluginRuleImportSummary:
+        """把外部插件规则 JSON 导入当前游戏数据库。"""
         game_data = self._get_game_data(game_title)
-        existing_rules = {
+        import_file = await load_plugin_rule_import_file(input_path)
+        rule_records = build_plugin_rule_records_from_import(
+            game_title=game_title,
+            game_data=game_data,
+            import_file=import_file,
+        )
+        old_rules = {
             rule.plugin_index: rule
             for rule in await self.game_database_manager.read_plugin_text_rules(game_title)
         }
-        plugin_text_analysis = PluginTextAnalysis(setting=setting, text_rules=text_rules)
-        analysis_plan = plugin_text_analysis.build_plan(
-            plugins=game_data.plugins_js,
-            existing_rules=existing_rules,
-        )
-        set_progress(analysis_plan.reused_success_count, analysis_plan.total_plugins)
-
-        if analysis_plan.total_plugins == 0:
-            skipped_reason = "plugins.js 中没有插件可供分析"
-            logger.info(f"[tag.skip]{skipped_reason}[/tag.skip] 游戏 [tag.count]{game_title}[/tag.count]")
-            set_status(skipped_reason)
-            return PluginTextAnalysisSummary(0, 0, 0, 0, 0, skipped_reason)
-
-        if not analysis_plan.jobs:
-            await self.game_database_manager.write_plugin_text_analysis_state(
-                game_title,
-                PluginTextAnalysisState(
-                    plugins_file_hash=analysis_plan.plugins_file_hash,
-                    prompt_hash=analysis_plan.prompt_hash,
-                    total_plugins=analysis_plan.total_plugins,
-                    success_plugins=analysis_plan.reused_success_count,
-                    failed_plugins=0,
-                    updated_at=datetime.now(timezone.utc).isoformat(),
-                ),
-            )
-            skipped_reason = "插件规则已是最新"
-            logger.info(f"[tag.skip]{skipped_reason}[/tag.skip] 游戏 [tag.count]{game_title}[/tag.count]")
-            set_status(skipped_reason)
-            return PluginTextAnalysisSummary(
-                total_plugins=analysis_plan.total_plugins,
-                success_plugins=analysis_plan.reused_success_count,
-                failed_plugins=0,
-                reused_success_count=analysis_plan.reused_success_count,
-                deleted_translation_items=0,
-                skipped_reason=skipped_reason,
-            )
-
-        plugin_text_analysis.start_analysis(llm_handler=self.llm_handler, plan=analysis_plan)
-        success_plugins = analysis_plan.reused_success_count
-        failed_plugins = 0
         deleted_translation_items = 0
-
-        async for execution in plugin_text_analysis.iter_results():
-            rule_record = execution.rule_record
-            old_rule = existing_rules.get(rule_record.plugin_index)
-            await self.game_database_manager.upsert_plugin_text_rule(game_title, rule_record)
+        for rule_record in rule_records:
+            old_rule = old_rules.get(rule_record.plugin_index)
             if self._should_refresh_plugin_translation_items(old_rule, rule_record):
                 deleted_translation_items += await self.game_database_manager.delete_translation_items_by_prefixes(
                     game_title,
                     [f"{PLUGINS_FILE_NAME}/{rule_record.plugin_index}/"],
                 )
-            if rule_record.status == "success":
-                success_plugins += 1
-                logger.success(f"[tag.success]插件解析成功[/tag.success] 插件 [tag.count]{rule_record.plugin_name}[/tag.count] 规则 [tag.count]{len(rule_record.translate_rules)}[/tag.count] 条")
-            else:
-                failed_plugins += 1
-                logger.error(f"[tag.failure]插件解析失败[/tag.failure] 插件 [tag.count]{rule_record.plugin_name}[/tag.count] 原因：{rule_record.last_error or '未知错误'}")
-            set_status(self._format_plugin_rule_status(rule_record))
-            advance_progress(1)
-
-        await self.game_database_manager.write_plugin_text_analysis_state(
-            game_title,
-            PluginTextAnalysisState(
-                plugins_file_hash=analysis_plan.plugins_file_hash,
-                prompt_hash=analysis_plan.prompt_hash,
-                total_plugins=analysis_plan.total_plugins,
-                success_plugins=success_plugins,
-                failed_plugins=failed_plugins,
-                updated_at=datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        logger.success(f"[tag.success]插件解析完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 成功 [tag.count]{success_plugins}[/tag.count] 个，失败 [tag.count]{failed_plugins}[/tag.count] 个，清理旧译文 [tag.count]{deleted_translation_items}[/tag.count] 条")
-        return PluginTextAnalysisSummary(
-            total_plugins=analysis_plan.total_plugins,
-            success_plugins=success_plugins,
-            failed_plugins=failed_plugins,
-            reused_success_count=analysis_plan.reused_success_count,
+        await self.game_database_manager.replace_plugin_text_rules(game_title, rule_records)
+        imported_rule_count = sum(len(record.translate_rules) for record in rule_records)
+        logger.success(f"[tag.success]插件规则导入完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 插件 [tag.count]{len(rule_records)}[/tag.count] 个，规则 [tag.count]{imported_rule_count}[/tag.count] 条，清理失效译文 [tag.count]{deleted_translation_items}[/tag.count] 条")
+        return PluginRuleImportSummary(
+            imported_plugin_count=len(rule_records),
+            imported_rule_count=imported_rule_count,
             deleted_translation_items=deleted_translation_items,
+        )
+
+    async def export_plugins_json(
+        self,
+        game_title: str,
+        output_path: Path,
+    ) -> PluginJsonExportSummary:
+        """把当前游戏的 plugins.js 导出为纯 JSON。"""
+        game_data = self._get_game_data(game_title)
+        resolved_output_path = output_path.resolve()
+        await export_plugins_json_file(game_data=game_data, output_path=resolved_output_path)
+        logger.success(f"[tag.success]插件配置 JSON 导出完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 插件 [tag.count]{len(game_data.plugins_js)}[/tag.count] 个 文件 [tag.path]{resolved_output_path}[/tag.path]")
+        return PluginJsonExportSummary(
+            output_path=str(resolved_output_path),
+            plugin_count=len(game_data.plugins_js),
         )
 
     async def translate_text(
@@ -217,18 +183,17 @@ class TranslationHandler:
         translation_cache = TranslationCache()
         text_rules = TextRules.from_setting(setting.text_rules)
         game_data = self._get_game_data(game_title)
+        name_prompt_index = await self._load_name_prompt_index(game_title=game_title)
 
         translated_paths = await self.game_database_manager.read_translation_location_paths(game_title)
         plugin_rules = await self._read_fresh_plugin_text_rules(
             game_title=game_title,
             game_data=game_data,
-            setting=setting,
         )
         translation_data_map = DataTextExtraction(game_data, text_rules).extract_all_text()
         plugin_translation_data_map = PluginTextExtraction(
             game_data=game_data,
             plugin_rule_records=plugin_rules,
-            text_rules=text_rules,
         ).extract_all_text()
         translation_data_map.update(plugin_translation_data_map)
 
@@ -259,6 +224,7 @@ class TranslationHandler:
             translation_data_map=deduplicated_translation_data_map,
             setting=setting,
             text_rules=text_rules,
+            name_prompt_index=name_prompt_index,
         )
         if not batches:
             blocked_reason = "正文去重后没有可送入模型的批次"
@@ -276,7 +242,7 @@ class TranslationHandler:
         old_error_tables = await self.game_database_manager.read_error_table_names(game_title)
         deleted_error_tables = await self.game_database_manager.delete_error_tables(game_title, old_error_tables)
         if deleted_error_tables:
-            logger.info(f"[tag.phase]已清理旧错误表[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] 数量 [tag.count]{deleted_error_tables}[/tag.count]")
+            logger.info(f"[tag.phase]已清理错误表[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] 数量 [tag.count]{deleted_error_tables}[/tag.count]")
 
         error_table_name = await self.game_database_manager.start_error_table(game_title)
         set_status(f"待翻译 {pending_count} 条，去重后 {deduplicated_count} 条，批次 {len(batches)} 个")
@@ -326,9 +292,73 @@ class TranslationHandler:
         write_plugin_text(game_data, translated_items)
         if plugin_item_count:
             advance_progress(plugin_item_count)
+        name_written_count = await self._apply_optional_name_context_write_back(
+            game_title=game_title,
+            game_data=game_data,
+        )
 
         write_game_files(game_data=game_data, game_root=game_database_item.game_path)
-        logger.success(f"[tag.success]游戏文本回写完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] data 文本 [tag.count]{data_item_count}[/tag.count] 条，插件文本 [tag.count]{plugin_item_count}[/tag.count] 条")
+        logger.success(f"[tag.success]游戏文本回写完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] data 文本 [tag.count]{data_item_count}[/tag.count] 条，插件文本 [tag.count]{plugin_item_count}[/tag.count] 条，标准名 [tag.count]{name_written_count}[/tag.count] 条")
+
+    async def export_name_context(
+        self,
+        game_title: str,
+        output_dir: Path,
+    ) -> NameContextExportSummary:
+        """导出 `101` 名字框与地图显示名上下文文件。"""
+        game_data = self._get_game_data(game_title)
+        summary = await export_name_context_files(
+            game_title=game_title,
+            game_data=game_data,
+            output_dir=output_dir,
+        )
+        logger.success(f"[tag.success]标准名上下文导出完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 大 JSON [tag.path]{summary.registry_path}[/tag.path] 小 JSON [tag.count]{summary.context_file_count}[/tag.count] 个")
+        return summary
+
+    async def import_name_context(
+        self,
+        game_title: str,
+        input_path: Path,
+    ) -> NameContextImportSummary:
+        """把外部 Agent 填写后的术语表 JSON 导入当前游戏数据库。"""
+        registry = await load_name_context_registry(registry_path=input_path)
+        if registry.game_title != game_title:
+            raise ValueError(
+                f"术语表导入文件的 game_title 不匹配，期望 {game_title}，实际 {registry.game_title}"
+            )
+        await self.game_database_manager.replace_name_context_registry(game_title, registry)
+        filled_count = sum(1 for entry in registry.entries if entry.translated_text.strip())
+        logger.success(f"[tag.success]术语表导入完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 条目 [tag.count]{len(registry.entries)}[/tag.count] 条，已填写 [tag.count]{filled_count}[/tag.count] 条")
+        return NameContextImportSummary(
+            imported_entry_count=len(registry.entries),
+            filled_entry_count=filled_count,
+        )
+
+    async def write_name_context(
+        self,
+        game_title: str,
+        callbacks: tuple[Callable[[int, int], None], Callable[[int], None]],
+    ) -> NameContextWriteSummary:
+        """根据数据库中的术语表写回 `101` 名字框与地图显示名。"""
+        set_progress, advance_progress = callbacks
+        game_data = self._get_game_data(game_title)
+        game_database_item = self._get_game_database_item(game_title)
+        translated_items = await self.game_database_manager.read_translated_items(game_title)
+
+        reset_writable_copies(game_data)
+        if translated_items:
+            write_data_text(game_data, translated_items)
+            write_plugin_text(game_data, translated_items)
+
+        registry = await self.game_database_manager.read_name_context_registry(game_title)
+        if registry is None:
+            raise RuntimeError("当前游戏数据库中没有已导入术语表，请先执行 import-name-context")
+        written_count = apply_name_context_translations(game_data, registry)
+        set_progress(0, max(written_count, 1))
+        advance_progress(written_count)
+        write_game_files(game_data=game_data, game_root=game_database_item.game_path)
+        logger.success(f"[tag.success]标准名写回完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 写回 [tag.count]{written_count}[/tag.count] 条，保留已有正文译文 [tag.count]{len(translated_items)}[/tag.count] 条")
+        return NameContextWriteSummary(written_count=written_count, preserved_translation_count=len(translated_items))
 
     def _get_game_data(self, game_title: str) -> GameData:
         """根据游戏标题读取已加载的游戏数据。"""
@@ -344,33 +374,56 @@ class TranslationHandler:
             raise ValueError(f"未找到游戏数据库: {game_title}")
         return item
 
+    async def _load_name_prompt_index(
+        self,
+        *,
+        game_title: str,
+    ) -> NamePromptIndex | None:
+        """读取数据库术语表，并转换为正文提示词索引。"""
+        registry = await self.game_database_manager.read_name_context_registry(game_title)
+        if registry is None:
+            logger.info(f"[tag.skip]数据库没有已导入术语表，正文提示词不注入标准名[/tag.skip] 游戏 [tag.count]{game_title}[/tag.count]")
+            return None
+
+        index = NamePromptIndex.from_registry(registry)
+        logger.info(f"[tag.phase]已加载术语表[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] 可注入译名 [tag.count]{len(index.entries)}[/tag.count] 条")
+        return index
+
+    async def _apply_optional_name_context_write_back(
+        self,
+        *,
+        game_title: str,
+        game_data: GameData,
+    ) -> int:
+        """在正文回写时顺手写回数据库术语表中的标准名。"""
+        registry = await self.game_database_manager.read_name_context_registry(game_title)
+        if registry is None:
+            logger.info(f"[tag.skip]数据库未发现术语表，跳过 101 名字框和地图名写回[/tag.skip] 游戏 [tag.count]{game_title}[/tag.count]")
+            return 0
+        return apply_name_context_translations(game_data, registry)
+
     async def _read_fresh_plugin_text_rules(
         self,
         *,
         game_title: str,
         game_data: GameData,
-        setting: Setting,
     ) -> list[PluginTextRuleRecord]:
-        """读取仍然匹配当前 plugins.js 和提示词的成功插件规则。"""
-        prompt_hash = build_prompt_hash(setting.plugin_text_analysis.system_prompt)
+        """读取匹配当前 plugins.js 的外部插件规则。"""
         plugin_rules = await self.game_database_manager.read_plugin_text_rules(game_title)
         fresh_rules: list[PluginTextRuleRecord] = []
         stale_count = 0
         for rule in plugin_rules:
-            if rule.status != "success":
-                stale_count += 1
-                continue
             if rule.plugin_index >= len(game_data.plugins_js):
                 stale_count += 1
                 continue
             plugin_hash = build_plugin_hash(game_data.plugins_js[rule.plugin_index])
-            if rule.plugin_hash != plugin_hash or rule.prompt_hash != prompt_hash:
+            if rule.plugin_hash != plugin_hash:
                 stale_count += 1
                 continue
             fresh_rules.append(rule)
 
         if stale_count:
-            logger.warning(f"[tag.warning]检测到过期或失败的插件规则，正文翻译将跳过这些规则[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count] 数量 [tag.count]{stale_count}[/tag.count]")
+            logger.warning(f"[tag.warning]检测到过期插件规则，正文翻译将跳过这些规则[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count] 数量 [tag.count]{stale_count}[/tag.count]")
         return fresh_rules
 
     @staticmethod
@@ -378,22 +431,13 @@ class TranslationHandler:
         old_rule: PluginTextRuleRecord | None,
         new_rule: PluginTextRuleRecord,
     ) -> bool:
-        """判断插件规则变化后是否需要清理旧插件译文。"""
+        """判断插件规则变化后是否需要清理失效插件译文。"""
         if old_rule is None:
             return False
         return (
             old_rule.plugin_hash != new_rule.plugin_hash
-            or old_rule.prompt_hash != new_rule.prompt_hash
-            or old_rule.status != new_rule.status
             or old_rule.translate_rules != new_rule.translate_rules
         )
-
-    @staticmethod
-    def _format_plugin_rule_status(rule_record: PluginTextRuleRecord) -> str:
-        """格式化插件规则状态。"""
-        if rule_record.status == "success":
-            return f"{rule_record.plugin_name}: {len(rule_record.translate_rules)} 条规则"
-        return f"{rule_record.plugin_name}: 解析失败"
 
     @staticmethod
     def _filter_pending_translation_data(
@@ -450,10 +494,11 @@ class TranslationHandler:
         translation_data_map: dict[str, TranslationData],
         setting: Setting,
         text_rules: TextRules,
+        name_prompt_index: NamePromptIndex | None,
     ) -> list[tuple[list[TranslationItem], list[ChatMessage]]]:
         """构建正文翻译批次。"""
         batches: list[tuple[list[TranslationItem], list[ChatMessage]]] = []
-        for translation_data in translation_data_map.values():
+        for file_name, translation_data in translation_data_map.items():
             batches.extend(
                 iter_translation_context_batches(
                     translation_data=translation_data,
@@ -462,6 +507,8 @@ class TranslationHandler:
                     max_command_items=setting.translation_context.max_command_items,
                     system_prompt=setting.text_translation.system_prompt,
                     text_rules=text_rules,
+                    file_name=file_name,
+                    name_prompt_index=name_prompt_index,
                 )
             )
         return batches
@@ -626,7 +673,10 @@ class TranslationHandler:
 
 
 __all__: list[str] = [
-    "PluginTextAnalysisSummary",
+    "NameContextImportSummary",
+    "NameContextWriteSummary",
+    "PluginJsonExportSummary",
+    "PluginRuleImportSummary",
     "TextTranslationSummary",
     "TranslationHandler",
 ]

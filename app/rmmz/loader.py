@@ -1,8 +1,8 @@
 """
 游戏加载统一入口模块。
 
-本模块只加载 RPG Maker MZ 标准数据文件与 `js/plugins.js`。未知 `data/*.json`
-会被跳过并记录 DEBUG 日志，不再为插件衍生文件维护专门解析逻辑。
+本模块加载 RPG Maker MZ 标准数据文件与 `js/plugins.js`。未知 `data/*.json`
+会被跳过并记录 DEBUG 日志。
 """
 
 import asyncio
@@ -41,6 +41,7 @@ async def load_game_data(game_path: str | Path) -> GameData:
     """从 RPG Maker 游戏根目录加载标准数据文件并构造 `GameData`。"""
     game_root = Path(game_path)
     source_data_dir, source_plugins_path, _ = resolve_game_source_paths(game_root)
+    origin_data_dir = game_root / DATA_ORIGIN_DIRECTORY_NAME
 
     valid_files = sorted(
         (
@@ -53,7 +54,10 @@ async def load_game_data(game_path: str | Path) -> GameData:
     _log_skipped_data_files(source_data_dir=source_data_dir, valid_files=valid_files)
 
     file_contents = await asyncio.gather(
-        *(_read_text_file(file_path) for file_path in valid_files)
+        *(
+            _read_text_file(resolve_data_source_file(active_file_path=file_path, origin_data_dir=origin_data_dir))
+            for file_path in valid_files
+        )
     )
 
     data: dict[str, JsonValue] = {}
@@ -149,22 +153,25 @@ def resolve_game_source_paths(game_root: Path) -> tuple[Path, Path, bool]:
 
     has_origin_data_dir = origin_data_dir.exists()
     has_origin_plugins_path = origin_plugins_path.exists()
+    is_translated_layout = has_origin_data_dir or has_origin_plugins_path
+    source_plugins_path = origin_plugins_path if has_origin_plugins_path else active_plugins_path
 
-    if has_origin_data_dir != has_origin_plugins_path:
-        raise ValueError(
-            "检测到半成品翻译布局：`data_origin/` 与 `js/plugins_origin.js` 必须同时存在或同时不存在"
-        )
-
-    is_translated_layout = has_origin_data_dir and has_origin_plugins_path
-    source_data_dir = origin_data_dir if is_translated_layout else active_data_dir
-    source_plugins_path = origin_plugins_path if is_translated_layout else active_plugins_path
-
-    if not source_data_dir.exists():
-        raise FileNotFoundError(f"数据目录不存在: {source_data_dir}")
+    if not active_data_dir.exists():
+        raise FileNotFoundError(f"数据目录不存在: {active_data_dir}")
+    if has_origin_data_dir and not origin_data_dir.is_dir():
+        raise NotADirectoryError(f"原件数据留档不是目录: {origin_data_dir}")
     if not source_plugins_path.exists():
         raise FileNotFoundError(f"插件配置文件不存在: {source_plugins_path}")
 
-    return source_data_dir, source_plugins_path, is_translated_layout
+    return active_data_dir, source_plugins_path, is_translated_layout
+
+
+def resolve_data_source_file(*, active_file_path: Path, origin_data_dir: Path) -> Path:
+    """解析单个 data 文件的读取来源，原件留档存在时优先读取留档。"""
+    origin_file_path = origin_data_dir / active_file_path.name
+    if origin_file_path.exists():
+        return origin_file_path
+    return active_file_path
 
 
 class GameDataManager:
@@ -184,7 +191,7 @@ class GameDataManager:
         game_data = await load_game_data(resolved_game_path)
 
         if has_origin_backup:
-            logger.warning(f"[tag.warning]检测到该游戏已经执行过激活版回写，后续将始终读取原件[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count] 原件数据 [tag.path]{source_data_dir}[/tag.path] 原件插件 [tag.path]{source_plugins_path}[/tag.path]")
+            logger.warning(f"[tag.warning]检测到该游戏已经执行过激活版回写，后续会优先读取受影响文件的原件留档[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count] 数据目录 [tag.path]{source_data_dir}[/tag.path] 插件来源 [tag.path]{source_plugins_path}[/tag.path]")
 
         self.items[game_title] = game_data
 
@@ -243,6 +250,7 @@ __all__: list[str] = [
     "GameDataManager",
     "load_game_data",
     "read_game_title",
+    "resolve_data_source_file",
     "resolve_game_directory",
     "resolve_game_source_paths",
 ]

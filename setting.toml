@@ -1,29 +1,13 @@
-[llm_services.text]
-provider_type = "volcengine"
+[llm]
 base_url = "https://api.deepseek.com"
 api_key = "YOUR_TEXT_API_KEY"
 model = "deepseek-chat"
-timeout = 600
-
-[llm_services.plugin_text]
-provider_type = "openai"
-base_url = "https://api.deepseek.com"
-api_key = "YOUR_PLUGIN_TEXT_API_KEY"
-model = "deepseek-reasoner"
 timeout = 600
 
 [translation_context]
 token_size = 1024
 factor = 3.5
 max_command_items = 5
-
-[plugin_text_analysis]
-worker_count = 50
-rpm = 50
-retry_count = 3
-retry_delay = 2
-response_retry_count = 3
-system_prompt_file = "prompts/plugin_text_analysis_system.txt"
 
 [text_translation]
 worker_count = 200
@@ -68,12 +52,30 @@ no_param_alpha_control_codes = ["G"]
 allowed_japanese_chars = ["っ", "ッ", "ー", "・", "。", "～", "…"]
 allowed_japanese_tail_chars = ["あ", "い", "う", "え", "お", "っ", "ッ", "ん", "ー", "よ", "ね", "な", "か"]
 line_split_punctuations = ["，", "。", ",", "."]
-long_text_hanzi_limit = 30
+long_text_line_width_limit = 30
+line_width_count_pattern = "[\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uF900-\\uFAFF]"
+control_code_prefix = "\\"
+percent_control_prefix = "%"
+percent_control_param_pattern = "\\d+"
+control_code_name_pattern = "[A-Za-z]+"
+control_param_delimiters = [["[", "]"], ["<", ">"]]
+non_nested_control_param_open_delimiters = ["<"]
+complex_control_open_delimiters = ["<"]
+complex_control_param_markers = ["\\", "[", "]", "<", ">"]
+enable_symbol_control_placeholders = true
+placeholder_code_uppercase = true
+no_param_control_placeholder_param = "0"
+percent_placeholder_template = "[P_{param}]"
+symbol_placeholder_template = "[S_{index}]"
+simple_control_placeholder_template = "[{code}_{param}]"
+complex_control_placeholder_template = "[RM_{index}]"
+reuse_identical_complex_controls = true
 simple_control_param_pattern = "[A-Za-z0-9_]+"
 translation_placeholder_pattern = "\\[[A-Z]+(?:_[^\\]]+)?\\]"
 japanese_segment_pattern = "[\\u3040-\\u309F\\u30A0-\\u30FF]+"
+plugin_command_language_filter_pattern = "[ぁ-ゖゝ-ゟァ-ヺヽ-ヿ一-鿿]"
 placeholder_pattern = "\\[[A-Z]+(?:_[^\\]]+)?\\]"
-resource_like_pattern = "(?:[A-Za-z]:)?[A-Za-z0-9_./\\\\:-]+\\.[A-Za-z0-9]{1,8}"
+residual_escape_sequence_pattern = "\\\\[nrt]"
 pure_number_pattern = "[-+]?\\d+(?:\\.\\d+)?"
 hex_color_pattern = "#[0-9A-Fa-f]{6,8}"
 css_color_function_pattern = "(?:rgb|rgba|hsl|hsla)\\([^)]*\\)"
@@ -84,4 +86,8 @@ bracket_identifier_pattern = "\\$?[A-Za-z_][A-Za-z0-9_]*\\[[^\\]]+\\](?:\\.[A-Za
 dot_identifier_pattern = "\\$?[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)+"
 script_concat_pattern = "(?:['\\\"].*['\\\"]\\s*\\+\\s*|\\+\\s*['\\\"].*['\\\"])"
 script_call_pattern = "\\$?[A-Za-z_][A-Za-z0-9_]*\\([^)]*\\)"
+script_expression_markers = ["$data", "$game"]
+script_ternary_markers = [" ? ", " : "]
+script_call_required_markers = ["$"]
+path_key_ignored_chars = ["_", "-"]
 non_content_after_control_pattern = "[\\s\\.\\,\\:\\;\\-\\+\\*\\/\\\\\\(\\)\\[\\]\\{\\}<>=!?'\\\"%]*"

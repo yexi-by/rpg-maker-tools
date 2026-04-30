@@ -18,7 +18,7 @@ def test_translation_cache_deduplicates_and_expands_items() -> None:
 
 
 def test_translation_context_prompt_has_no_removed_context_sections() -> None:
-    """提示词组装只包含正文上下文，不再夹带术语表或源语言段落。"""
+    """未传入术语表索引时，提示词包含地图名与正文上下文。"""
     data = TranslationData(
         display_name="始まりの町",
         translation_items=[

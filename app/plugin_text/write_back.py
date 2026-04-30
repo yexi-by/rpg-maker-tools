@@ -91,7 +91,7 @@ def _set_plugin_value(
         )
         return json.dumps(updated_value, ensure_ascii=False)
 
-    raise ValueError(f"不支持的插件参数类型: {type(current_value).__name__}")
+    raise ValueError(f"插件参数类型无法处理: {type(current_value).__name__}")
 
 
 def _try_parse_container_text(value: str) -> dict[str, JsonValue] | list[JsonValue] | None:

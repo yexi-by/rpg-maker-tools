@@ -1,27 +1,33 @@
-"""
-插件文本分析相关模块导出入口。
-"""
+"""插件文本翻译模块导出入口。"""
 
-from .analysis import PluginAnalysisExecution, PluginAnalysisPlan, PluginTextAnalysis
 from .common import (
     build_plugin_hash,
     build_plugins_file_hash,
-    build_prompt_hash,
     expand_rule_to_leaf_paths,
     jsonpath_to_location_path,
     resolve_plugin_leaves,
 )
 from .extraction import PluginTextExtraction
+from .exporter import export_plugins_json_file
+from .importer import (
+    PLUGIN_RULE_IMPORT_SCHEMA_VERSION,
+    PluginRuleImportEntry,
+    PluginRuleImportFile,
+    build_plugin_rule_records_from_import,
+    load_plugin_rule_import_file,
+)
 
 __all__: list[str] = [
-    "PluginAnalysisExecution",
-    "PluginAnalysisPlan",
+    "PLUGIN_RULE_IMPORT_SCHEMA_VERSION",
+    "PluginRuleImportEntry",
+    "PluginRuleImportFile",
     "PluginTextExtraction",
-    "PluginTextAnalysis",
     "build_plugin_hash",
+    "build_plugin_rule_records_from_import",
     "build_plugins_file_hash",
-    "build_prompt_hash",
+    "export_plugins_json_file",
     "expand_rule_to_leaf_paths",
     "jsonpath_to_location_path",
+    "load_plugin_rule_import_file",
     "resolve_plugin_leaves",
 ]

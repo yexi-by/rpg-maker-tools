@@ -77,8 +77,6 @@ NOISY_MODULES = [
     "httpx",
     "openai",
     "urllib3",
-    "volcengine",
-    "requests",
     "aiosqlite",
 ]
 
@@ -109,9 +107,6 @@ class InterceptHandler(logging.Handler):
     @override
     def emit(self, record: logging.LogRecord) -> None:
         """处理单条日志记录，并将其桥接到 Loguru。"""
-        if record.name.startswith("volcengine") and record.levelno < logging.WARNING:
-            return
-
         try:
             level = logger.level(record.levelname).name
         except ValueError:
@@ -153,7 +148,7 @@ def build_file_sink_format(record: Record) -> str:
 
     为什么使用可调用格式器：
     只有在当前记录确实携带异常时，才显式追加 `{exception}`，
-    这样既能保留 traceback，又不会让普通日志多出空白行。
+    这样既能记录 traceback，又能保持普通日志紧凑。
 
     Args:
         record: Loguru 传入的单条日志记录字典。

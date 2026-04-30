@@ -1,8 +1,8 @@
 """
 多游戏数据库管理模块。
 
-本模块管理 `data/db` 下的多个 SQLite 数据库文件。数据库只保存核心 CLI 流程所需
-数据，不再包含旧语言分支和旧扩展流程相关表。
+本模块管理 `data/db` 下的多个 SQLite 数据库文件。数据库保存 CLI 流程所需的
+游戏元数据、译文、错误表、插件规则和术语表条目。
 """
 
 import json
@@ -14,9 +14,9 @@ from typing import Self
 
 import aiosqlite
 
+from app.name_context.schemas import NameContextRegistry, NameEntryKind, NameRegistryEntry
 from app.rmmz.schema import (
     ItemType,
-    PluginTextAnalysisState,
     PluginTextRuleRecord,
     TranslationErrorItem,
     TranslationItem,
@@ -25,12 +25,12 @@ from app.rmmz.loader import read_game_title, resolve_game_directory
 from app.observability.logging import logger
 
 from .rows import (
+    decode_name_locations,
     decode_plugin_translate_rules,
     decode_string_list,
     row_int,
     row_item_type,
     row_optional_str,
-    row_plugin_status,
     row_str,
     row_to_dict,
 )
@@ -38,27 +38,28 @@ from .sql import (
     CHECK_CONNECTION_READABLE,
     CREATE_ERROR_TABLE,
     CREATE_METADATA_TABLE,
-    CREATE_PLUGIN_TEXT_ANALYSIS_STATE_TABLE,
+    CREATE_NAME_CONTEXT_ENTRIES_TABLE,
     CREATE_PLUGIN_TEXT_RULES_TABLE,
     CREATE_TRANSLATION_TABLE,
+    DELETE_ALL_NAME_CONTEXT_ENTRIES,
+    DELETE_ALL_PLUGIN_TEXT_RULES,
     DELETE_TRANSLATION_ITEMS_BY_PREFIX,
     DROP_TABLE,
     INSERT_ERROR,
+    INSERT_NAME_CONTEXT_ENTRY,
     INSERT_TRANSLATION,
     METADATA_KEY,
     SELECT_ALL,
     SELECT_METADATA,
-    SELECT_PLUGIN_TEXT_ANALYSIS_STATE,
+    SELECT_NAME_CONTEXT_ENTRIES,
     SELECT_PLUGIN_TEXT_RULES,
     SELECT_TABLE_NAMES_BY_PREFIX,
     SELECT_TRANSLATED_ITEMS,
     SELECT_TRANSLATION_PATHS,
     UPSERT_METADATA,
-    UPSERT_PLUGIN_TEXT_ANALYSIS_STATE,
     UPSERT_PLUGIN_TEXT_RULE,
 )
 
-PLUGIN_TEXT_ANALYSIS_STATE_KEY = "current_plugin_text_analysis"
 DEFAULT_ERROR_TABLE_PREFIX = "translation_errors"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DB_DIRECTORY = PROJECT_ROOT / "data" / "db"
@@ -101,8 +102,8 @@ async def create_static_tables(connection: aiosqlite.Connection) -> None:
     """初始化当前数据库要求的全部静态表。"""
     _ = await connection.execute(CREATE_TRANSLATION_TABLE)
     _ = await connection.execute(CREATE_METADATA_TABLE)
-    _ = await connection.execute(CREATE_PLUGIN_TEXT_ANALYSIS_STATE_TABLE)
     _ = await connection.execute(CREATE_PLUGIN_TEXT_RULES_TABLE)
+    _ = await connection.execute(CREATE_NAME_CONTEXT_ENTRIES_TABLE)
     await connection.commit()
 
 
@@ -130,6 +131,13 @@ async def read_metadata(connection: aiosqlite.Connection, db_path: Path) -> tupl
     if not game_path.strip():
         raise RuntimeError(f"metadata.game_path 非法: {db_path}")
     return game_title.strip(), Path(game_path).resolve()
+
+
+def _read_name_entry_kind(value: str, db_path: Path) -> NameEntryKind:
+    """读取并校验数据库中的术语表条目类型。"""
+    if value not in ("speaker_name", "map_display_name"):
+        raise TypeError(f"数据库字段 kind 不是有效术语表类型: {db_path}")
+    return value
 
 
 @dataclass(slots=True)
@@ -160,6 +168,7 @@ class GameDatabaseManager:
             try:
                 await check_connection_readable(connection=connection, db_path=db_path)
                 game_title, game_path = await read_metadata(connection=connection, db_path=db_path)
+                await create_static_tables(connection)
             except Exception:
                 await connection.close()
                 raise
@@ -195,6 +204,7 @@ class GameDatabaseManager:
             if db_already_exists:
                 await check_connection_readable(connection=connection, db_path=db_path)
                 _ = await read_metadata(connection=connection, db_path=db_path)
+                await create_static_tables(connection)
             else:
                 await create_static_tables(connection)
             await write_metadata(connection, game_title, resolved_game_path)
@@ -260,43 +270,6 @@ class GameDatabaseManager:
             )
         return translated_items
 
-    async def read_plugin_text_analysis_state(self, game_title: str) -> PluginTextAnalysisState | None:
-        """读取最近一次插件文本分析汇总状态。"""
-        item = self._get_item(game_title)
-        async with item.connection.execute(
-            SELECT_PLUGIN_TEXT_ANALYSIS_STATE,
-            (PLUGIN_TEXT_ANALYSIS_STATE_KEY,),
-        ) as cursor:
-            row = await cursor.fetchone()
-
-        if row is None:
-            return None
-        return PluginTextAnalysisState(
-            plugins_file_hash=row_str(row, "plugins_file_hash", item.db_path),
-            prompt_hash=row_str(row, "prompt_hash", item.db_path),
-            total_plugins=row_int(row, "total_plugins", item.db_path),
-            success_plugins=row_int(row, "success_plugins", item.db_path),
-            failed_plugins=row_int(row, "failed_plugins", item.db_path),
-            updated_at=row_str(row, "updated_at", item.db_path),
-        )
-
-    async def write_plugin_text_analysis_state(self, game_title: str, state: PluginTextAnalysisState) -> None:
-        """写入最近一次插件文本分析汇总状态。"""
-        item = self._get_item(game_title)
-        _ = await item.connection.execute(
-            UPSERT_PLUGIN_TEXT_ANALYSIS_STATE,
-            (
-                PLUGIN_TEXT_ANALYSIS_STATE_KEY,
-                state.plugins_file_hash,
-                state.prompt_hash,
-                state.total_plugins,
-                state.success_plugins,
-                state.failed_plugins,
-                state.updated_at,
-            ),
-        )
-        await item.connection.commit()
-
     async def read_plugin_text_rules(self, game_title: str) -> list[PluginTextRuleRecord]:
         """读取当前游戏保存的全部插件文本规则快照。"""
         item = self._get_item(game_title)
@@ -313,12 +286,9 @@ class GameDatabaseManager:
                     plugin_index=row_int(row, "plugin_index", item.db_path),
                     plugin_name=row_str(row, "plugin_name", item.db_path),
                     plugin_hash=row_str(row, "plugin_hash", item.db_path),
-                    prompt_hash=row_str(row, "prompt_hash", item.db_path),
-                    status=row_plugin_status(row, "status", item.db_path),
                     plugin_reason=row_str(row, "plugin_reason", item.db_path),
                     translate_rules=translate_rules,
-                    last_error=row_optional_str(row, "last_error", item.db_path),
-                    updated_at=row_str(row, "updated_at", item.db_path),
+                    imported_at=row_str(row, "imported_at", item.db_path),
                 )
             )
         return records
@@ -332,21 +302,99 @@ class GameDatabaseManager:
                 rule_record.plugin_index,
                 rule_record.plugin_name,
                 rule_record.plugin_hash,
-                rule_record.prompt_hash,
-                rule_record.status,
                 rule_record.plugin_reason,
                 json.dumps(
                     [rule.model_dump(mode="json") for rule in rule_record.translate_rules],
                     ensure_ascii=False,
                 ),
-                rule_record.last_error,
-                rule_record.updated_at,
+                rule_record.imported_at,
             ),
         )
         await item.connection.commit()
 
+    async def replace_plugin_text_rules(
+        self,
+        game_title: str,
+        rule_records: list[PluginTextRuleRecord],
+    ) -> None:
+        """用一次外部导入结果替换当前游戏的全部插件文本规则。"""
+        item = self._get_item(game_title)
+        _ = await item.connection.execute(DELETE_ALL_PLUGIN_TEXT_RULES)
+        for rule_record in rule_records:
+            _ = await item.connection.execute(
+                UPSERT_PLUGIN_TEXT_RULE,
+                (
+                    rule_record.plugin_index,
+                    rule_record.plugin_name,
+                    rule_record.plugin_hash,
+                    rule_record.plugin_reason,
+                    json.dumps(
+                        [rule.model_dump(mode="json") for rule in rule_record.translate_rules],
+                        ensure_ascii=False,
+                    ),
+                    rule_record.imported_at,
+                ),
+            )
+        await item.connection.commit()
+
+    async def replace_name_context_registry(
+        self,
+        game_title: str,
+        registry: NameContextRegistry,
+    ) -> None:
+        """用一次外部导入结果替换当前游戏的全部术语表条目。"""
+        item = self._get_item(game_title)
+        updated_at = registry.generated_at
+        _ = await item.connection.execute(DELETE_ALL_NAME_CONTEXT_ENTRIES)
+        for entry in registry.entries:
+            _ = await item.connection.execute(
+                INSERT_NAME_CONTEXT_ENTRY,
+                (
+                    entry.entry_id,
+                    entry.kind,
+                    entry.source_text,
+                    entry.translated_text,
+                    json.dumps(
+                        [location.model_dump(mode="json") for location in entry.locations],
+                        ensure_ascii=False,
+                    ),
+                    entry.note,
+                    updated_at,
+                ),
+            )
+        await item.connection.commit()
+
+    async def read_name_context_registry(self, game_title: str) -> NameContextRegistry | None:
+        """从数据库读取当前游戏已导入的术语表。"""
+        item = self._get_item(game_title)
+        async with item.connection.execute(SELECT_NAME_CONTEXT_ENTRIES) as cursor:
+            rows = await cursor.fetchall()
+        if not rows:
+            return None
+
+        entries: list[NameRegistryEntry] = []
+        generated_at = ""
+        for row in rows:
+            if not generated_at:
+                generated_at = row_str(row, "updated_at", item.db_path)
+            entries.append(
+                NameRegistryEntry(
+                    entry_id=row_str(row, "entry_id", item.db_path),
+                    kind=_read_name_entry_kind(row_str(row, "kind", item.db_path), item.db_path),
+                    source_text=row_str(row, "source_text", item.db_path),
+                    translated_text=row_str(row, "translated_text", item.db_path),
+                    locations=decode_name_locations(row_str(row, "locations_json", item.db_path)),
+                    note=row_str(row, "note", item.db_path),
+                )
+            )
+        return NameContextRegistry(
+            game_title=game_title,
+            generated_at=generated_at,
+            entries=entries,
+        )
+
     async def delete_translation_items_by_prefixes(self, game_title: str, prefixes: list[str]) -> int:
-        """按路径前缀批量删除主翻译表中的旧记录。"""
+        """按路径前缀批量删除主翻译表中的记录。"""
         item = self._get_item(game_title)
         deleted_rows = 0
         for prefix in prefixes:

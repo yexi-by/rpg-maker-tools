@@ -1,8 +1,8 @@
 """
 RPG Maker 原始数据结构模型模块。
 
-这里定义与 RPG Maker MZ 标准 `data/*.json` 高度对应的基础模型。插件衍生 JSON
-不再建立专用模型，避免核心流程继续背负特定游戏或插件的兼容逻辑。
+这里定义与 RPG Maker MZ 标准 `data/*.json` 高度对应的基础模型，供加载、
+提取和回写流程共享。
 """
 
 from typing import cast

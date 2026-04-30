@@ -1,8 +1,8 @@
 """
 插件文本规则驱动提取模块。
 
-本模块严格按照数据库中的插件路径规则，从 `plugins.js` 展开命中的字符串叶子。
-日文核心版只保留日文文本放行规则，不再兼容英文游戏。
+本模块按照数据库中的外部导入规则，从 `plugins.js` 展开命中的字符串叶子。
+外部规则文件是插件参数文本提取的唯一来源。
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from app.plugin_text.common import (
     jsonpath_to_location_path,
     resolve_plugin_leaves,
 )
-from app.rmmz.text_rules import TextRules
 
 
 class PluginTextExtraction:
@@ -29,18 +28,16 @@ class PluginTextExtraction:
         self,
         game_data: GameData,
         plugin_rule_records: list[PluginTextRuleRecord],
-        text_rules: TextRules,
     ) -> None:
         """初始化插件文本提取器。"""
         self.game_data: GameData = game_data
         self.plugin_rule_records: list[PluginTextRuleRecord] = plugin_rule_records
-        self.text_rules: TextRules = text_rules
 
     def extract_all_text(self) -> dict[str, TranslationData]:
         """按规则全量提取 `plugins.js` 中的可翻译文本。"""
         translation_items: list[TranslationItem] = []
         for rule_record in self.plugin_rule_records:
-            if rule_record.status != "success" or not rule_record.translate_rules:
+            if not rule_record.translate_rules:
                 continue
             if rule_record.plugin_index >= len(self.game_data.plugins_js):
                 continue
@@ -82,8 +79,6 @@ class PluginTextExtraction:
 
                 normalized_value = leaf_value.strip()
                 if not normalized_value:
-                    continue
-                if not self.text_rules.passes_plugin_text_language_filter(normalized_value):
                     continue
 
                 translation_items.append(

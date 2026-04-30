@@ -4,20 +4,28 @@ from dataclasses import dataclass
 
 
 @dataclass(slots=True)
-class PluginTextAnalysisSummary:
-    """插件文本路径分析任务摘要。"""
+class PluginRuleImportSummary:
+    """外部插件规则导入任务摘要。"""
 
-    total_plugins: int
-    success_plugins: int
-    failed_plugins: int
-    reused_success_count: int
+    imported_plugin_count: int
+    imported_rule_count: int
     deleted_translation_items: int
-    skipped_reason: str | None = None
 
-    @property
-    def has_failures(self) -> bool:
-        """判断本轮插件分析是否存在失败插件。"""
-        return self.failed_plugins > 0
+
+@dataclass(slots=True)
+class PluginJsonExportSummary:
+    """插件配置 JSON 导出任务摘要。"""
+
+    output_path: str
+    plugin_count: int
+
+
+@dataclass(slots=True)
+class NameContextImportSummary:
+    """外部术语表导入任务摘要。"""
+
+    imported_entry_count: int
+    filled_entry_count: int
 
 
 @dataclass(slots=True)
@@ -43,7 +51,18 @@ class TextTranslationSummary:
         return self.error_count > 0
 
 
+@dataclass(slots=True)
+class NameContextWriteSummary:
+    """数据库术语表写回任务摘要。"""
+
+    written_count: int
+    preserved_translation_count: int
+
+
 __all__: list[str] = [
-    "PluginTextAnalysisSummary",
+    "NameContextImportSummary",
+    "NameContextWriteSummary",
+    "PluginJsonExportSummary",
+    "PluginRuleImportSummary",
     "TextTranslationSummary",
 ]

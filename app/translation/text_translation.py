@@ -1,7 +1,7 @@
 """
 正文翻译异步调度模块。
 
-该层只负责并发调度、限流和把模型结果交给校验器，不做数据库写入和日志渲染。
+该层负责并发调度、限流和把模型结果交给校验器。数据库写入和日志渲染由应用层处理。
 """
 
 import asyncio
@@ -13,6 +13,7 @@ from app.llm.handler import LLMHandler
 from app.llm.schemas import ChatMessage
 from app.rmmz.text_rules import TextRules
 
+from .retry import request_with_recoverable_retry
 from .verify import verify_translation_batch
 
 
@@ -86,7 +87,7 @@ class TextTranslation:
         error_queue = self.error_queue
 
         text_task_setting = self.setting.text_translation
-        text_llm_setting = self.setting.llm_services.text
+        text_llm_setting = self.setting.llm
         worker_count = min(text_task_setting.worker_count, max(len(batches), 1))
         rpm = text_task_setting.rpm
         stop_event = asyncio.Event()
@@ -119,7 +120,6 @@ class TextTranslation:
                             right_queue=right_queue,
                             error_queue=error_queue,
                             llm_handler=llm_handler,
-                            service_name="text",
                             model=text_llm_setting.model,
                             retry_count=text_task_setting.retry_count,
                             retry_delay=text_task_setting.retry_delay,
@@ -144,7 +144,6 @@ class TextTranslation:
         right_queue: asyncio.Queue[list[TranslationItem] | None],
         error_queue: asyncio.Queue[list[TranslationErrorItem] | None],
         llm_handler: LLMHandler,
-        service_name: str,
         model: str,
         retry_count: int,
         retry_delay: int,
@@ -161,12 +160,13 @@ class TextTranslation:
                 if token_bucket is not None:
                     _ = await token_bucket.get()
 
-                ai_result = await llm_handler.get_ai_response(
-                    service_name=service_name,
+                ai_result = await request_with_recoverable_retry(
+                    llm_handler=llm_handler,
                     model=model,
                     messages=messages,
                     retry_count=retry_count,
                     retry_delay=retry_delay,
+                    task_label="正文翻译",
                 )
                 await verify_translation_batch(
                     ai_result=ai_result,

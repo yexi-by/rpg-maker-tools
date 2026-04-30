@@ -50,7 +50,7 @@ def coerce_json_value(value: object) -> JsonValue:
                 raise TypeError("JSON 对象键必须是字符串")
             object_result[key] = coerce_json_value(child)
         return object_result
-    raise TypeError(f"不支持的 JSON 值类型: {type(value).__name__}")
+    raise TypeError(f"JSON 值类型无法处理: {type(value).__name__}")
 
 
 __all__: list[str] = [

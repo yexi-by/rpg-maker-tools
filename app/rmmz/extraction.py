@@ -1,8 +1,8 @@
 """
 标准 data 目录文本提取模块。
 
-提取器只处理 RPG Maker MZ 官方数据文件中的玩家可见文本；插件衍生 JSON 文件
-已经在加载阶段被跳过。事件里的 357 插件命令参数仍保留，因为它属于标准事件命令。
+提取器处理 RPG Maker MZ 官方数据文件中的玩家可见文本。标准事件命令里的
+357 插件命令参数也在本模块按文本规则提取。
 """
 
 from app.rmmz.game_data import EventCommand
@@ -364,14 +364,14 @@ class DataTextExtraction:
         normalized_text = text.strip()
         if not normalized_text:
             return
-        if self.text_rules.should_skip_plugin_like_text(
+        if self.text_rules.should_skip_plugin_command_text(
             text=normalized_text,
             path_parts=path_parts,
             plugin_name=plugin_name,
             command_name=command_name,
         ):
             return
-        if not self.text_rules.passes_plugin_text_language_filter(normalized_text):
+        if not self.text_rules.passes_plugin_command_language_filter(normalized_text):
             return
 
         items.append(

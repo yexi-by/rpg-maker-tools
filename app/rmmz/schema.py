@@ -1,8 +1,8 @@
 """
 核心业务数据模型定义模块。
 
-本模块保留 CLI 核心流程仍需要的模型：翻译条目、插件文本规则、任务状态和
-标准 RPG Maker MZ 文件名常量。旧扩展模型和语言兼容模型已经删除。
+本模块定义 CLI 翻译流程使用的业务模型：翻译条目、插件文本规则和
+标准 RPG Maker MZ 文件名常量。
 """
 
 import re
@@ -16,7 +16,6 @@ from app.rmmz.text_rules import ControlSequenceSpan, JsonValue, TextRules, get_d
 
 
 type ItemType = Literal["long_text", "array", "short_text"]
-type PluginTextAnalysisStatus = Literal["success", "failed"]
 type ErrorType = Literal["AI漏翻", "控制符不匹配", "日文残留"]
 type TranslationErrorItem = tuple[
     str,
@@ -71,25 +70,29 @@ class TranslationItem(BaseModel):
             if kind == "percent":
                 if param is None:
                     raise ValueError(f"百分号控制符缺少参数: {original}")
-                placeholder = f"[P_{param}]"
+                placeholder = rules.format_percent_placeholder(param)
             elif kind == "symbol":
                 symbol_counter += 1
-                placeholder = f"[S_{symbol_counter}]"
+                placeholder = rules.format_symbol_placeholder(symbol_counter)
                 while placeholder in self.placeholder_map:
                     symbol_counter += 1
-                    placeholder = f"[S_{symbol_counter}]"
+                    placeholder = rules.format_symbol_placeholder(symbol_counter)
             elif code is not None:
                 if is_complex:
-                    existing_placeholder = complex_placeholder_map.get(original)
+                    existing_placeholder = (
+                        complex_placeholder_map.get(original)
+                        if rules.setting.reuse_identical_complex_controls
+                        else None
+                    )
                     if existing_placeholder is not None:
                         placeholder = existing_placeholder
                     else:
                         complex_control_counter += 1
-                        placeholder = f"[RM_{complex_control_counter}]"
+                        placeholder = rules.format_complex_control_placeholder(complex_control_counter)
                         complex_placeholder_map[original] = placeholder
                 else:
-                    suffix = param if param is not None else "0"
-                    placeholder = f"[{code.upper()}_{suffix}]"
+                    suffix = param if param is not None else rules.setting.no_param_control_placeholder_param
+                    placeholder = rules.format_simple_control_placeholder(code=code, param=suffix)
 
             if not placeholder:
                 raise ValueError(f"无法为控制符生成占位符: {original}")
@@ -172,23 +175,9 @@ class PluginTextRuleRecord(BaseModel):
     plugin_index: int
     plugin_name: str
     plugin_hash: str
-    prompt_hash: str
-    status: PluginTextAnalysisStatus
     plugin_reason: str = ""
     translate_rules: list[PluginTextTranslateRule] = Field(default_factory=list)
-    last_error: str | None = None
-    updated_at: str
-
-
-class PluginTextAnalysisState(BaseModel):
-    """当前游戏最近一次插件文本分析的汇总状态。"""
-
-    plugins_file_hash: str
-    prompt_hash: str
-    total_plugins: int
-    success_plugins: int
-    failed_plugins: int
-    updated_at: str
+    imported_at: str
 
 
 DATA_DIRECTORY_NAME = "data"
@@ -259,8 +248,6 @@ __all__: list[str] = [
     "JS_DIRECTORY_NAME",
     "MAP_INFOS_FILE_NAME",
     "MAP_PATTERN",
-    "PluginTextAnalysisState",
-    "PluginTextAnalysisStatus",
     "PluginTextRuleRecord",
     "PluginTextTranslateRule",
     "PLUGINS_FILE_NAME",

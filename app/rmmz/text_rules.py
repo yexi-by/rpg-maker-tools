@@ -26,7 +26,6 @@ from app.rmmz.json_types import (
 )
 
 type ControlSequenceKind = Literal["code", "symbol", "percent"]
-NON_STRICT_JAPANESE_PATTERN: re.Pattern[str] = re.compile("[ぁ-ゖゝ-ゟァ-ヺヽ-ヿ一-鿿]")
 
 type ControlSequenceSpan = tuple[
     int,
@@ -45,10 +44,14 @@ class TextRules:
 
     setting: TextRulesSetting
     simple_control_param_pattern: re.Pattern[str]
+    percent_control_param_pattern: re.Pattern[str]
+    control_code_name_pattern: re.Pattern[str]
     translation_placeholder_pattern: re.Pattern[str]
     japanese_segment_pattern: re.Pattern[str]
+    line_width_count_pattern: re.Pattern[str]
+    plugin_command_language_filter_pattern: re.Pattern[str]
     placeholder_pattern: re.Pattern[str]
-    resource_like_pattern: re.Pattern[str]
+    residual_escape_sequence_pattern: re.Pattern[str]
     pure_number_pattern: re.Pattern[str]
     hex_color_pattern: re.Pattern[str]
     css_color_function_pattern: re.Pattern[str]
@@ -67,13 +70,19 @@ class TextRules:
         return cls(
             setting=setting,
             simple_control_param_pattern=re.compile(setting.simple_control_param_pattern),
+            percent_control_param_pattern=re.compile(setting.percent_control_param_pattern),
+            control_code_name_pattern=re.compile(setting.control_code_name_pattern),
             translation_placeholder_pattern=re.compile(
                 setting.translation_placeholder_pattern,
                 re.IGNORECASE,
             ),
             japanese_segment_pattern=re.compile(setting.japanese_segment_pattern),
+            line_width_count_pattern=re.compile(setting.line_width_count_pattern),
+            plugin_command_language_filter_pattern=re.compile(
+                setting.plugin_command_language_filter_pattern
+            ),
             placeholder_pattern=re.compile(setting.placeholder_pattern),
-            resource_like_pattern=re.compile(setting.resource_like_pattern, re.IGNORECASE),
+            residual_escape_sequence_pattern=re.compile(setting.residual_escape_sequence_pattern),
             pure_number_pattern=re.compile(setting.pure_number_pattern),
             hex_color_pattern=re.compile(setting.hex_color_pattern),
             css_color_function_pattern=re.compile(
@@ -129,50 +138,59 @@ class TextRules:
         spans: list[ControlSequenceSpan] = []
         index = 0
         no_param_codes = {code.upper() for code in self.setting.no_param_alpha_control_codes}
+        control_prefix = self.setting.control_code_prefix
+        percent_prefix = self.setting.percent_control_prefix
 
         while index < len(text):
-            current_char = text[index]
-
-            if current_char == "%":
-                end_index = index + 1
-                while end_index < len(text) and text[end_index].isdigit():
-                    end_index += 1
-                if end_index > index + 1:
+            if percent_prefix and text.startswith(percent_prefix, index):
+                param_start = index + len(percent_prefix)
+                match = self.percent_control_param_pattern.match(text, param_start)
+                if match is not None and match.end() > param_start:
+                    end_index = match.end()
                     original = text[index:end_index]
-                    spans.append((index, end_index, original, "percent", None, original[1:], False))
+                    spans.append(
+                        (
+                            index,
+                            end_index,
+                            original,
+                            "percent",
+                            None,
+                            match.group(0),
+                            False,
+                        )
+                    )
                     index = end_index
                     continue
 
-            if current_char != "\\" or index + 1 >= len(text):
+            if not control_prefix or not text.startswith(control_prefix, index):
                 index += 1
                 continue
 
-            next_char = text[index + 1]
-            if next_char.isalpha():
-                code_end = index + 1
-                while code_end < len(text) and text[code_end].isalpha():
-                    code_end += 1
+            code_start = index + len(control_prefix)
+            if code_start >= len(text):
+                index += 1
+                continue
 
-                code = text[index + 1 : code_end]
-                if code_end < len(text) and text[code_end] in {"[", "<"}:
-                    open_char = text[code_end]
-                    close_char = "]" if open_char == "[" else ">"
+            code_match = self.control_code_name_pattern.match(text, code_start)
+            if code_match is not None and code_match.end() > code_start:
+                code_end = code_match.end()
+                code = code_match.group(0)
+                delimiter = self._match_control_param_delimiter(text=text, start_index=code_end)
+                if delimiter is not None:
+                    open_char, close_char = delimiter
                     match_end = _find_matching_delimiter_end(
                         text=text,
                         start_index=code_end,
                         open_char=open_char,
                         close_char=close_char,
+                        is_nested=open_char not in self.setting.non_nested_control_param_open_delimiters,
                     )
                     if match_end is not None:
                         original = text[index : match_end + 1]
                         param = text[code_end + 1 : match_end]
                         is_complex = (
-                            open_char == "<"
-                            or "\\" in param
-                            or "[" in param
-                            or "]" in param
-                            or "<" in param
-                            or ">" in param
+                            open_char in self.setting.complex_control_open_delimiters
+                            or any(marker and marker in param for marker in self.setting.complex_control_param_markers)
                             or self.simple_control_param_pattern.fullmatch(param) is None
                         )
                         spans.append(
@@ -181,20 +199,82 @@ class TextRules:
                         index = match_end + 1
                         continue
 
-                if next_char.upper() in no_param_codes:
-                    original = text[index : index + 2]
-                    spans.append((index, index + 2, original, "code", next_char, None, False))
-                    index += 2
+                if code.upper() in no_param_codes:
+                    original = text[index:code_end]
+                    spans.append((index, code_end, original, "code", code, None, False))
+                    index = code_end
                     continue
 
                 index += 1
                 continue
 
-            original = text[index : index + 2]
-            spans.append((index, index + 2, original, "symbol", None, None, False))
-            index += 2
+            if self.setting.enable_symbol_control_placeholders:
+                symbol_end = code_start + 1
+                original = text[index:symbol_end]
+                spans.append((index, symbol_end, original, "symbol", None, None, False))
+                index = symbol_end
+                continue
+
+            index += 1
 
         return spans
+
+    def format_percent_placeholder(self, param: str) -> str:
+        """按配置格式化百分号类控制符占位符。"""
+        return format_placeholder_template(
+            template=self.setting.percent_placeholder_template,
+            code="",
+            param=param,
+            index=0,
+        )
+
+    def format_symbol_placeholder(self, index: int) -> str:
+        """按配置格式化符号类控制符占位符。"""
+        return format_placeholder_template(
+            template=self.setting.symbol_placeholder_template,
+            code="",
+            param="",
+            index=index,
+        )
+
+    def format_simple_control_placeholder(self, *, code: str, param: str) -> str:
+        """按配置格式化普通控制符占位符。"""
+        visible_code = code.upper() if self.setting.placeholder_code_uppercase else code
+        return format_placeholder_template(
+            template=self.setting.simple_control_placeholder_template,
+            code=visible_code,
+            param=param,
+            index=0,
+        )
+
+    def format_complex_control_placeholder(self, index: int) -> str:
+        """按配置格式化复杂控制符占位符。"""
+        return format_placeholder_template(
+            template=self.setting.complex_control_placeholder_template,
+            code="",
+            param="",
+            index=index,
+        )
+
+    def count_line_width_chars(self, text: str) -> int:
+        """按配置统计长文本切行时计入长度的字符数量。"""
+        return len(self.line_width_count_pattern.findall(text))
+
+    def is_line_width_counted_char(self, char: str) -> bool:
+        """判断单个字符是否计入长文本切行长度。"""
+        return self.line_width_count_pattern.fullmatch(char) is not None
+
+    def _match_control_param_delimiter(
+        self,
+        *,
+        text: str,
+        start_index: int,
+    ) -> tuple[str, str] | None:
+        """按配置匹配控制符参数括号。"""
+        for open_char, close_char in self.setting.control_param_delimiters:
+            if text.startswith(open_char, start_index):
+                return open_char, close_char
+        return None
 
     def collect_placeholder_tokens(self, lines: list[str]) -> set[str]:
         """收集文本行中的翻译占位符集合。"""
@@ -213,14 +293,14 @@ class TextRules:
             for keyword in self.setting.plugin_command_text_keywords
         )
 
-    def passes_plugin_text_language_filter(self, text: str) -> bool:
-        """日文核心版只放行包含日文特征的插件文本。"""
+    def passes_plugin_command_language_filter(self, text: str) -> bool:
+        """日文核心版只放行包含日文特征的 357 插件命令文本。"""
         normalized_text = text.strip()
         if not normalized_text:
             return False
-        return NON_STRICT_JAPANESE_PATTERN.search(normalized_text) is not None
+        return self.plugin_command_language_filter_pattern.search(normalized_text) is not None
 
-    def should_skip_plugin_like_text(
+    def should_skip_plugin_command_text(
         self,
         *,
         text: str,
@@ -228,7 +308,7 @@ class TextRules:
         plugin_name: str | None = None,
         command_name: str | None = None,
     ) -> bool:
-        """判断插件类文本是否应被排除。"""
+        """判断 357 插件命令文本是否应被排除。"""
         normalized_text = text.strip()
         if not normalized_text:
             return True
@@ -266,9 +346,9 @@ class TextRules:
 
     def has_non_translatable_path_key(self, path_parts: list[str | int]) -> bool:
         """判断路径中是否包含明确不可翻译的字段名。"""
-        blocked_keys = {normalize_path_key(key) for key in self.setting.non_translatable_path_keywords}
+        blocked_keys = {self.normalize_path_key(key) for key in self.setting.non_translatable_path_keywords}
         for part in path_parts:
-            if isinstance(part, str) and normalize_path_key(part) in blocked_keys:
+            if isinstance(part, str) and self.normalize_path_key(part) in blocked_keys:
                 return True
         return False
 
@@ -298,7 +378,7 @@ class TextRules:
         """在残留校验前剥离控制符和占位符噪音。"""
         cleaned_text = self.strip_rm_control_sequences(text)
         cleaned_text = self.placeholder_pattern.sub("", cleaned_text)
-        return re.sub(r"\\[nrt]", " ", cleaned_text)
+        return self.residual_escape_sequence_pattern.sub(" ", cleaned_text)
 
     def _is_color_text(self, text: str) -> bool:
         """判断是否为颜色配置文本。"""
@@ -314,17 +394,21 @@ class TextRules:
 
     def _looks_like_script_expression(self, text: str) -> bool:
         """判断是否像脚本表达式或数据访问表达式。"""
-        if "$data" in text or "$game" in text:
+        if any(marker and marker in text for marker in self.setting.script_expression_markers):
             return True
         if self.script_concat_pattern.search(text):
             return True
-        if " ? " in text and " : " in text:
+        if self.setting.script_ternary_markers and all(
+            marker in text for marker in self.setting.script_ternary_markers
+        ):
             return True
         if self.bracket_identifier_pattern.fullmatch(text):
             return True
-        if self.dot_identifier_pattern.fullmatch(text) and text.startswith("$"):
+        if self.dot_identifier_pattern.fullmatch(text) and any(
+            text.startswith(marker) for marker in self.setting.script_call_required_markers
+        ):
             return True
-        if "$" in text and self.script_call_pattern.search(text):
+        if any(marker and marker in text for marker in self.setting.script_call_required_markers) and self.script_call_pattern.search(text):
             return True
         return False
 
@@ -356,7 +440,7 @@ class TextRules:
         if plugin_name is None or command_name is None:
             return False
 
-        field_key = _find_last_string_key(path_parts)
+        field_key = self._find_last_string_key(path_parts)
         if field_key is None:
             return False
 
@@ -371,6 +455,20 @@ class TextRules:
             item.strip().lower() for item in self.setting.excluded_plugin_command_fields
         }
 
+    def normalize_path_key(self, key: str) -> str:
+        """按配置归一化路径键名，便于黑名单匹配。"""
+        normalized_key = key.strip().lower()
+        for ignored_char in self.setting.path_key_ignored_chars:
+            normalized_key = normalized_key.replace(ignored_char, "")
+        return normalized_key
+
+    def _find_last_string_key(self, path_parts: list[str | int]) -> str | None:
+        """找出路径中最后一个字符串键名。"""
+        for part in reversed(path_parts):
+            if isinstance(part, str):
+                return self.normalize_path_key(part)
+        return None
+
 
 _DEFAULT_TEXT_RULES = TextRules.from_setting(TextRulesSetting())
 
@@ -380,29 +478,21 @@ def get_default_text_rules() -> TextRules:
     return _DEFAULT_TEXT_RULES
 
 
-def normalize_path_key(key: str) -> str:
-    """归一化路径键名，便于黑名单匹配。"""
-    return key.strip().lower().replace("_", "").replace("-", "")
-
-
-def _find_last_string_key(path_parts: list[str | int]) -> str | None:
-    """找出路径中最后一个字符串键名。"""
-    for part in reversed(path_parts):
-        if isinstance(part, str):
-            return normalize_path_key(part)
-    return None
-
-
 def _find_matching_delimiter_end(
     *,
     text: str,
     start_index: int,
     open_char: str,
     close_char: str,
+    is_nested: bool,
 ) -> int | None:
     """查找成对控制符参数的闭合位置。"""
-    if open_char == "<" and close_char == ">":
-        return _find_angle_delimiter_end(text=text, start_index=start_index)
+    if not is_nested:
+        return _find_non_nested_delimiter_end(
+            text=text,
+            start_index=start_index,
+            close_char=close_char,
+        )
 
     depth = 0
     active_quote: str | None = None
@@ -437,8 +527,29 @@ def _find_matching_delimiter_end(
     return None
 
 
-def _find_angle_delimiter_end(*, text: str, start_index: int) -> int | None:
-    """查找 `\\js<...>` 角括号参数的闭合位置。"""
+def format_placeholder_template(
+    *,
+    template: str,
+    code: str,
+    param: str,
+    index: int,
+) -> str:
+    """使用统一变量格式化占位符模板。"""
+    try:
+        return template.format(code=code, param=param, index=index)
+    except (IndexError, KeyError, ValueError) as error:
+        raise ValueError(
+            f"占位符模板格式无效，仅支持 code、param、index 变量: {template}"
+        ) from error
+
+
+def _find_non_nested_delimiter_end(
+    *,
+    text: str,
+    start_index: int,
+    close_char: str,
+) -> int | None:
+    """查找非嵌套控制符参数的闭合位置。"""
     active_quote: str | None = None
 
     for index in range(start_index + 1, len(text)):
@@ -454,7 +565,7 @@ def _find_angle_delimiter_end(*, text: str, start_index: int) -> int | None:
             active_quote = char
             continue
 
-        if char == ">":
+        if char == close_char:
             return index
 
     return None
@@ -490,6 +601,6 @@ __all__: list[str] = [
     "ensure_json_array",
     "ensure_json_object",
     "ensure_json_string_list",
+    "format_placeholder_template",
     "get_default_text_rules",
-    "normalize_path_key",
 ]

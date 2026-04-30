@@ -202,7 +202,7 @@ def jsonpath_matches_template(*, template_path: str, actual_path: str) -> bool:
 def jsonpath_to_path_parts(path: str) -> list[str | int]:
     """把受限 JSONPath 解析为路径片段列表。"""
     if not JSON_PATH_PATTERN.fullmatch(path):
-        raise ValueError(f"不支持的 JSONPath: {path}")
+        raise ValueError(f"JSONPath 超出当前规则范围: {path}")
 
     parts: list[str | int] = []
     for match in JSON_PATH_SEGMENT_PATTERN.finditer(path):

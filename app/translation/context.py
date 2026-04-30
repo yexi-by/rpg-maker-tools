@@ -2,7 +2,7 @@
 正文翻译上下文构造模块。
 
 负责把 `TranslationData` 切成适合模型请求的批次，并组装系统提示词与用户正文。
-术语表上下文已经删除，后续扩展可在这里追加新的上下文片段。
+数据库术语表索引由调用方传入。
 """
 
 from collections.abc import Iterator
@@ -10,8 +10,10 @@ from collections.abc import Iterator
 from app.rmmz.schema import TranslationData, TranslationItem
 from app.llm.schemas import ChatMessage
 from app.rmmz.text_rules import TextRules
+from app.name_context.prompt import NamePromptIndex, format_name_prompt_section
 
-USER_PROMPT_TEMPLATE = "[[地图名]]\n{display_name}\n\n[[需要翻译的正文]]\n{unit_text}"
+MAP_PROMPT_TEMPLATE = "[[地图名]]\n{display_name}"
+BODY_PROMPT_TEMPLATE = "[[需要翻译的正文]]\n{unit_text}"
 LONG_TEXT_CONTEXT_TEMPLATE = (
     "[ID]{id}\n"
     "[类型]{item_type}\n"
@@ -46,6 +48,8 @@ def iter_translation_context_batches(
     max_command_items: int,
     system_prompt: str,
     text_rules: TextRules,
+    file_name: str = "",
+    name_prompt_index: NamePromptIndex | None = None,
 ) -> Iterator[tuple[list[TranslationItem], list[ChatMessage]]]:
     """为单文件翻译数据生成上下文切批。"""
     if token_size <= 0:
@@ -83,6 +87,8 @@ def iter_translation_context_batches(
                 current_items=current_items,
                 display_name=display_name,
                 main_bodies=main_bodies,
+                file_name=file_name,
+                name_prompt_index=name_prompt_index,
             )
             current_length = 0
             current_items = []
@@ -114,6 +120,8 @@ def iter_translation_context_batches(
             current_items=current_items,
             display_name=display_name,
             main_bodies=main_bodies,
+            file_name=file_name,
+            name_prompt_index=name_prompt_index,
         )
         current_length = 0
         current_items = []
@@ -125,6 +133,8 @@ def iter_translation_context_batches(
             current_items=current_items,
             display_name=display_name,
             main_bodies=main_bodies,
+            file_name=file_name,
+            name_prompt_index=name_prompt_index,
         )
 
 
@@ -134,18 +144,31 @@ def _build_translation_batch(
     current_items: list[TranslationItem],
     display_name: str,
     main_bodies: list[str],
+    file_name: str,
+    name_prompt_index: NamePromptIndex | None,
 ) -> tuple[list[TranslationItem], list[ChatMessage]]:
     """组装单个翻译批次。"""
+    user_prompt_sections = [
+        MAP_PROMPT_TEMPLATE.format(display_name=display_name),
+    ]
+    if name_prompt_index is not None:
+        name_entries = name_prompt_index.select_for_batch(
+            file_name=file_name,
+            items=current_items,
+        )
+        name_section = format_name_prompt_section(name_entries)
+        if name_section:
+            user_prompt_sections.append(name_section)
+    user_prompt_sections.append(
+        BODY_PROMPT_TEMPLATE.format(unit_text="".join(main_bodies))
+    )
     return (
         current_items,
         [
             system_message,
             ChatMessage(
                 role="user",
-                text=USER_PROMPT_TEMPLATE.format(
-                    display_name=display_name,
-                    unit_text="".join(main_bodies),
-                ),
+                text="\n\n".join(user_prompt_sections),
             ),
         ],
     )

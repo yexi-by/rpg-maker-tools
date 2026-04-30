@@ -4,8 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from app.name_context.schemas import NameContextRegistry, NameLocation, NameRegistryEntry
 from app.persistence import GameDatabaseManager
-from app.rmmz.schema import PluginTextAnalysisState, PluginTextRuleRecord, PluginTextTranslateRule
+from app.rmmz.schema import PluginTextRuleRecord, PluginTextTranslateRule
 
 
 @pytest.mark.asyncio
@@ -32,30 +33,38 @@ async def test_database_manager_uses_injected_directory_and_closes(minimal_game_
         translated_items = await manager.read_translated_items("テストゲーム")
         assert translated_items[0].translation_lines == ["测试游戏"]
 
-        state = PluginTextAnalysisState(
-            plugins_file_hash="plugins",
-            prompt_hash="prompt",
-            total_plugins=1,
-            success_plugins=1,
-            failed_plugins=0,
-            updated_at="2026-04-30T00:00:00+00:00",
-        )
-        await manager.write_plugin_text_analysis_state("テストゲーム", state)
-        assert await manager.read_plugin_text_analysis_state("テストゲーム") == state
-
         rule = PluginTextRuleRecord(
             plugin_index=0,
             plugin_name="TestPlugin",
             plugin_hash="hash",
-            prompt_hash="prompt",
-            status="success",
             translate_rules=[
                 PluginTextTranslateRule(path_template="$['parameters']['Message']", reason="玩家可见文本")
             ],
-            updated_at="2026-04-30T00:00:00+00:00",
+            imported_at="2026-04-30T00:00:00+00:00",
         )
-        await manager.upsert_plugin_text_rule("テストゲーム", rule)
+        await manager.replace_plugin_text_rules("テストゲーム", [rule])
         assert await manager.read_plugin_text_rules("テストゲーム") == [rule]
+
+        registry = NameContextRegistry(
+            game_title="テストゲーム",
+            generated_at="2026-04-30T00:00:00+00:00",
+            entries=[
+                NameRegistryEntry(
+                    entry_id="speaker_1",
+                    kind="speaker_name",
+                    source_text="アリス",
+                    translated_text="爱丽丝",
+                    locations=[
+                        NameLocation(
+                            location_path="Map001.json/1/0/0",
+                            file_name="Map001.json",
+                        )
+                    ],
+                )
+            ],
+        )
+        await manager.replace_name_context_registry("テストゲーム", registry)
+        assert await manager.read_name_context_registry("テストゲーム") == registry
     finally:
         await manager.close()
 

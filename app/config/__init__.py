@@ -3,9 +3,7 @@
 """
 
 from .schemas import (
-    LLMServiceSetting,
-    LLMServicesSetting,
-    PluginTextAnalysisSetting,
+    LLMSetting,
     Setting,
     StrictBaseModel,
     TextRulesSetting,
@@ -14,9 +12,7 @@ from .schemas import (
 )
 
 __all__: list[str] = [
-    "LLMServiceSetting",
-    "LLMServicesSetting",
-    "PluginTextAnalysisSetting",
+    "LLMSetting",
     "Setting",
     "StrictBaseModel",
     "TextRulesSetting",

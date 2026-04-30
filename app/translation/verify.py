@@ -2,11 +2,10 @@
 正文翻译校验模块。
 
 负责解析模型返回的 JSON，按 `location_path` 映射回翻译条目，并执行漏翻、
-占位符和日文残留校验。英文残留兼容已删除。
+占位符和日文残留校验。
 """
 
 import asyncio
-import re
 
 from json_repair import repair_json
 from pydantic import RootModel
@@ -18,7 +17,6 @@ from app.observability import logger
 ERR_MISSING_KEY: ErrorType = "AI漏翻"
 ERR_PLACEHOLDER_MISMATCH: ErrorType = "控制符不匹配"
 ERR_JAPANESE_RESIDUAL: ErrorType = "日文残留"
-HANZI_PATTERN: re.Pattern[str] = re.compile(r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]")
 
 
 class TranslationResponse(RootModel[dict[str, str]]):
@@ -32,21 +30,21 @@ def _build_warning_preview(text: str, max_length: int = 40) -> str:
     return f"{text[:max_length]}..."
 
 
-def _count_hanzi(text: str) -> int:
-    """统计文本中的汉字数量。"""
-    return len(HANZI_PATTERN.findall(text))
+def _count_line_width_chars(text: str, text_rules: TextRules) -> int:
+    """统计长文本切行时计入长度的字符数量。"""
+    return text_rules.count_line_width_chars(text)
 
 
 def _find_preferred_split_position(text: str, text_rules: TextRules) -> int | None:
     """在单行上限内寻找优先切分点。"""
     best_index = -1
-    hanzi_count = 0
+    line_width_count = 0
     punctuations = set(text_rules.setting.line_split_punctuations)
 
     for index, char in enumerate(text):
-        if HANZI_PATTERN.fullmatch(char):
-            hanzi_count += 1
-        if hanzi_count > text_rules.setting.long_text_hanzi_limit:
+        if text_rules.is_line_width_counted_char(char):
+            line_width_count += 1
+        if line_width_count > text_rules.setting.long_text_line_width_limit:
             break
         if char in punctuations:
             best_index = index
@@ -59,10 +57,10 @@ def _find_preferred_split_position(text: str, text_rules: TextRules) -> int | No
 def _log_align_warning(*, location_path: str | None, line: str, reason: str, text_rules: TextRules) -> None:
     """记录长文本自动补切行失败的告警日志。"""
     logger.warning(
-        "长文本自动补切行告警: 路径={}，汉字数={}，上限={}，原因={}，内容预览={}",
+        "长文本自动补切行告警: 路径={}，计数字符数={}，上限={}，原因={}，内容预览={}",
         location_path or "<unknown>",
-        _count_hanzi(line),
-        text_rules.setting.long_text_hanzi_limit,
+        _count_line_width_chars(line, text_rules),
+        text_rules.setting.long_text_line_width_limit,
         reason,
         _build_warning_preview(line),
     )
@@ -78,17 +76,17 @@ def _expand_long_lines(
     """在还有空余行数时尝试把过长文本安全切开。"""
     expanded_lines: list[str] = []
     remaining_extra_lines = max(target_lines - len(lines), 0)
-    hanzi_limit = text_rules.setting.long_text_hanzi_limit
+    line_width_limit = text_rules.setting.long_text_line_width_limit
 
     for line in lines:
         pending_line = line
-        while _count_hanzi(pending_line) > hanzi_limit and remaining_extra_lines > 0:
+        while _count_line_width_chars(pending_line, text_rules) > line_width_limit and remaining_extra_lines > 0:
             split_position = _find_preferred_split_position(pending_line, text_rules)
             if split_position is None:
                 _log_align_warning(
                     location_path=location_path,
                     line=pending_line,
-                    reason=f"前 {hanzi_limit} 个汉字内没有可配置切分标点，无法安全补切分",
+                    reason=f"前 {line_width_limit} 个计数字符内没有可配置切分标点，无法安全补切分",
                     text_rules=text_rules,
                 )
                 break
@@ -102,7 +100,7 @@ def _expand_long_lines(
             pending_line = tail
             remaining_extra_lines -= 1
 
-        if _count_hanzi(pending_line) > hanzi_limit and remaining_extra_lines <= 0:
+        if _count_line_width_chars(pending_line, text_rules) > line_width_limit and remaining_extra_lines <= 0:
             _log_align_warning(
                 location_path=location_path,
                 line=pending_line,
@@ -145,7 +143,7 @@ def _align_lines(
         )
     else:
         for line in lines:
-            if _count_hanzi(line) > text_rules.setting.long_text_hanzi_limit:
+            if _count_line_width_chars(line, text_rules) > text_rules.setting.long_text_line_width_limit:
                 _log_align_warning(
                     location_path=location_path,
                     line=line,

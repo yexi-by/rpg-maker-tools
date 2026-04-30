@@ -1,7 +1,7 @@
 """
 正文翻译运行内去重缓存模块。
 
-该模块只服务于单次 `translate_text()` 工作流，
+该模块服务于单次 `translate_text()` 工作流，
 用于在送入提示词构造前按正文内容去重，减少同轮重复文本的模型请求量。
 
 缓存设计固定为两个容器：
@@ -21,7 +21,7 @@ class TranslationCache:
     单轮正文翻译使用的请求级去重缓存。
 
     设计约束：
-    1. 去重键只由 `original_lines`、`item_type`、`role` 组成，不包含地图名等额外上下文。
+    1. 去重键由 `original_lines`、`item_type`、`role` 组成。
     2. 首次命中的条目允许继续进入提示词构造。
     3. 后续命中的重复条目会暂存起来，等待首条成功翻译后复用结果。
     """
@@ -80,7 +80,7 @@ class TranslationCache:
             item: 已经成功翻译的首条正文。
 
         Returns:
-            之前被压掉的重复条目列表；若不存在则返回空列表。
+            同轮去重暂存的重复条目列表；若不存在则返回空列表。
         """
         cache_key: str = self.build_cache_key(item)
         return self.duplicate_items.pop(cache_key, [])
