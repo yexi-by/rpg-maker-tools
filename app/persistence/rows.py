@@ -1,20 +1,13 @@
-"""SQLite 行对象类型收窄与 JSON 字段适配。"""
+"""SQLite 行对象类型收窄工具。"""
 
 import json
 from pathlib import Path
 from typing import cast
 
 import aiosqlite
-from pydantic import TypeAdapter
 
-from app.name_context.schemas import NameLocation
-from app.rmmz.schema import ItemType, PluginTextTranslateRule
+from app.rmmz.schema import ItemType
 from app.rmmz.text_rules import coerce_json_value, ensure_json_string_list
-
-_PLUGIN_RULE_LIST_ADAPTER: TypeAdapter[list[PluginTextTranslateRule]] = TypeAdapter(
-    list[PluginTextTranslateRule]
-)
-_NAME_LOCATION_LIST_ADAPTER: TypeAdapter[list[NameLocation]] = TypeAdapter(list[NameLocation])
 
 
 def decode_string_list(raw_value: object, field_name: str) -> list[str]:
@@ -24,20 +17,6 @@ def decode_string_list(raw_value: object, field_name: str) -> list[str]:
     decoded_raw = cast(object, json.loads(raw_value))
     decoded = coerce_json_value(decoded_raw)
     return ensure_json_string_list(decoded, field_name)
-
-
-def decode_plugin_translate_rules(raw_value: str) -> list[PluginTextTranslateRule]:
-    """从数据库 JSON 文本中读取插件文本路径规则列表。"""
-    decoded_raw = cast(object, json.loads(raw_value))
-    decoded = coerce_json_value(decoded_raw)
-    return _PLUGIN_RULE_LIST_ADAPTER.validate_python(decoded)
-
-
-def decode_name_locations(raw_value: str) -> list[NameLocation]:
-    """从数据库 JSON 文本中读取标准名位置列表。"""
-    decoded_raw = cast(object, json.loads(raw_value))
-    decoded = coerce_json_value(decoded_raw)
-    return _NAME_LOCATION_LIST_ADAPTER.validate_python(decoded)
 
 
 def row_to_dict(row: aiosqlite.Row) -> dict[str, object]:
@@ -85,8 +64,6 @@ def row_item_type(row: aiosqlite.Row, key: str, db_path: Path) -> ItemType:
 
 
 __all__: list[str] = [
-    "decode_name_locations",
-    "decode_plugin_translate_rules",
     "decode_string_list",
     "row_int",
     "row_item_type",

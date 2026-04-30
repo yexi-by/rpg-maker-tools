@@ -1,68 +1,42 @@
-"""标准名上下文数据模型。"""
+"""标准名术语数据模型。"""
 
-from typing import ClassVar, Literal
+from typing import ClassVar, Self
 
-from pydantic import BaseModel, ConfigDict, Field
-
-NAME_CONTEXT_SCHEMA_VERSION = 1
-
-type NameEntryKind = Literal["speaker_name", "map_display_name"]
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class StrictNameContextModel(BaseModel):
-    """标准名上下文严格模型基类。"""
+    """标准名术语严格模型基类。"""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
 
 
-class NameLocation(StrictNameContextModel):
-    """标准名在游戏数据中的一次出现位置。"""
-
-    location_path: str
-    file_name: str
-    map_display_name: str | None = None
-    event_id: int | None = None
-    event_name: str | None = None
-    page_index: int | None = None
-    command_index: int | None = None
-    context_file: str | None = None
-
-
-class NameRegistryEntry(StrictNameContextModel):
-    """大 JSON 中的一条外部标准名记录。"""
-
-    entry_id: str
-    kind: NameEntryKind
-    source_text: str
-    translated_text: str = ""
-    locations: list[NameLocation] = Field(default_factory=list)
-    note: str = ""
-
-
 class NameContextRegistry(StrictNameContextModel):
-    """外部 Agent 填写的大 JSON 根对象。"""
+    """外部 Agent 填写的术语表。"""
 
-    schema_version: int = NAME_CONTEXT_SCHEMA_VERSION
-    game_title: str
-    generated_at: str
-    entries: list[NameRegistryEntry] = Field(default_factory=list)
+    speaker_names: dict[str, str] = Field(default_factory=dict)
+    map_display_names: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_source_names(self) -> Self:
+        """确保术语表不包含空原文。"""
+        for source_text in self.speaker_names:
+            if not source_text.strip():
+                raise ValueError("speaker_names 不能包含空原文")
+        for source_text in self.map_display_names:
+            if not source_text.strip():
+                raise ValueError("map_display_names 不能包含空原文")
+        return self
 
 
 class SpeakerDialogueContext(StrictNameContextModel):
-    """单个 `101` 名字框对应的小 JSON 对话上下文。"""
+    """单个名字对应的对白样本。"""
 
-    schema_version: int = NAME_CONTEXT_SCHEMA_VERSION
-    entry_id: str
-    source_text: str
-    location: NameLocation
+    name: str
     dialogue_lines: list[str] = Field(default_factory=list)
 
 
 __all__: list[str] = [
-    "NAME_CONTEXT_SCHEMA_VERSION",
     "NameContextRegistry",
-    "NameEntryKind",
-    "NameLocation",
-    "NameRegistryEntry",
     "SpeakerDialogueContext",
 ]

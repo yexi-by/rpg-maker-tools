@@ -1,13 +1,17 @@
 """应用运行时配置装配。"""
 
+from app.config import SettingOverrides
 from app.config.schemas import Setting
 from app.llm import LLMHandler
 from app.utils.config_loader_utils import load_setting
 
 
-def load_runtime_setting(llm_handler: LLMHandler) -> Setting:
+def load_runtime_setting(
+    llm_handler: LLMHandler,
+    overrides: SettingOverrides | None = None,
+) -> Setting:
     """加载配置，并把正文翻译模型服务注册到 LLM 门面。"""
-    setting = load_setting()
+    setting = load_setting(overrides=overrides)
     llm_handler.configure(
         base_url=setting.llm.base_url,
         api_key=setting.llm.api_key,

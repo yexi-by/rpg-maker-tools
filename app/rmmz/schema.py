@@ -17,15 +17,6 @@ from app.rmmz.text_rules import ControlSequenceSpan, JsonValue, TextRules, get_d
 
 type ItemType = Literal["long_text", "array", "short_text"]
 type ErrorType = Literal["AI漏翻", "控制符不匹配", "日文残留"]
-type TranslationErrorItem = tuple[
-    str,
-    ItemType,
-    str | None,
-    list[str],
-    list[str],
-    ErrorType,
-    list[str],
-]
 
 
 class Code(IntEnum):
@@ -45,6 +36,7 @@ class TranslationItem(BaseModel):
     location_path: str
     item_type: ItemType
     original_lines: list[str] = Field(default_factory=list)
+    source_line_paths: list[str] = Field(default_factory=list)
     original_lines_with_placeholders: list[str] = Field(default_factory=list)
     translation_lines_with_placeholders: list[str] = Field(default_factory=list)
     translation_lines: list[str] = Field(default_factory=list)
@@ -57,47 +49,45 @@ class TranslationItem(BaseModel):
         self.original_lines_with_placeholders.clear()
         self.placeholder_map.clear()
         self.placeholder_counts.clear()
-        symbol_counter = 0
-        complex_control_counter = 0
-        complex_placeholder_map: dict[str, str] = {}
+        placeholder_sources: dict[str, str] = {}
+        custom_placeholder_counter = 0
+        custom_placeholder_map: dict[str, str] = {}
 
         def replace_func(span: ControlSequenceSpan) -> str:
             """把单个控制符替换为结构化占位符。"""
-            nonlocal symbol_counter, complex_control_counter
-            _start_index, _end_index, original, kind, code, param, is_complex = span
-            placeholder = ""
-
-            if kind == "percent":
-                if param is None:
-                    raise ValueError(f"百分号控制符缺少参数: {original}")
-                placeholder = rules.format_percent_placeholder(param)
-            elif kind == "symbol":
-                symbol_counter += 1
-                placeholder = rules.format_symbol_placeholder(symbol_counter)
-                while placeholder in self.placeholder_map:
-                    symbol_counter += 1
-                    placeholder = rules.format_symbol_placeholder(symbol_counter)
-            elif code is not None:
-                if is_complex:
-                    existing_placeholder = (
-                        complex_placeholder_map.get(original)
-                        if rules.setting.reuse_identical_complex_controls
-                        else None
-                    )
-                    if existing_placeholder is not None:
-                        placeholder = existing_placeholder
-                    else:
-                        complex_control_counter += 1
-                        placeholder = rules.format_complex_control_placeholder(complex_control_counter)
-                        complex_placeholder_map[original] = placeholder
+            nonlocal custom_placeholder_counter
+            original = span.original
+            if span.placeholder is not None:
+                placeholder = span.placeholder
+            elif span.custom_template is not None:
+                existing_placeholder = custom_placeholder_map.get(original)
+                if existing_placeholder is not None:
+                    placeholder = existing_placeholder
                 else:
-                    suffix = param if param is not None else rules.setting.no_param_control_placeholder_param
-                    placeholder = rules.format_simple_control_placeholder(code=code, param=suffix)
-
-            if not placeholder:
+                    custom_placeholder_counter += 1
+                    placeholder = rules.format_custom_placeholder(
+                        template=span.custom_template,
+                        index=custom_placeholder_counter,
+                    )
+                    custom_placeholder_map[original] = placeholder
+            else:
                 raise ValueError(f"无法为控制符生成占位符: {original}")
-            if placeholder not in self.placeholder_map:
+
+            existing_original = self.placeholder_map.get(placeholder)
+            existing_source = placeholder_sources.get(placeholder)
+            if (
+                existing_original is not None
+                and existing_original != original
+                and (existing_source == "custom" or span.source == "custom")
+            ):
+                detail = f"{existing_original} / {original}"
+                raise ValueError(
+                    f"自定义占位符 {placeholder} 同时匹配了多个不同片段: {detail}"
+                )
+
+            if existing_original is None:
                 self.placeholder_map[placeholder] = original
+                placeholder_sources[placeholder] = span.source
             self.placeholder_counts[placeholder] = self.placeholder_counts.get(placeholder, 0) + 1
             return placeholder
 
@@ -155,18 +145,23 @@ class TranslationItem(BaseModel):
         self.translation_lines = new_translation_lines
 
 
+class TranslationErrorItem(BaseModel):
+    """正文翻译错误记录。"""
+
+    location_path: str
+    item_type: ItemType
+    role: str | None
+    original_lines: list[str] = Field(default_factory=list)
+    translation_lines: list[str] = Field(default_factory=list)
+    error_type: ErrorType
+    error_detail: list[str] = Field(default_factory=list)
+
+
 class TranslationData(BaseModel):
     """单个文件维度的翻译数据集合。"""
 
     display_name: str | None
     translation_items: list[TranslationItem] = Field(default_factory=list)
-
-
-class PluginTextTranslateRule(BaseModel):
-    """插件文本路径规则。"""
-
-    path_template: str
-    reason: str
 
 
 class PluginTextRuleRecord(BaseModel):
@@ -175,9 +170,22 @@ class PluginTextRuleRecord(BaseModel):
     plugin_index: int
     plugin_name: str
     plugin_hash: str
-    plugin_reason: str = ""
-    translate_rules: list[PluginTextTranslateRule] = Field(default_factory=list)
-    imported_at: str
+    path_templates: list[str] = Field(default_factory=list)
+
+
+class EventCommandParameterFilter(BaseModel):
+    """事件指令参数匹配条件。"""
+
+    index: int = Field(ge=0)
+    value: str
+
+
+class EventCommandTextRuleRecord(BaseModel):
+    """事件指令文本路径规则快照。"""
+
+    command_code: int = Field(ge=0)
+    parameter_filters: list[EventCommandParameterFilter] = Field(default_factory=list)
+    path_templates: list[str] = Field(default_factory=list)
 
 
 DATA_DIRECTORY_NAME = "data"
@@ -242,6 +250,8 @@ __all__: list[str] = [
     "DATA_DIRECTORY_NAME",
     "DATA_ORIGIN_DIRECTORY_NAME",
     "ErrorType",
+    "EventCommandParameterFilter",
+    "EventCommandTextRuleRecord",
     "FIXED_FILE_NAMES",
     "GameData",
     "ItemType",
@@ -249,7 +259,6 @@ __all__: list[str] = [
     "MAP_INFOS_FILE_NAME",
     "MAP_PATTERN",
     "PluginTextRuleRecord",
-    "PluginTextTranslateRule",
     "PLUGINS_FILE_NAME",
     "PLUGINS_JS_PATTERN",
     "PLUGINS_ORIGIN_FILE_NAME",

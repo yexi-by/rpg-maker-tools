@@ -1,20 +1,18 @@
-"""外部标准名上下文导出、注入与写回测试。"""
+"""外部标准名术语导出、注入与写回测试。"""
 
 from pathlib import Path
 
 import pytest
 
 from app.application.file_writer import reset_writable_copies
-from app.llm.schemas import ChatMessage
 from app.name_context import (
     NameContextRegistry,
-    NameLocation,
     NamePromptIndex,
-    NameRegistryEntry,
     SpeakerDialogueContext,
     apply_name_context_translations,
-    export_name_context_files,
+    export_name_context_artifacts,
 )
+from app.name_context.extraction import build_speaker_sample_file_name
 from app.rmmz import load_game_data
 from app.rmmz.schema import TranslationData, TranslationItem
 from app.rmmz.text_rules import ensure_json_array, ensure_json_object, get_default_text_rules
@@ -22,14 +20,13 @@ from app.translation import iter_translation_context_batches
 
 
 @pytest.mark.asyncio
-async def test_export_name_context_writes_registry_and_speaker_contexts(
+async def test_export_name_context_writes_simple_registry_and_grouped_contexts(
     minimal_game_dir: Path,
     tmp_path: Path,
 ) -> None:
-    """导出命令需要生成大 JSON 和每个 `101` 的小 JSON。"""
+    """导出命令生成极简术语表和按名字聚合的对白样本。"""
     game_data = await load_game_data(minimal_game_dir)
-    summary = await export_name_context_files(
-        game_title="テストゲーム",
+    summary = await export_name_context_artifacts(
         game_data=game_data,
         output_dir=tmp_path / "name-context",
     )
@@ -37,50 +34,81 @@ async def test_export_name_context_writes_registry_and_speaker_contexts(
     registry = NameContextRegistry.model_validate_json(
         summary.registry_path.read_text(encoding="utf-8")
     )
-    source_texts = {entry.source_text for entry in registry.entries}
 
-    assert "始まりの町" in source_texts
-    assert "アリス" in source_texts
-    assert summary.context_file_count == 3
+    assert registry.speaker_names == {"アリス": "", "敵": "", "村人": ""}
+    assert registry.map_display_names == {"始まりの町": ""}
+    assert summary.sample_file_count == 3
 
-    alice_context_path = next(summary.context_dir.glob("*CommonEvents_json_1_0*.json"))
-    alice_context = SpeakerDialogueContext.model_validate_json(
-        alice_context_path.read_text(encoding="utf-8")
+    context_payloads = [
+        SpeakerDialogueContext.model_validate_json(path.read_text(encoding="utf-8"))
+        for path in summary.sample_dir.glob("*.json")
+    ]
+    contexts_by_name = {context.name: context.dialogue_lines for context in context_payloads}
+    assert contexts_by_name["アリス"] == ["こんにちは"]
+    assert contexts_by_name["村人"] == ["マップこんにちは"]
+    assert (summary.sample_dir / "アリス.json").exists()
+
+
+def test_speaker_sample_file_name_uses_readable_source_name() -> None:
+    """对白样本文件名直接使用清洗后的原文名字。"""
+    assert build_speaker_sample_file_name("パティ") == "パティ.json"
+    assert build_speaker_sample_file_name("A/B") == "A／B.json"
+    assert build_speaker_sample_file_name("???") == "？？？.json"
+
+
+@pytest.mark.asyncio
+async def test_name_context_skips_actor_name_control_variables(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """名字框中的角色名变量不会进入术语表、提示词和写回。"""
+    game_data = await load_game_data(minimal_game_dir)
+    common_events = ensure_json_array(game_data.writable_data["CommonEvents.json"], "CommonEvents")
+    event = ensure_json_object(common_events[1], "CommonEvents[1]")
+    commands = ensure_json_array(event["list"], "CommonEvents[1].list")
+    name_command = ensure_json_object(commands[0], "CommonEvents[1].list[0]")
+    parameters = ensure_json_array(name_command["parameters"], "CommonEvents[1].list[0].parameters")
+    parameters[4] = "\\n[1]："
+    common_event = game_data.common_events[1]
+    assert common_event is not None
+    common_event.commands[0].parameters[4] = "\\n[1]："
+    game_data.data["CommonEvents.json"] = game_data.writable_data["CommonEvents.json"]
+
+    summary = await export_name_context_artifacts(
+        game_data=game_data,
+        output_dir=tmp_path / "name-context",
     )
-    assert alice_context.dialogue_lines == ["こんにちは"]
+    registry = NameContextRegistry.model_validate_json(
+        summary.registry_path.read_text(encoding="utf-8")
+    )
+
+    assert "\\n[1]：" not in registry.speaker_names
+
+    prompt_index = NamePromptIndex.from_registry(
+        NameContextRegistry(speaker_names={"\\N[1]": "玩家"}, map_display_names={})
+    )
+    assert prompt_index.entries == []
+
+    reset_writable_copies(game_data)
+    written_count = apply_name_context_translations(
+        game_data,
+        NameContextRegistry(speaker_names={"\\n[1]：": "玩家："}, map_display_names={}),
+    )
+
+    assert written_count == 0
+    current_events = ensure_json_array(game_data.writable_data["CommonEvents.json"], "CommonEvents")
+    current_event = ensure_json_object(current_events[1], "CommonEvents[1]")
+    current_commands = ensure_json_array(current_event["list"], "CommonEvents[1].list")
+    current_name_command = ensure_json_object(current_commands[0], "CommonEvents[1].list[0]")
+    current_parameters = ensure_json_array(current_name_command["parameters"], "CommonEvents[1].list[0].parameters")
+    assert current_parameters[4] == "\\n[1]："
 
 
 def test_translation_prompt_injects_filled_name_context() -> None:
-    """正文提示词会注入外部 Agent 已填写的大 JSON 标准名。"""
+    """正文提示词会注入已填写的术语表。"""
     registry = NameContextRegistry(
-        game_title="テストゲーム",
-        generated_at="2026-04-30T00:00:00+00:00",
-        entries=[
-            NameRegistryEntry(
-                entry_id="speaker_1",
-                kind="speaker_name",
-                source_text="村人",
-                translated_text="村民",
-                locations=[
-                    NameLocation(
-                        location_path="Map001.json/1/0/0",
-                        file_name="Map001.json",
-                    )
-                ],
-            ),
-            NameRegistryEntry(
-                entry_id="map_1",
-                kind="map_display_name",
-                source_text="始まりの町",
-                translated_text="起始之镇",
-                locations=[
-                    NameLocation(
-                        location_path="Map001.json/displayName",
-                        file_name="Map001.json",
-                    )
-                ],
-            ),
-        ],
+        speaker_names={"村人": "村民"},
+        map_display_names={"始まりの町": "起始之镇"},
     )
     data = TranslationData(
         display_name="始まりの町",
@@ -102,12 +130,10 @@ def test_translation_prompt_injects_filled_name_context() -> None:
             max_command_items=3,
             system_prompt="系统提示",
             text_rules=get_default_text_rules(),
-            file_name="Map001.json",
             name_prompt_index=NamePromptIndex.from_registry(registry),
         )
     )
-    messages: list[ChatMessage] = batches[0][1]
-    user_prompt = messages[1].text
+    user_prompt = batches[0].messages[1].text
 
     assert "[[术语表]]" in user_prompt
     assert "name_registry.json" not in user_prompt
@@ -122,37 +148,11 @@ def test_translation_prompt_injects_filled_name_context() -> None:
 async def test_apply_name_context_translations_updates_101_and_map_display_name(
     minimal_game_dir: Path,
 ) -> None:
-    """已填写的大 JSON 可以直接写回名字框和地图显示名。"""
+    """已填写术语表可以写回名字框和地图显示名。"""
     game_data = await load_game_data(minimal_game_dir)
     registry = NameContextRegistry(
-        game_title="テストゲーム",
-        generated_at="2026-04-30T00:00:00+00:00",
-        entries=[
-            NameRegistryEntry(
-                entry_id="speaker_1",
-                kind="speaker_name",
-                source_text="村人",
-                translated_text="村民",
-                locations=[
-                    NameLocation(
-                        location_path="Map001.json/1/0/0",
-                        file_name="Map001.json",
-                    )
-                ],
-            ),
-            NameRegistryEntry(
-                entry_id="map_1",
-                kind="map_display_name",
-                source_text="始まりの町",
-                translated_text="起始之镇",
-                locations=[
-                    NameLocation(
-                        location_path="Map001.json/displayName",
-                        file_name="Map001.json",
-                    )
-                ],
-            ),
-        ],
+        speaker_names={"村人": "村民"},
+        map_display_names={"始まりの町": "起始之镇"},
     )
 
     reset_writable_copies(game_data)

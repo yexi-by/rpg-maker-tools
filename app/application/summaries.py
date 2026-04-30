@@ -21,6 +21,23 @@ class PluginJsonExportSummary:
 
 
 @dataclass(slots=True)
+class EventCommandJsonExportSummary:
+    """事件指令参数 JSON 导出任务摘要。"""
+
+    output_path: str
+    command_count: int
+
+
+@dataclass(slots=True)
+class EventCommandRuleImportSummary:
+    """事件指令规则导入任务摘要。"""
+
+    imported_rule_group_count: int
+    imported_path_rule_count: int
+    deleted_translation_items: int
+
+
+@dataclass(slots=True)
 class NameContextImportSummary:
     """外部术语表导入任务摘要。"""
 
@@ -60,6 +77,8 @@ class NameContextWriteSummary:
 
 
 __all__: list[str] = [
+    "EventCommandJsonExportSummary",
+    "EventCommandRuleImportSummary",
     "NameContextImportSummary",
     "NameContextWriteSummary",
     "PluginJsonExportSummary",

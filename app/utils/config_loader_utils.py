@@ -10,6 +10,7 @@ import tomllib
 from pathlib import Path
 from typing import cast
 
+from app.config.overrides import SettingOverrides, apply_setting_overrides
 from app.config.schemas import Setting
 from app.observability.logging import logger
 
@@ -23,12 +24,20 @@ def resolve_setting_path(setting_path: str | Path | None = None) -> Path:
     return Path(setting_path).resolve()
 
 
-def load_setting(setting_path: str | Path | None = None) -> Setting:
+def load_setting(
+    setting_path: str | Path | None = None,
+    overrides: SettingOverrides | None = None,
+) -> Setting:
     """加载并校验当前配置。"""
     resolved_setting_path = resolve_setting_path(setting_path)
     raw_config = _read_toml_data(resolved_setting_path)
+    _inject_prompt_texts(
+        raw_config=raw_config,
+        base_dir=resolved_setting_path.parent,
+        overrides=overrides,
+    )
+    apply_setting_overrides(raw_config=raw_config, overrides=overrides)
     raw_config_snapshot = copy.deepcopy(raw_config)
-    _inject_prompt_texts(raw_config=raw_config, base_dir=resolved_setting_path.parent)
 
     setting = Setting.model_validate(raw_config)
     logger.info(
@@ -36,6 +45,7 @@ def load_setting(setting_path: str | Path | None = None) -> Setting:
             setting=setting,
             setting_path=resolved_setting_path,
             raw_config=raw_config_snapshot,
+            overrides=overrides,
         )
     )
     return setting
@@ -53,14 +63,31 @@ def _read_toml_data(setting_path: Path) -> dict[str, object]:
     return cast(dict[str, object], tomllib.loads(raw_setting))
 
 
-def _inject_prompt_texts(raw_config: dict[str, object], base_dir: Path) -> None:
+def _inject_prompt_texts(
+    raw_config: dict[str, object],
+    base_dir: Path,
+    overrides: SettingOverrides | None,
+) -> None:
     """把提示词文件内容注入配置字典。"""
-    _inject_text_translation_prompt_text(raw_config=raw_config, base_dir=base_dir)
+    _inject_text_translation_prompt_text(
+        raw_config=raw_config,
+        base_dir=base_dir,
+        overrides=overrides,
+    )
 
 
-def _inject_text_translation_prompt_text(raw_config: dict[str, object], base_dir: Path) -> None:
+def _inject_text_translation_prompt_text(
+    raw_config: dict[str, object],
+    base_dir: Path,
+    overrides: SettingOverrides | None,
+) -> None:
     """注入正文翻译提示词文本。"""
     text_translation = _read_config_section(raw_config, "text_translation")
+    if overrides is not None and overrides.text_translation_system_prompt is not None:
+        text_translation["system_prompt_file"] = "<cli>"
+        text_translation["system_prompt"] = overrides.text_translation_system_prompt
+        return
+
     prompt_file = text_translation.get("system_prompt_file")
     if not isinstance(prompt_file, str) or not prompt_file.strip():
         raise ValueError("配置文件中缺少 text_translation.system_prompt_file 配置项")
@@ -93,6 +120,7 @@ def _build_setting_summary(
     setting: Setting,
     setting_path: Path,
     raw_config: dict[str, object],
+    overrides: SettingOverrides | None,
 ) -> str:
     """构造适合直接输出到日志的配置摘要。"""
     text_service = setting.llm
@@ -104,9 +132,13 @@ def _build_setting_summary(
         f"正文接口: OpenAI 兼容 / 模型 [tag.count]{text_service.model}[/tag.count] / 地址 [tag.path]{text_service.base_url}[/tag.path] / 超时 [tag.count]{text_service.timeout}[/tag.count] 秒",
         f"正文切块: 目标 [tag.count]{setting.translation_context.token_size}[/tag.count] token，换算系数 [tag.count]{setting.translation_context.factor}[/tag.count]，同角色最多连续 [tag.count]{setting.translation_context.max_command_items}[/tag.count] 条",
         f"正文翻译: [tag.count]{setting.text_translation.worker_count}[/tag.count] 个 worker，RPM [tag.count]{setting.text_translation.rpm or '不限'}[/tag.count]，失败重试 [tag.count]{setting.text_translation.retry_count}[/tag.count] 次，间隔 [tag.count]{setting.text_translation.retry_delay}[/tag.count] 秒",
-        f"文本规则: 357 关键词 [tag.count]{len(setting.text_rules.plugin_command_text_keywords)}[/tag.count] 个，不可翻译键 [tag.count]{len(setting.text_rules.non_translatable_path_keywords)}[/tag.count] 个，行切分标点 [tag.count]{len(setting.text_rules.line_split_punctuations)}[/tag.count] 个",
+        f"事件指令参数: 默认导出编码 [tag.count]{', '.join(map(str, setting.event_command_text.default_command_codes))}[/tag.count]",
+        f"写回字体: [tag.path]{setting.write_back.replacement_font_path or '未配置'}[/tag.path]",
+        f"文本规则: 行切分标点 [tag.count]{len(setting.text_rules.line_split_punctuations)}[/tag.count] 个，长文本宽度 [tag.count]{setting.text_rules.long_text_line_width_limit}[/tag.count]，包裹标点 [tag.count]{len(setting.text_rules.strip_wrapping_punctuation_pairs)}[/tag.count] 组",
         f"提示词文件: 正文=[tag.path]{text_prompt_file}[/tag.path]",
     ]
+    if overrides is not None and overrides.has_any():
+        lines.append("CLI 覆盖: 已应用本次命令传入的配置值")
     return "\n".join(lines)
 
 

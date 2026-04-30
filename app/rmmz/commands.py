@@ -29,7 +29,7 @@ def iter_all_commands(
 
     Yields:
         (path, display_name, command) 形式的三元组：
-        - path: list[str | int]，用于精确定位指令的路径数组（如 ["Map001.json", 1, 0, 5]）。
+        - path: list[str | int]，用于精确定位指令的路径数组（如 ["地图文件.json", 1, 0, 5]）。
         - display_name: str，指令所属地图的显示名称（公共事件和敌群返回固定文件名）。
         - command: EventCommand，当前事件指令对象。
     """

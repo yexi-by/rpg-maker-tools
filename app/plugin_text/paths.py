@@ -1,4 +1,4 @@
-"""插件参数树展开与受限 JSONPath 工具。"""
+"""JSON 参数树展开与受限 JSONPath 工具。"""
 
 import json
 import re
@@ -18,7 +18,7 @@ JSON_PATH_SEGMENT_PATTERN: re.Pattern[str] = re.compile(
 
 
 class ResolvedLeaf(BaseModel):
-    """单个插件参数树展开后的叶子节点。"""
+    """参数树展开后的叶子节点。"""
 
     path: str
     value: str | int | float | bool | None
@@ -32,10 +32,26 @@ def resolve_plugin_leaves(plugin: dict[str, JsonValue]) -> list[ResolvedLeaf]:
     if not isinstance(parameters, dict):
         return []
 
+    return resolve_json_leaves(
+        value=parameters,
+        root_path="$['parameters']",
+    )
+
+
+def resolve_event_command_leaves(parameters: list[JsonValue]) -> list[ResolvedLeaf]:
+    """递归展开事件指令参数数组，提取全部叶子节点。"""
+    return resolve_json_leaves(
+        value={"parameters": parameters},
+        root_path="$",
+    )
+
+
+def resolve_json_leaves(*, value: JsonValue, root_path: str) -> list[ResolvedLeaf]:
+    """从任意 JSON 值根节点递归展开叶子路径。"""
     leaves: list[ResolvedLeaf] = []
     walk_plugin_value(
-        value=parameters,
-        current_path="$['parameters']",
+        value=value,
+        current_path=root_path,
         from_json_string=False,
         leaves=leaves,
     )
@@ -229,6 +245,21 @@ def jsonpath_to_location_path(*, json_path: str, plugin_index: int) -> str:
     return "/".join(normalized_parts)
 
 
+def jsonpath_to_event_command_location_path(
+    *,
+    json_path: str,
+    command_location_path: str,
+) -> str:
+    """把事件指令 JSONPath 转成可回写的正文定位路径。"""
+    path_parts = jsonpath_to_path_parts(json_path)
+    if not path_parts or path_parts[0] != "parameters":
+        raise ValueError(f"事件指令路径必须从 parameters 开始: {json_path}")
+
+    normalized_parts = [command_location_path]
+    normalized_parts.extend(str(part) for part in path_parts)
+    return "/".join(normalized_parts)
+
+
 def unescape_jsonpath_key(key: str) -> str:
     """反转义 JSONPath 里的对象键。"""
     return key.replace("\\'", "'").replace("\\\\", "\\")
@@ -240,6 +271,9 @@ __all__: list[str] = [
     "expand_rule_to_leaf_paths",
     "jsonpath_matches_template",
     "jsonpath_to_location_path",
+    "jsonpath_to_event_command_location_path",
     "jsonpath_to_path_parts",
+    "resolve_event_command_leaves",
+    "resolve_json_leaves",
     "resolve_plugin_leaves",
 ]

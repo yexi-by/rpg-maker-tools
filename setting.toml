@@ -1,7 +1,7 @@
 [llm]
 base_url = "https://api.deepseek.com"
 api_key = "YOUR_TEXT_API_KEY"
-model = "deepseek-chat"
+model = "deepseek-v4-pro"
 timeout = 600
 
 [translation_context]
@@ -16,78 +16,20 @@ retry_count = 3
 retry_delay = 2
 system_prompt_file = "prompts/text_translation_system.txt"
 
+[event_command_text]
+default_command_codes = [357]
+
+[write_back]
+replacement_font_path = "fonts/NotoSansSC-Regular.ttf"
+
 [text_rules]
 strip_wrapping_punctuation_pairs = [["「", "」"]]
-plugin_command_text_keywords = ["text", "message", "name", "desc"]
-plugin_command_excluded_keys = ["filename", "fontname"]
-non_translatable_path_keywords = [
-  "file",
-  "filename",
-  "filepath",
-  "font",
-  "fontface",
-  "fontname",
-  "icon",
-  "id",
-  "image",
-  "img",
-  "path",
-  "picture",
-  "source",
-  "src",
-  "symbol",
-  "url",
-]
-excluded_plugin_names = []
-excluded_plugin_command_fields = []
-boolean_texts = ["true", "false"]
-generic_enum_texts = ["auto", "bottom", "center", "default", "false", "left", "none", "off", "on", "right", "top", "true"]
-file_like_suffixes = [
-  ".aac", ".avi", ".bmp", ".css", ".csv", ".flac", ".gif", ".jpeg", ".jpg",
-  ".js", ".json", ".m4a", ".mid", ".midi", ".mov", ".mp3", ".mp4", ".ogg",
-  ".otf", ".png", ".svg", ".tif", ".ttf", ".txt", ".wav", ".webm", ".webp",
-  ".woff", ".woff2",
-]
-no_param_alpha_control_codes = ["G"]
 allowed_japanese_chars = ["っ", "ッ", "ー", "・", "。", "～", "…"]
 allowed_japanese_tail_chars = ["あ", "い", "う", "え", "お", "っ", "ッ", "ん", "ー", "よ", "ね", "な", "か"]
 line_split_punctuations = ["，", "。", ",", "."]
-long_text_line_width_limit = 30
+long_text_line_width_limit = 47
 line_width_count_pattern = "[\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uF900-\\uFAFF]"
-control_code_prefix = "\\"
-percent_control_prefix = "%"
-percent_control_param_pattern = "\\d+"
-control_code_name_pattern = "[A-Za-z]+"
-control_param_delimiters = [["[", "]"], ["<", ">"]]
-non_nested_control_param_open_delimiters = ["<"]
-complex_control_open_delimiters = ["<"]
-complex_control_param_markers = ["\\", "[", "]", "<", ">"]
-enable_symbol_control_placeholders = true
-placeholder_code_uppercase = true
-no_param_control_placeholder_param = "0"
-percent_placeholder_template = "[P_{param}]"
-symbol_placeholder_template = "[S_{index}]"
-simple_control_placeholder_template = "[{code}_{param}]"
-complex_control_placeholder_template = "[RM_{index}]"
-reuse_identical_complex_controls = true
-simple_control_param_pattern = "[A-Za-z0-9_]+"
-translation_placeholder_pattern = "\\[[A-Z]+(?:_[^\\]]+)?\\]"
+source_text_required_pattern = "[\\u3040-\\u309F\\u30A0-\\u30FF\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uF900-\\uFAFF]+"
 japanese_segment_pattern = "[\\u3040-\\u309F\\u30A0-\\u30FF]+"
-plugin_command_language_filter_pattern = "[ぁ-ゖゝ-ゟァ-ヺヽ-ヿ一-鿿]"
-placeholder_pattern = "\\[[A-Z]+(?:_[^\\]]+)?\\]"
 residual_escape_sequence_pattern = "\\\\[nrt]"
-pure_number_pattern = "[-+]?\\d+(?:\\.\\d+)?"
-hex_color_pattern = "#[0-9A-Fa-f]{6,8}"
-css_color_function_pattern = "(?:rgb|rgba|hsl|hsla)\\([^)]*\\)"
-resource_path_pattern = "(?:[A-Za-z]:)?(?:[A-Za-z0-9_.-]+[\\\\/])+[A-Za-z0-9_.-]+"
-snake_case_pattern = "[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+"
-camel_case_pattern = "(?:[a-z]+(?:[A-Z][a-z0-9]+)+|[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+)"
-bracket_identifier_pattern = "\\$?[A-Za-z_][A-Za-z0-9_]*\\[[^\\]]+\\](?:\\.[A-Za-z_][A-Za-z0-9_]*)*"
-dot_identifier_pattern = "\\$?[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)+"
-script_concat_pattern = "(?:['\\\"].*['\\\"]\\s*\\+\\s*|\\+\\s*['\\\"].*['\\\"])"
-script_call_pattern = "\\$?[A-Za-z_][A-Za-z0-9_]*\\([^)]*\\)"
-script_expression_markers = ["$data", "$game"]
-script_ternary_markers = [" ? ", " : "]
-script_call_required_markers = ["$"]
-path_key_ignored_chars = ["_", "-"]
-non_content_after_control_pattern = "[\\s\\.\\,\\:\\;\\-\\+\\*\\/\\\\\\(\\)\\[\\]\\{\\}<>=!?'\\\"%]*"
+

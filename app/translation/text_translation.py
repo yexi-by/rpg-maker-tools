@@ -10,9 +10,9 @@ from collections.abc import AsyncIterator
 from app.config import Setting
 from app.rmmz.schema import TranslationErrorItem, TranslationItem
 from app.llm.handler import LLMHandler
-from app.llm.schemas import ChatMessage
 from app.rmmz.text_rules import TextRules
 
+from .batch import TranslationBatch
 from .retry import request_with_recoverable_retry
 from .verify import verify_translation_batch
 
@@ -33,7 +33,7 @@ class TextTranslation:
         self,
         *,
         llm_handler: LLMHandler,
-        batches: list[tuple[list[TranslationItem], list[ChatMessage]]],
+        batches: list[TranslationBatch],
     ) -> None:
         """启动正文翻译后台并发执行流程。"""
         if self._runner_task is not None:
@@ -78,7 +78,7 @@ class TextTranslation:
         self,
         *,
         llm_handler: LLMHandler,
-        batches: list[tuple[list[TranslationItem], list[ChatMessage]]],
+        batches: list[TranslationBatch],
     ) -> None:
         """管理并发翻译的核心调度器。"""
         if self.right_queue is None or self.error_queue is None:
@@ -92,7 +92,7 @@ class TextTranslation:
         rpm = text_task_setting.rpm
         stop_event = asyncio.Event()
 
-        task_queue: asyncio.Queue[tuple[list[TranslationItem], list[ChatMessage]] | None] = asyncio.Queue()
+        task_queue: asyncio.Queue[TranslationBatch | None] = asyncio.Queue()
         for batch in batches:
             await task_queue.put(batch)
         for _ in range(worker_count):
@@ -140,7 +140,7 @@ class TextTranslation:
     async def _worker(
         self,
         *,
-        task_queue: asyncio.Queue[tuple[list[TranslationItem], list[ChatMessage]] | None],
+        task_queue: asyncio.Queue[TranslationBatch | None],
         right_queue: asyncio.Queue[list[TranslationItem] | None],
         error_queue: asyncio.Queue[list[TranslationErrorItem] | None],
         llm_handler: LLMHandler,
@@ -156,21 +156,20 @@ class TextTranslation:
                 if batch is None:
                     return
 
-                items, messages = batch
                 if token_bucket is not None:
                     _ = await token_bucket.get()
 
                 ai_result = await request_with_recoverable_retry(
                     llm_handler=llm_handler,
                     model=model,
-                    messages=messages,
+                    messages=batch.messages,
                     retry_count=retry_count,
                     retry_delay=retry_delay,
                     task_label="正文翻译",
                 )
                 await verify_translation_batch(
                     ai_result=ai_result,
-                    items=items,
+                    items=batch.items,
                     right_queue=right_queue,
                     error_queue=error_queue,
                     text_rules=self.text_rules,
@@ -181,7 +180,7 @@ class TextTranslation:
     async def _wait_task_queue_done(
         self,
         *,
-        task_queue: asyncio.Queue[tuple[list[TranslationItem], list[ChatMessage]] | None],
+        task_queue: asyncio.Queue[TranslationBatch | None],
         stop_event: asyncio.Event,
     ) -> None:
         """等待任务队列消费完成，并通知限流协程退出。"""

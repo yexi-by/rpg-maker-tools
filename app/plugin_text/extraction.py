@@ -14,6 +14,7 @@ from app.rmmz.schema import (
     TranslationData,
     TranslationItem,
 )
+from app.rmmz.text_rules import TextRules, get_default_text_rules
 from app.plugin_text.common import (
     expand_rule_to_leaf_paths,
     jsonpath_to_location_path,
@@ -28,16 +29,18 @@ class PluginTextExtraction:
         self,
         game_data: GameData,
         plugin_rule_records: list[PluginTextRuleRecord],
+        text_rules: TextRules | None = None,
     ) -> None:
         """初始化插件文本提取器。"""
         self.game_data: GameData = game_data
         self.plugin_rule_records: list[PluginTextRuleRecord] = plugin_rule_records
+        self.text_rules: TextRules = text_rules if text_rules is not None else get_default_text_rules()
 
     def extract_all_text(self) -> dict[str, TranslationData]:
         """按规则全量提取 `plugins.js` 中的可翻译文本。"""
         translation_items: list[TranslationItem] = []
         for rule_record in self.plugin_rule_records:
-            if not rule_record.translate_rules:
+            if not rule_record.path_templates:
                 continue
             if rule_record.plugin_index >= len(self.game_data.plugins_js):
                 continue
@@ -63,9 +66,9 @@ class PluginTextExtraction:
         translation_items: list[TranslationItem] = []
         seen_leaf_paths: set[str] = set()
 
-        for translate_rule in rule_record.translate_rules:
+        for path_template in rule_record.path_templates:
             matched_paths = expand_rule_to_leaf_paths(
-                path_template=translate_rule.path_template,
+                path_template=path_template,
                 resolved_leaves=resolved_leaves,
             )
             for leaf_path in matched_paths:
@@ -78,7 +81,7 @@ class PluginTextExtraction:
                     continue
 
                 normalized_value = leaf_value.strip()
-                if not normalized_value:
+                if not self.text_rules.should_translate_source_text(normalized_value):
                     continue
 
                 translation_items.append(

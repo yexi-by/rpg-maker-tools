@@ -10,23 +10,41 @@ from pathlib import Path
 from typing import ClassVar, Self
 
 from app.application.file_writer import reset_writable_copies, write_game_files
+from app.application.font_replacement import apply_font_replacement
 from app.application.runtime import load_runtime_setting
 from app.application.summaries import (
+    EventCommandJsonExportSummary,
+    EventCommandRuleImportSummary,
     NameContextImportSummary,
     NameContextWriteSummary,
     PluginJsonExportSummary,
     PluginRuleImportSummary,
     TextTranslationSummary,
 )
+from app.config import (
+    SettingOverrides,
+    load_custom_placeholder_rules,
+    load_custom_placeholder_rules_text,
+    resolve_custom_placeholder_rules_path,
+)
 from app.config.schemas import Setting
+from app.event_command_text import (
+    EventCommandTextExtraction,
+    build_event_command_rule_records_from_import,
+    command_matches_filters,
+    event_command_rule_key,
+    export_event_commands_json_file,
+    load_event_command_rule_import_file,
+    resolve_event_command_codes,
+)
 from app.name_context import (
     NameContextExportSummary,
     NamePromptIndex,
     apply_name_context_translations,
-    export_name_context_files,
+    export_name_context_artifacts,
     load_name_context_registry,
 )
-from app.persistence import DEFAULT_ERROR_TABLE_PREFIX, GameDatabaseItem, GameDatabaseManager
+from app.persistence import DEFAULT_ERROR_TABLE_PREFIX, GameRegistry, TargetGameSession
 from app.plugin_text import (
     PluginTextExtraction,
     build_plugin_hash,
@@ -35,22 +53,24 @@ from app.plugin_text import (
     load_plugin_rule_import_file,
 )
 from app.rmmz import DataTextExtraction
+from app.rmmz.commands import iter_all_commands
 from app.rmmz.schema import (
     GameData,
-    ItemType,
+    EventCommandTextRuleRecord,
     PLUGINS_FILE_NAME,
     PluginTextRuleRecord,
     TranslationData,
     TranslationErrorItem,
     TranslationItem,
 )
-from app.llm import ChatMessage, LLMHandler
+from app.llm import LLMHandler
 from app.rmmz.text_rules import TextRules
-from app.translation import TextTranslation, TranslationCache, iter_translation_context_batches
-from app.rmmz.loader import GameDataManager, read_game_title, resolve_game_directory
+from app.translation import TextTranslation, TranslationBatch, TranslationCache, iter_translation_context_batches
+from app.rmmz.loader import load_game_data, read_game_title, resolve_game_directory
 from app.observability.logging import logger
 from app.rmmz.write_back import write_data_text
 from app.plugin_text.write_back import write_plugin_text
+from app.utils.config_loader_utils import load_setting
 
 
 class TranslationHandler:
@@ -60,64 +80,74 @@ class TranslationHandler:
 
     def __init__(
         self,
-        game_data_manager: GameDataManager,
-        game_database_manager: GameDatabaseManager,
+        game_registry: GameRegistry,
         llm_handler: LLMHandler,
     ) -> None:
         """初始化编排器。"""
-        self.game_data_manager: GameDataManager = game_data_manager
-        self.game_database_manager: GameDatabaseManager = game_database_manager
+        self.game_registry: GameRegistry = game_registry
         self.llm_handler: LLMHandler = llm_handler
 
     @classmethod
     async def create(cls) -> Self:
-        """创建编排器，并预加载已注册游戏数据。"""
-        game_data_manager = GameDataManager()
-        game_database_manager = await GameDatabaseManager.new()
+        """创建编排器，不打开任何游戏数据库。"""
+        game_registry = GameRegistry()
         llm_handler = LLMHandler()
-        handler = cls(game_data_manager, game_database_manager, llm_handler)
-        try:
-            preloaded_count = 0
-            skipped_count = 0
-            for item in game_database_manager.items.values():
-                try:
-                    await game_data_manager.load_game_data(item.game_path)
-                    preloaded_count += 1
-                except Exception as error:
-                    skipped_count += 1
-                    logger.warning(f"[tag.warning]游戏预加载失败，已跳过该游戏[/tag.warning] 标题 [tag.count]{item.game_title}[/tag.count] 路径 [tag.path]{item.game_path}[/tag.path] 原因：{cls._format_exception_summary(error)}")
-
-            logger.info(f"[tag.phase]编排器初始化完成[/tag.phase] 成功预加载 [tag.count]{preloaded_count}[/tag.count] 个游戏，跳过 [tag.count]{skipped_count}[/tag.count] 个无效路径")
-            return handler
-        except Exception:
-            await game_database_manager.close()
-            raise
+        logger.info("[tag.phase]编排器初始化完成[/tag.phase] 数据库将在目标命令执行时按需打开")
+        return cls(game_registry, llm_handler)
 
     async def close(self) -> None:
-        """关闭数据库连接并释放资源。"""
-        await self.game_database_manager.close()
+        """释放编排器持有的运行时资源。"""
+        self.llm_handler.clean()
 
-    def _load_runtime_setting(self) -> Setting:
+    def _load_runtime_setting(self, setting_overrides: SettingOverrides | None = None) -> Setting:
         """加载配置并按本轮命令重置模型服务。"""
-        return load_runtime_setting(self.llm_handler)
+        return load_runtime_setting(self.llm_handler, overrides=setting_overrides)
+
+    def _load_setting(self, setting_overrides: SettingOverrides | None = None) -> Setting:
+        """加载当前配置，不改动模型服务连接状态。"""
+        return load_setting(overrides=setting_overrides)
+
+    def _load_text_rules(
+        self,
+        setting: Setting,
+        custom_placeholder_rules_text: str | None = None,
+    ) -> TextRules:
+        """加载文本过滤规则和自定义占位符规则。"""
+        if custom_placeholder_rules_text is None:
+            rules_path = resolve_custom_placeholder_rules_path()
+            custom_rules = load_custom_placeholder_rules()
+            source_label = "默认文件"
+        else:
+            rules_path = None
+            custom_rules = load_custom_placeholder_rules_text(custom_placeholder_rules_text)
+            source_label = "CLI 参数"
+
+        if custom_rules:
+            if rules_path is None:
+                logger.info(f"[tag.phase]已加载自定义占位符规则[/tag.phase] 来源 {source_label} 数量 [tag.count]{len(custom_rules)}[/tag.count] 条")
+            else:
+                logger.info(f"[tag.phase]已加载自定义占位符规则[/tag.phase] 来源 {source_label} 文件 [tag.path]{rules_path}[/tag.path] 数量 [tag.count]{len(custom_rules)}[/tag.count] 条")
+        elif custom_placeholder_rules_text is not None:
+            logger.info("[tag.skip]CLI 指定的自定义占位符规则为空对象[/tag.skip]")
+        return TextRules.from_setting(
+            setting.text_rules,
+            custom_placeholder_rules=custom_rules,
+        )
+
+    async def _load_session_game_data(self, session: TargetGameSession) -> GameData:
+        """加载目标游戏数据并绑定到当前命令会话。"""
+        game_data = await load_game_data(session.game_path)
+        session.set_game_data(game_data)
+        return session.require_game_data()
 
     async def add_game(self, game_path: str | Path) -> str:
         """注册一个新的游戏。"""
         resolved_game_path = resolve_game_directory(game_path)
         game_title = read_game_title(resolved_game_path)
-        previous_game_data = self.game_data_manager.items.get(game_title)
-        try:
-            await self.game_data_manager.load_game_data(resolved_game_path)
-            await self.game_database_manager.create_database(resolved_game_path)
-            game_database_item = self._get_game_database_item(game_title)
-            logger.success(f"[tag.success]游戏已加入核心 CLI[/tag.success] 标题 [tag.count]{game_title}[/tag.count] 路径 [tag.path]{game_database_item.game_path}[/tag.path]")
-            return game_title
-        except Exception:
-            if previous_game_data is None:
-                _ = self.game_data_manager.items.pop(game_title, None)
-            else:
-                self.game_data_manager.items[game_title] = previous_game_data
-            raise
+        _ = await load_game_data(resolved_game_path)
+        record = await self.game_registry.register_game(resolved_game_path)
+        logger.success(f"[tag.success]游戏已加入核心 CLI[/tag.success] 标题 [tag.count]{game_title}[/tag.count] 路径 [tag.path]{record.game_path}[/tag.path]")
+        return game_title
 
     async def import_plugin_rules(
         self,
@@ -125,27 +155,26 @@ class TranslationHandler:
         input_path: Path,
     ) -> PluginRuleImportSummary:
         """把外部插件规则 JSON 导入当前游戏数据库。"""
-        game_data = self._get_game_data(game_title)
-        import_file = await load_plugin_rule_import_file(input_path)
-        rule_records = build_plugin_rule_records_from_import(
-            game_title=game_title,
-            game_data=game_data,
-            import_file=import_file,
-        )
-        old_rules = {
-            rule.plugin_index: rule
-            for rule in await self.game_database_manager.read_plugin_text_rules(game_title)
-        }
-        deleted_translation_items = 0
-        for rule_record in rule_records:
-            old_rule = old_rules.get(rule_record.plugin_index)
-            if self._should_refresh_plugin_translation_items(old_rule, rule_record):
-                deleted_translation_items += await self.game_database_manager.delete_translation_items_by_prefixes(
-                    game_title,
-                    [f"{PLUGINS_FILE_NAME}/{rule_record.plugin_index}/"],
-                )
-        await self.game_database_manager.replace_plugin_text_rules(game_title, rule_records)
-        imported_rule_count = sum(len(record.translate_rules) for record in rule_records)
+        async with await self.game_registry.open_game(game_title) as session:
+            game_data = await self._load_session_game_data(session)
+            import_file = await load_plugin_rule_import_file(input_path)
+            rule_records = build_plugin_rule_records_from_import(
+                game_data=game_data,
+                import_file=import_file,
+            )
+            old_rules = {
+                rule.plugin_index: rule
+                for rule in await session.read_plugin_text_rules()
+            }
+            deleted_translation_items = 0
+            for rule_record in rule_records:
+                old_rule = old_rules.get(rule_record.plugin_index)
+                if self._should_refresh_plugin_translation_items(old_rule, rule_record):
+                    deleted_translation_items += await session.delete_translation_items_by_prefixes(
+                        [f"{PLUGINS_FILE_NAME}/{rule_record.plugin_index}/"],
+                    )
+            await session.replace_plugin_text_rules(rule_records)
+        imported_rule_count = sum(len(record.path_templates) for record in rule_records)
         logger.success(f"[tag.success]插件规则导入完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 插件 [tag.count]{len(rule_records)}[/tag.count] 个，规则 [tag.count]{imported_rule_count}[/tag.count] 条，清理失效译文 [tag.count]{deleted_translation_items}[/tag.count] 条")
         return PluginRuleImportSummary(
             imported_plugin_count=len(rule_records),
@@ -159,18 +188,84 @@ class TranslationHandler:
         output_path: Path,
     ) -> PluginJsonExportSummary:
         """把当前游戏的 plugins.js 导出为纯 JSON。"""
-        game_data = self._get_game_data(game_title)
-        resolved_output_path = output_path.resolve()
-        await export_plugins_json_file(game_data=game_data, output_path=resolved_output_path)
-        logger.success(f"[tag.success]插件配置 JSON 导出完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 插件 [tag.count]{len(game_data.plugins_js)}[/tag.count] 个 文件 [tag.path]{resolved_output_path}[/tag.path]")
-        return PluginJsonExportSummary(
-            output_path=str(resolved_output_path),
-            plugin_count=len(game_data.plugins_js),
+        async with await self.game_registry.open_game(game_title) as session:
+            game_data = await self._load_session_game_data(session)
+            resolved_output_path = output_path.resolve()
+            await export_plugins_json_file(game_data=game_data, output_path=resolved_output_path)
+            logger.success(f"[tag.success]插件配置 JSON 导出完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 插件 [tag.count]{len(game_data.plugins_js)}[/tag.count] 个 文件 [tag.path]{resolved_output_path}[/tag.path]")
+            return PluginJsonExportSummary(
+                output_path=str(resolved_output_path),
+                plugin_count=len(game_data.plugins_js),
+            )
+
+    async def export_event_commands_json(
+        self,
+        game_title: str,
+        output_path: Path,
+        command_codes: set[int] | None,
+    ) -> EventCommandJsonExportSummary:
+        """把指定事件指令的原始参数导出为 JSON。"""
+        async with await self.game_registry.open_game(game_title) as session:
+            game_data = await self._load_session_game_data(session)
+            resolved_output_path = output_path.resolve()
+            default_command_codes: list[int] | None = None
+            if command_codes is None:
+                setting = self._load_setting()
+                default_command_codes = setting.event_command_text.default_command_codes
+            effective_command_codes = resolve_event_command_codes(
+                command_codes=command_codes,
+                default_command_codes=default_command_codes,
+            )
+            command_count = await export_event_commands_json_file(
+                game_data=game_data,
+                output_path=resolved_output_path,
+                command_codes=effective_command_codes,
+            )
+            code_label = ", ".join(map(str, sorted(effective_command_codes)))
+            logger.success(f"[tag.success]事件指令参数 JSON 导出完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 编码 [tag.count]{code_label}[/tag.count] 指令 [tag.count]{command_count}[/tag.count] 条 文件 [tag.path]{resolved_output_path}[/tag.path]")
+            return EventCommandJsonExportSummary(
+                output_path=str(resolved_output_path),
+                command_count=command_count,
+            )
+
+    async def import_event_command_rules(
+        self,
+        game_title: str,
+        input_path: Path,
+    ) -> EventCommandRuleImportSummary:
+        """把外部事件指令规则 JSON 导入当前游戏数据库。"""
+        async with await self.game_registry.open_game(game_title) as session:
+            game_data = await self._load_session_game_data(session)
+            import_file = await load_event_command_rule_import_file(input_path)
+            rule_records = build_event_command_rule_records_from_import(
+                game_data=game_data,
+                import_file=import_file,
+            )
+            old_rules = {
+                event_command_rule_key(rule): rule
+                for rule in await session.read_event_command_text_rules()
+            }
+            deleted_translation_items = 0
+            for rule_record in rule_records:
+                old_rule = old_rules.get(event_command_rule_key(rule_record))
+                if self._should_refresh_event_command_translation_items(old_rule, rule_record):
+                    deleted_translation_items += await session.delete_translation_items_by_prefixes(
+                        self._event_command_rule_prefixes(game_data=game_data, rule_record=rule_record),
+                    )
+            await session.replace_event_command_text_rules(rule_records)
+        imported_path_rule_count = sum(len(record.path_templates) for record in rule_records)
+        logger.success(f"[tag.success]事件指令规则导入完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 规则组 [tag.count]{len(rule_records)}[/tag.count] 个，路径规则 [tag.count]{imported_path_rule_count}[/tag.count] 条，清理失效译文 [tag.count]{deleted_translation_items}[/tag.count] 条")
+        return EventCommandRuleImportSummary(
+            imported_rule_group_count=len(rule_records),
+            imported_path_rule_count=imported_path_rule_count,
+            deleted_translation_items=deleted_translation_items,
         )
 
     async def translate_text(
         self,
         game_title: str,
+        setting_overrides: SettingOverrides | None,
+        custom_placeholder_rules_text: str | None,
         callbacks: tuple[
             Callable[[int, int], None],
             Callable[[int], None],
@@ -178,26 +273,67 @@ class TranslationHandler:
         ],
     ) -> TextTranslationSummary:
         """翻译指定游戏的正文。"""
-        set_progress, advance_progress, set_status = callbacks
-        setting = self._load_runtime_setting()
+        setting = self._load_runtime_setting(setting_overrides)
         translation_cache = TranslationCache()
-        text_rules = TextRules.from_setting(setting.text_rules)
-        game_data = self._get_game_data(game_title)
-        name_prompt_index = await self._load_name_prompt_index(game_title=game_title)
+        text_rules = self._load_text_rules(
+            setting=setting,
+            custom_placeholder_rules_text=custom_placeholder_rules_text,
+        )
+        async with await self.game_registry.open_game(game_title) as session:
+            return await self._translate_text_in_session(
+                session=session,
+                setting=setting,
+                text_rules=text_rules,
+                translation_cache=translation_cache,
+                callbacks=callbacks,
+            )
 
-        translated_paths = await self.game_database_manager.read_translation_location_paths(game_title)
+    async def _translate_text_in_session(
+        self,
+        *,
+        session: TargetGameSession,
+        setting: Setting,
+        text_rules: TextRules,
+        translation_cache: TranslationCache,
+        callbacks: tuple[
+            Callable[[int, int], None],
+            Callable[[int], None],
+            Callable[[str], None],
+        ],
+    ) -> TextTranslationSummary:
+        """在单游戏数据库会话中翻译正文。"""
+        set_progress, advance_progress, set_status = callbacks
+        game_title = session.game_title
+        game_data = await self._load_session_game_data(session)
+        name_prompt_index = await self._load_name_prompt_index(session=session)
+
         plugin_rules = await self._read_fresh_plugin_text_rules(
-            game_title=game_title,
+            session=session,
             game_data=game_data,
         )
+        event_command_rules = await session.read_event_command_text_rules()
         translation_data_map = DataTextExtraction(game_data, text_rules).extract_all_text()
+        event_command_translation_data_map = EventCommandTextExtraction(
+            game_data=game_data,
+            rule_records=event_command_rules,
+            text_rules=text_rules,
+        ).extract_all_text()
         plugin_translation_data_map = PluginTextExtraction(
             game_data=game_data,
             plugin_rule_records=plugin_rules,
+            text_rules=text_rules,
         ).extract_all_text()
-        translation_data_map.update(plugin_translation_data_map)
+        self._merge_translation_data_map(translation_data_map, event_command_translation_data_map)
+        self._merge_translation_data_map(translation_data_map, plugin_translation_data_map)
+        active_translation_paths = self._collect_translation_data_paths(translation_data_map)
+        deleted_stale_items = await session.delete_translation_items_except_paths(
+            active_translation_paths,
+        )
+        if deleted_stale_items:
+            logger.warning(f"[tag.warning]已清理不符合当前提取规则的缓存译文[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count] 数量 [tag.count]{deleted_stale_items}[/tag.count]")
 
         total_extracted_items = self._count_translation_items(translation_data_map)
+        translated_paths = await session.read_translation_location_paths()
         pending_translation_data_map = self._filter_pending_translation_data(
             translation_data_map=translation_data_map,
             translated_paths=translated_paths,
@@ -239,18 +375,18 @@ class TranslationHandler:
                 blocked_reason,
             )
 
-        old_error_tables = await self.game_database_manager.read_error_table_names(game_title)
-        deleted_error_tables = await self.game_database_manager.delete_error_tables(game_title, old_error_tables)
+        old_error_tables = await session.read_error_table_names()
+        deleted_error_tables = await session.delete_error_tables(old_error_tables)
         if deleted_error_tables:
             logger.info(f"[tag.phase]已清理错误表[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] 数量 [tag.count]{deleted_error_tables}[/tag.count]")
 
-        error_table_name = await self.game_database_manager.start_error_table(game_title)
+        error_table_name = await session.start_error_table()
         set_status(f"待翻译 {pending_count} 条，去重后 {deduplicated_count} 条，批次 {len(batches)} 个")
         logger.info(f"[tag.phase]正文翻译开始[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] 提取 [tag.count]{total_extracted_items}[/tag.count] 条，待翻译 [tag.count]{pending_count}[/tag.count] 条，去重后 [tag.count]{deduplicated_count}[/tag.count] 条，批次 [tag.count]{len(batches)}[/tag.count] 个")
         text_translation = TextTranslation(setting=setting, text_rules=text_rules)
         success_count, error_count = await self._run_text_translation_batches(
             text_translation=text_translation,
-            game_title=game_title,
+            session=session,
             batches=batches,
             error_table_name=error_table_name,
             advance_progress=advance_progress,
@@ -269,36 +405,52 @@ class TranslationHandler:
         self,
         game_title: str,
         callbacks: tuple[Callable[[int, int], None], Callable[[int], None]],
+        setting_overrides: SettingOverrides | None = None,
     ) -> None:
         """把数据库中的有效译文回写到游戏目录。"""
-        set_progress, advance_progress = callbacks
-        game_data = self._get_game_data(game_title)
-        game_database_item = self._get_game_database_item(game_title)
-        translated_items = await self.game_database_manager.read_translated_items(game_title)
-        set_progress(0, len(translated_items))
+        async with await self.game_registry.open_game(game_title) as session:
+            set_progress, advance_progress = callbacks
+            game_data = await self._load_session_game_data(session)
+            setting = self._load_setting(setting_overrides=setting_overrides)
+            text_rules = self._load_text_rules(setting=setting)
+            translated_items = await session.read_translated_items()
+            translated_items = await self._filter_writable_translation_items(
+                session=session,
+                game_data=game_data,
+                text_rules=text_rules,
+                translated_items=translated_items,
+            )
+            set_progress(0, len(translated_items))
 
-        if not translated_items:
-            logger.warning(f"[tag.warning]当前没有可回写译文[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count]")
-            return
+            if not translated_items:
+                logger.warning(f"[tag.warning]当前没有可回写译文[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count]")
+                return
 
-        reset_writable_copies(game_data)
-        data_item_count = sum(
-            1 for item in translated_items if not item.location_path.startswith(f"{PLUGINS_FILE_NAME}/")
-        )
-        plugin_item_count = len(translated_items) - data_item_count
-        write_data_text(game_data, translated_items)
-        if data_item_count:
-            advance_progress(data_item_count)
-        write_plugin_text(game_data, translated_items)
-        if plugin_item_count:
-            advance_progress(plugin_item_count)
-        name_written_count = await self._apply_optional_name_context_write_back(
-            game_title=game_title,
-            game_data=game_data,
-        )
+            reset_writable_copies(game_data)
+            data_item_count = sum(
+                1 for item in translated_items if not item.location_path.startswith(f"{PLUGINS_FILE_NAME}/")
+            )
+            plugin_item_count = len(translated_items) - data_item_count
+            write_data_text(game_data, translated_items)
+            if data_item_count:
+                advance_progress(data_item_count)
+            write_plugin_text(game_data, translated_items)
+            if plugin_item_count:
+                advance_progress(plugin_item_count)
+            name_written_count = await self._apply_optional_name_context_write_back(
+                session=session,
+                game_data=game_data,
+            )
+            font_summary = apply_font_replacement(
+                game_data=game_data,
+                game_root=session.game_path,
+                replacement_font_path=setting.write_back.replacement_font_path,
+            )
 
-        write_game_files(game_data=game_data, game_root=game_database_item.game_path)
-        logger.success(f"[tag.success]游戏文本回写完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] data 文本 [tag.count]{data_item_count}[/tag.count] 条，插件文本 [tag.count]{plugin_item_count}[/tag.count] 条，标准名 [tag.count]{name_written_count}[/tag.count] 条")
+            write_game_files(game_data=game_data, game_root=session.game_path)
+            if font_summary.target_font_name is not None:
+                logger.info(f"[tag.phase]字体引用已同步[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] 目标字体 [tag.path]{font_summary.target_font_name}[/tag.path] 原字体 [tag.count]{font_summary.source_font_count}[/tag.count] 个，替换引用 [tag.count]{font_summary.replaced_reference_count}[/tag.count] 处")
+            logger.success(f"[tag.success]游戏文本回写完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] data 文本 [tag.count]{data_item_count}[/tag.count] 条，插件文本 [tag.count]{plugin_item_count}[/tag.count] 条，标准名 [tag.count]{name_written_count}[/tag.count] 条")
 
     async def export_name_context(
         self,
@@ -306,14 +458,14 @@ class TranslationHandler:
         output_dir: Path,
     ) -> NameContextExportSummary:
         """导出 `101` 名字框与地图显示名上下文文件。"""
-        game_data = self._get_game_data(game_title)
-        summary = await export_name_context_files(
-            game_title=game_title,
-            game_data=game_data,
-            output_dir=output_dir,
-        )
-        logger.success(f"[tag.success]标准名上下文导出完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 大 JSON [tag.path]{summary.registry_path}[/tag.path] 小 JSON [tag.count]{summary.context_file_count}[/tag.count] 个")
-        return summary
+        async with await self.game_registry.open_game(game_title) as session:
+            game_data = await self._load_session_game_data(session)
+            summary = await export_name_context_artifacts(
+                game_data=game_data,
+                output_dir=output_dir,
+            )
+            logger.success(f"[tag.success]标准名上下文导出完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 大 JSON [tag.path]{summary.registry_path}[/tag.path] 小 JSON [tag.count]{summary.sample_file_count}[/tag.count] 个")
+            return summary
 
     async def import_name_context(
         self,
@@ -321,16 +473,18 @@ class TranslationHandler:
         input_path: Path,
     ) -> NameContextImportSummary:
         """把外部 Agent 填写后的术语表 JSON 导入当前游戏数据库。"""
-        registry = await load_name_context_registry(registry_path=input_path)
-        if registry.game_title != game_title:
-            raise ValueError(
-                f"术语表导入文件的 game_title 不匹配，期望 {game_title}，实际 {registry.game_title}"
-            )
-        await self.game_database_manager.replace_name_context_registry(game_title, registry)
-        filled_count = sum(1 for entry in registry.entries if entry.translated_text.strip())
-        logger.success(f"[tag.success]术语表导入完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 条目 [tag.count]{len(registry.entries)}[/tag.count] 条，已填写 [tag.count]{filled_count}[/tag.count] 条")
+        async with await self.game_registry.open_game(game_title) as session:
+            registry = await load_name_context_registry(registry_path=input_path)
+            await session.replace_name_context_registry(registry)
+        imported_count = len(registry.speaker_names) + len(registry.map_display_names)
+        filled_count = sum(
+            1
+            for translated_text in [*registry.speaker_names.values(), *registry.map_display_names.values()]
+            if translated_text.strip()
+        )
+        logger.success(f"[tag.success]术语表导入完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 条目 [tag.count]{imported_count}[/tag.count] 条，已填写 [tag.count]{filled_count}[/tag.count] 条")
         return NameContextImportSummary(
-            imported_entry_count=len(registry.entries),
+            imported_entry_count=imported_count,
             filled_entry_count=filled_count,
         )
 
@@ -338,78 +492,149 @@ class TranslationHandler:
         self,
         game_title: str,
         callbacks: tuple[Callable[[int, int], None], Callable[[int], None]],
+        setting_overrides: SettingOverrides | None = None,
     ) -> NameContextWriteSummary:
         """根据数据库中的术语表写回 `101` 名字框与地图显示名。"""
-        set_progress, advance_progress = callbacks
-        game_data = self._get_game_data(game_title)
-        game_database_item = self._get_game_database_item(game_title)
-        translated_items = await self.game_database_manager.read_translated_items(game_title)
+        async with await self.game_registry.open_game(game_title) as session:
+            set_progress, advance_progress = callbacks
+            game_data = await self._load_session_game_data(session)
+            setting = self._load_setting(setting_overrides=setting_overrides)
+            text_rules = self._load_text_rules(setting=setting)
+            translated_items = await session.read_translated_items()
+            translated_items = await self._filter_writable_translation_items(
+                session=session,
+                game_data=game_data,
+                text_rules=text_rules,
+                translated_items=translated_items,
+            )
 
-        reset_writable_copies(game_data)
-        if translated_items:
-            write_data_text(game_data, translated_items)
-            write_plugin_text(game_data, translated_items)
+            reset_writable_copies(game_data)
+            if translated_items:
+                write_data_text(game_data, translated_items)
+                write_plugin_text(game_data, translated_items)
 
-        registry = await self.game_database_manager.read_name_context_registry(game_title)
-        if registry is None:
-            raise RuntimeError("当前游戏数据库中没有已导入术语表，请先执行 import-name-context")
-        written_count = apply_name_context_translations(game_data, registry)
-        set_progress(0, max(written_count, 1))
-        advance_progress(written_count)
-        write_game_files(game_data=game_data, game_root=game_database_item.game_path)
-        logger.success(f"[tag.success]标准名写回完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 写回 [tag.count]{written_count}[/tag.count] 条，保留已有正文译文 [tag.count]{len(translated_items)}[/tag.count] 条")
-        return NameContextWriteSummary(written_count=written_count, preserved_translation_count=len(translated_items))
+            registry = await session.read_name_context_registry()
+            if registry is None:
+                raise RuntimeError("当前游戏数据库中没有已导入术语表，请先执行 import-name-context")
+            written_count = apply_name_context_translations(game_data, registry)
+            set_progress(0, max(written_count, 1))
+            advance_progress(written_count)
+            font_summary = apply_font_replacement(
+                game_data=game_data,
+                game_root=session.game_path,
+                replacement_font_path=setting.write_back.replacement_font_path,
+            )
+            write_game_files(game_data=game_data, game_root=session.game_path)
+            if font_summary.target_font_name is not None:
+                logger.info(f"[tag.phase]字体引用已同步[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] 目标字体 [tag.path]{font_summary.target_font_name}[/tag.path] 原字体 [tag.count]{font_summary.source_font_count}[/tag.count] 个，替换引用 [tag.count]{font_summary.replaced_reference_count}[/tag.count] 处")
+            logger.success(f"[tag.success]标准名写回完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 写回 [tag.count]{written_count}[/tag.count] 条，保留已有正文译文 [tag.count]{len(translated_items)}[/tag.count] 条")
+            return NameContextWriteSummary(written_count=written_count, preserved_translation_count=len(translated_items))
 
-    def _get_game_data(self, game_title: str) -> GameData:
-        """根据游戏标题读取已加载的游戏数据。"""
-        game_data = self.game_data_manager.items.get(game_title)
-        if game_data is None:
-            raise ValueError(f"未找到已加载游戏数据: {game_title}")
-        return game_data
+    async def _filter_writable_translation_items(
+        self,
+        *,
+        session: TargetGameSession,
+        game_data: GameData,
+        text_rules: TextRules,
+        translated_items: list[TranslationItem],
+    ) -> list[TranslationItem]:
+        """仅保留当前提取规则仍认为需要翻译的译文条目。"""
+        game_title = session.game_title
+        writable_paths = await self._collect_extractable_translation_paths(
+            session=session,
+            game_data=game_data,
+            text_rules=text_rules,
+        )
+        deleted_stale_items = await session.delete_translation_items_except_paths(
+            writable_paths,
+        )
+        if deleted_stale_items:
+            logger.warning(f"[tag.warning]已清理不符合当前提取规则的缓存译文[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count] 数量 [tag.count]{deleted_stale_items}[/tag.count]")
+            translated_items = await session.read_translated_items()
+        writable_items = [
+            item
+            for item in translated_items
+            if item.location_path in writable_paths
+            and text_rules.should_translate_source_lines(item.original_lines)
+        ]
+        skipped_count = len(translated_items) - len(writable_items)
+        if skipped_count:
+            logger.warning(f"[tag.warning]已跳过不符合当前提取规则的缓存译文[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count] 数量 [tag.count]{skipped_count}[/tag.count]")
+        return writable_items
 
-    def _get_game_database_item(self, game_title: str) -> GameDatabaseItem:
-        """根据游戏标题读取数据库对象。"""
-        item = self.game_database_manager.items.get(game_title)
-        if item is None:
-            raise ValueError(f"未找到游戏数据库: {game_title}")
-        return item
+    async def _collect_extractable_translation_paths(
+        self,
+        *,
+        session: TargetGameSession,
+        game_data: GameData,
+        text_rules: TextRules,
+    ) -> set[str]:
+        """收集本轮提取规则允许写回的正文路径。"""
+        plugin_rules = await self._read_fresh_plugin_text_rules(
+            session=session,
+            game_data=game_data,
+        )
+        event_command_rules = await session.read_event_command_text_rules()
+
+        translation_data_map = DataTextExtraction(game_data, text_rules).extract_all_text()
+        self._merge_translation_data_map(
+            translation_data_map,
+            EventCommandTextExtraction(
+                game_data=game_data,
+                rule_records=event_command_rules,
+                text_rules=text_rules,
+            ).extract_all_text(),
+        )
+        self._merge_translation_data_map(
+            translation_data_map,
+            PluginTextExtraction(
+                game_data=game_data,
+                plugin_rule_records=plugin_rules,
+                text_rules=text_rules,
+            ).extract_all_text(),
+        )
+        return {
+            item.location_path
+            for translation_data in translation_data_map.values()
+            for item in translation_data.translation_items
+        }
 
     async def _load_name_prompt_index(
         self,
         *,
-        game_title: str,
+        session: TargetGameSession,
     ) -> NamePromptIndex | None:
         """读取数据库术语表，并转换为正文提示词索引。"""
-        registry = await self.game_database_manager.read_name_context_registry(game_title)
+        registry = await session.read_name_context_registry()
         if registry is None:
-            logger.info(f"[tag.skip]数据库没有已导入术语表，正文提示词不注入标准名[/tag.skip] 游戏 [tag.count]{game_title}[/tag.count]")
+            logger.info(f"[tag.skip]数据库没有已导入术语表，正文提示词不注入标准名[/tag.skip] 游戏 [tag.count]{session.game_title}[/tag.count]")
             return None
 
         index = NamePromptIndex.from_registry(registry)
-        logger.info(f"[tag.phase]已加载术语表[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] 可注入译名 [tag.count]{len(index.entries)}[/tag.count] 条")
+        logger.info(f"[tag.phase]已加载术语表[/tag.phase] 游戏 [tag.count]{session.game_title}[/tag.count] 可注入译名 [tag.count]{len(index.entries)}[/tag.count] 条")
         return index
 
     async def _apply_optional_name_context_write_back(
         self,
         *,
-        game_title: str,
+        session: TargetGameSession,
         game_data: GameData,
     ) -> int:
         """在正文回写时顺手写回数据库术语表中的标准名。"""
-        registry = await self.game_database_manager.read_name_context_registry(game_title)
+        registry = await session.read_name_context_registry()
         if registry is None:
-            logger.info(f"[tag.skip]数据库未发现术语表，跳过 101 名字框和地图名写回[/tag.skip] 游戏 [tag.count]{game_title}[/tag.count]")
+            logger.info(f"[tag.skip]数据库未发现术语表，跳过 101 名字框和地图名写回[/tag.skip] 游戏 [tag.count]{session.game_title}[/tag.count]")
             return 0
         return apply_name_context_translations(game_data, registry)
 
     async def _read_fresh_plugin_text_rules(
         self,
         *,
-        game_title: str,
+        session: TargetGameSession,
         game_data: GameData,
     ) -> list[PluginTextRuleRecord]:
         """读取匹配当前 plugins.js 的外部插件规则。"""
-        plugin_rules = await self.game_database_manager.read_plugin_text_rules(game_title)
+        plugin_rules = await session.read_plugin_text_rules()
         fresh_rules: list[PluginTextRuleRecord] = []
         stale_count = 0
         for rule in plugin_rules:
@@ -423,7 +648,7 @@ class TranslationHandler:
             fresh_rules.append(rule)
 
         if stale_count:
-            logger.warning(f"[tag.warning]检测到过期插件规则，正文翻译将跳过这些规则[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count] 数量 [tag.count]{stale_count}[/tag.count]")
+            logger.warning(f"[tag.warning]检测到过期插件规则，正文翻译将跳过这些规则[/tag.warning] 游戏 [tag.count]{session.game_title}[/tag.count] 数量 [tag.count]{stale_count}[/tag.count]")
         return fresh_rules
 
     @staticmethod
@@ -436,8 +661,41 @@ class TranslationHandler:
             return False
         return (
             old_rule.plugin_hash != new_rule.plugin_hash
-            or old_rule.translate_rules != new_rule.translate_rules
+            or old_rule.path_templates != new_rule.path_templates
         )
+
+    @staticmethod
+    def _should_refresh_event_command_translation_items(
+        old_rule: EventCommandTextRuleRecord | None,
+        new_rule: EventCommandTextRuleRecord,
+    ) -> bool:
+        """判断事件指令规则变化后是否需要清理失效译文。"""
+        if old_rule is None:
+            return False
+        return (
+            old_rule.command_code != new_rule.command_code
+            or old_rule.parameter_filters != new_rule.parameter_filters
+            or old_rule.path_templates != new_rule.path_templates
+        )
+
+    @staticmethod
+    def _event_command_rule_prefixes(
+        *,
+        game_data: GameData,
+        rule_record: EventCommandTextRuleRecord,
+    ) -> list[str]:
+        """根据事件指令规则找出需要清理的正文路径前缀。"""
+        prefixes: list[str] = []
+        for path, _display_name, command in iter_all_commands(game_data):
+            if command.code != rule_record.command_code:
+                continue
+            if not command_matches_filters(
+                parameters=command.parameters,
+                filters=rule_record.parameter_filters,
+            ):
+                continue
+            prefixes.append("/".join(map(str, path)))
+        return prefixes
 
     @staticmethod
     def _filter_pending_translation_data(
@@ -489,16 +747,38 @@ class TranslationHandler:
         return sum(len(data.translation_items) for data in translation_data_map.values())
 
     @staticmethod
+    def _collect_translation_data_paths(translation_data_map: dict[str, TranslationData]) -> set[str]:
+        """收集翻译数据中的全部正文路径。"""
+        return {
+            item.location_path
+            for translation_data in translation_data_map.values()
+            for item in translation_data.translation_items
+        }
+
+    @staticmethod
+    def _merge_translation_data_map(
+        target: dict[str, TranslationData],
+        source: dict[str, TranslationData],
+    ) -> None:
+        """按文件名合并翻译数据，保留已有标准文本条目。"""
+        for file_name, source_data in source.items():
+            target_data = target.get(file_name)
+            if target_data is None:
+                target[file_name] = source_data
+                continue
+            target_data.translation_items.extend(source_data.translation_items)
+
+    @staticmethod
     def _build_translation_batches(
         *,
         translation_data_map: dict[str, TranslationData],
         setting: Setting,
         text_rules: TextRules,
         name_prompt_index: NamePromptIndex | None,
-    ) -> list[tuple[list[TranslationItem], list[ChatMessage]]]:
+    ) -> list[TranslationBatch]:
         """构建正文翻译批次。"""
-        batches: list[tuple[list[TranslationItem], list[ChatMessage]]] = []
-        for file_name, translation_data in translation_data_map.items():
+        batches: list[TranslationBatch] = []
+        for translation_data in translation_data_map.values():
             batches.extend(
                 iter_translation_context_batches(
                     translation_data=translation_data,
@@ -507,7 +787,6 @@ class TranslationHandler:
                     max_command_items=setting.translation_context.max_command_items,
                     system_prompt=setting.text_translation.system_prompt,
                     text_rules=text_rules,
-                    file_name=file_name,
                     name_prompt_index=name_prompt_index,
                 )
             )
@@ -517,18 +796,19 @@ class TranslationHandler:
         self,
         *,
         text_translation: TextTranslation,
-        game_title: str,
-        batches: list[tuple[list[TranslationItem], list[ChatMessage]]],
+        session: TargetGameSession,
+        batches: list[TranslationBatch],
         error_table_name: str,
         advance_progress: Callable[[int], None],
         translation_cache: TranslationCache,
     ) -> tuple[int, int]:
         """启动正文翻译并并发消费成功/失败队列。"""
+        game_title = session.game_title
         text_translation.start_translation(llm_handler=self.llm_handler, batches=batches)
         db_write_lock = asyncio.Lock()
         success_task = asyncio.create_task(
             self._consume_right_items(
-                game_title=game_title,
+                session=session,
                 text_translation=text_translation,
                 db_write_lock=db_write_lock,
                 advance_progress=advance_progress,
@@ -537,7 +817,7 @@ class TranslationHandler:
         )
         error_task = asyncio.create_task(
             self._consume_error_items(
-                game_title=game_title,
+                session=session,
                 text_translation=text_translation,
                 error_table_name=error_table_name,
                 db_write_lock=db_write_lock,
@@ -559,28 +839,19 @@ class TranslationHandler:
     async def _consume_right_items(
         self,
         *,
-        game_title: str,
+        session: TargetGameSession,
         text_translation: TextTranslation,
         db_write_lock: asyncio.Lock,
         advance_progress: Callable[[int], None],
         translation_cache: TranslationCache,
     ) -> int:
         """消费正文翻译成功队列并写入主翻译表。"""
+        game_title = session.game_title
         success_count = 0
         async for items in text_translation.iter_right_items():
             expanded_items = self._expand_cached_translation_items(items, translation_cache)
-            serialized_items: list[tuple[str, ItemType, str | None, list[str], list[str]]] = [
-                (
-                    item.location_path,
-                    item.item_type,
-                    item.role,
-                    list(item.original_lines),
-                    list(item.translation_lines),
-                )
-                for item in expanded_items
-            ]
             async with db_write_lock:
-                await self.game_database_manager.write_translation_items(game_title, serialized_items)
+                await session.write_translation_items(expanded_items)
             success_count += len(expanded_items)
             advance_progress(len(expanded_items))
             logger.success(f"[tag.success]已写入正文翻译结果[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] [tag.count]{len(expanded_items)}[/tag.count] 条")
@@ -589,7 +860,7 @@ class TranslationHandler:
     async def _consume_error_items(
         self,
         *,
-        game_title: str,
+        session: TargetGameSession,
         text_translation: TextTranslation,
         error_table_name: str,
         db_write_lock: asyncio.Lock,
@@ -597,12 +868,12 @@ class TranslationHandler:
         translation_cache: TranslationCache,
     ) -> int:
         """消费正文翻译错误队列并写入错误表。"""
+        game_title = session.game_title
         error_count = 0
         async for error_items in text_translation.iter_error_items():
             expanded_error_items = self._expand_cached_error_items(error_items, translation_cache)
             async with db_write_lock:
-                await self.game_database_manager.write_error_items(
-                    game_title,
+                await session.write_error_items(
                     error_table_name,
                     expanded_error_items,
                 )
@@ -620,30 +891,21 @@ class TranslationHandler:
         expanded_error_items: list[TranslationErrorItem] = []
         for error_item in error_items:
             expanded_error_items.append(error_item)
-            (
-                _location_path,
-                item_type,
-                role,
-                original_lines,
-                translation_lines,
-                error_type,
-                error_detail,
-            ) = error_item
             duplicate_items = translation_cache.pop_duplicate_items_by_fields(
-                original_lines=original_lines,
-                item_type=item_type,
-                role=role,
+                original_lines=error_item.original_lines,
+                item_type=error_item.item_type,
+                role=error_item.role,
             )
             for duplicate_item in duplicate_items:
                 expanded_error_items.append(
-                    (
-                        duplicate_item.location_path,
-                        duplicate_item.item_type,
-                        duplicate_item.role,
-                        list(duplicate_item.original_lines),
-                        list(translation_lines),
-                        error_type,
-                        list(error_detail),
+                    TranslationErrorItem(
+                        location_path=duplicate_item.location_path,
+                        item_type=duplicate_item.item_type,
+                        role=duplicate_item.role,
+                        original_lines=list(duplicate_item.original_lines),
+                        translation_lines=list(error_item.translation_lines),
+                        error_type=error_item.error_type,
+                        error_detail=list(error_item.error_detail),
                     )
                 )
         return expanded_error_items
@@ -673,6 +935,8 @@ class TranslationHandler:
 
 
 __all__: list[str] = [
+    "EventCommandJsonExportSummary",
+    "EventCommandRuleImportSummary",
     "NameContextImportSummary",
     "NameContextWriteSummary",
     "PluginJsonExportSummary",

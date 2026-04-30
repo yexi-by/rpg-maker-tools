@@ -46,12 +46,42 @@ def _find_preferred_split_position(text: str, text_rules: TextRules) -> int | No
             line_width_count += 1
         if line_width_count > text_rules.setting.long_text_line_width_limit:
             break
-        if char in punctuations:
+        if char in punctuations and not _is_inside_placeholder_token(text, index + 1, text_rules):
             best_index = index
 
     if best_index < 0:
         return None
     return best_index + 1
+
+
+def _find_hard_split_position(text: str, text_rules: TextRules) -> int | None:
+    """在没有可用标点时按计数字符上限切分。"""
+    line_width_count = 0
+    limit = text_rules.setting.long_text_line_width_limit
+    for index, char in enumerate(text):
+        if not text_rules.is_line_width_counted_char(char):
+            continue
+        line_width_count += 1
+        if line_width_count < limit:
+            continue
+        return _move_split_position_outside_placeholder(text, index + 1, text_rules)
+    return None
+
+
+def _is_inside_placeholder_token(text: str, position: int, text_rules: TextRules) -> bool:
+    """判断切分点是否落在翻译占位符内部。"""
+    for match in text_rules.placeholder_token_pattern.finditer(text):
+        if match.start() < position < match.end():
+            return True
+    return False
+
+
+def _move_split_position_outside_placeholder(text: str, position: int, text_rules: TextRules) -> int:
+    """把切分点移动到占位符之后，避免破坏占位符。"""
+    for match in text_rules.placeholder_token_pattern.finditer(text):
+        if match.start() < position < match.end():
+            return match.end()
+    return position
 
 
 def _log_align_warning(*, location_path: str | None, line: str, reason: str, text_rules: TextRules) -> None:
@@ -66,51 +96,68 @@ def _log_align_warning(*, location_path: str | None, line: str, reason: str, tex
     )
 
 
-def _expand_long_lines(
+def _split_overwide_lines(
     *,
     lines: list[str],
-    target_lines: int,
     location_path: str | None,
     text_rules: TextRules,
 ) -> list[str]:
-    """在还有空余行数时尝试把过长文本安全切开。"""
-    expanded_lines: list[str] = []
-    remaining_extra_lines = max(target_lines - len(lines), 0)
-    line_width_limit = text_rules.setting.long_text_line_width_limit
-
+    """按配置宽度切开过长非空行，空行保持原位。"""
+    split_lines: list[str] = []
     for line in lines:
-        pending_line = line
-        while _count_line_width_chars(pending_line, text_rules) > line_width_limit and remaining_extra_lines > 0:
-            split_position = _find_preferred_split_position(pending_line, text_rules)
-            if split_position is None:
-                _log_align_warning(
-                    location_path=location_path,
-                    line=pending_line,
-                    reason=f"前 {line_width_limit} 个计数字符内没有可配置切分标点，无法安全补切分",
-                    text_rules=text_rules,
-                )
-                break
+        if not line:
+            split_lines.append(line)
+            continue
+        split_lines.extend(
+            _split_single_overwide_line(
+                line=line,
+                location_path=location_path,
+                text_rules=text_rules,
+            )
+        )
+    return split_lines
 
-            head = pending_line[:split_position].rstrip()
-            tail = pending_line[split_position:].lstrip()
-            if not tail:
-                break
 
-            expanded_lines.append(head)
-            pending_line = tail
-            remaining_extra_lines -= 1
+def _split_single_overwide_line(
+    *,
+    line: str,
+    location_path: str | None,
+    text_rules: TextRules,
+) -> list[str]:
+    """切开单个超宽文本行。"""
+    line_width_limit = text_rules.setting.long_text_line_width_limit
+    result: list[str] = []
+    pending_line = line
+    while _count_line_width_chars(pending_line, text_rules) > line_width_limit:
+        split_position = _find_preferred_split_position(pending_line, text_rules)
+        if split_position is None:
+            split_position = _find_hard_split_position(pending_line, text_rules)
 
-        if _count_line_width_chars(pending_line, text_rules) > line_width_limit and remaining_extra_lines <= 0:
+        if split_position is None or split_position <= 0 or split_position >= len(pending_line):
             _log_align_warning(
                 location_path=location_path,
                 line=pending_line,
-                reason="建议行数已用尽，无法继续补切分",
+                reason="无法找到安全切分点，保留模型原行",
                 text_rules=text_rules,
             )
+            break
 
-        expanded_lines.append(pending_line)
+        head = pending_line[:split_position].rstrip()
+        tail = pending_line[split_position:].lstrip()
+        if not head or not tail:
+            _log_align_warning(
+                location_path=location_path,
+                line=pending_line,
+                reason="切分后出现空片段，保留模型原行",
+                text_rules=text_rules,
+            )
+            break
 
-    return expanded_lines
+        result.append(head)
+        pending_line = tail
+
+    result.append(pending_line)
+    return result
 
 
 def _align_lines(
@@ -120,41 +167,27 @@ def _align_lines(
     location_path: str | None,
     text_rules: TextRules,
 ) -> list[str]:
-    """将大模型返回文本按原内容行数要求进行对齐。"""
+    """按模型断句做行数适配，再执行行宽兜底。"""
     normalized_target_lines = max(1, target_lines)
     if not text:
         return [""] * normalized_target_lines
 
     lines = text.split("\n")
-    current_count = len(lines)
 
-    if current_count > normalized_target_lines:
+    if len(lines) > normalized_target_lines:
         keep_lines = lines[: max(normalized_target_lines - 1, 0)]
         merged_tail = " ".join(lines[max(normalized_target_lines - 1, 0) :])
         keep_lines.append(merged_tail)
         lines = keep_lines
 
-    if current_count < normalized_target_lines:
-        lines = _expand_long_lines(
-            lines=lines,
-            target_lines=normalized_target_lines,
-            location_path=location_path,
-            text_rules=text_rules,
-        )
-    else:
-        for line in lines:
-            if _count_line_width_chars(line, text_rules) > text_rules.setting.long_text_line_width_limit:
-                _log_align_warning(
-                    location_path=location_path,
-                    line=line,
-                    reason="当前结果已经没有多余空行可用于补切分",
-                    text_rules=text_rules,
-                )
-
     if len(lines) < normalized_target_lines:
         lines.extend([""] * (normalized_target_lines - len(lines)))
 
-    return lines
+    return _split_overwide_lines(
+        lines=lines,
+        location_path=location_path,
+        text_rules=text_rules,
+    )
 
 
 async def verify_translation_batch(
@@ -176,14 +209,14 @@ async def verify_translation_batch(
     except Exception as error:
         for item in items:
             error_items.append(
-                (
-                    item.location_path,
-                    item.item_type,
-                    item.role,
-                    list(item.original_lines),
-                    [],
-                    ERR_MISSING_KEY,
-                    ["模型返回无法解析为 JSON 对象", f"详细错误: {error}"],
+                TranslationErrorItem(
+                    location_path=item.location_path,
+                    item_type=item.item_type,
+                    role=item.role,
+                    original_lines=list(item.original_lines),
+                    translation_lines=[],
+                    error_type=ERR_MISSING_KEY,
+                    error_detail=["模型返回无法解析为 JSON 对象", f"详细错误: {error}"],
                 )
             )
         if error_items:
@@ -194,14 +227,14 @@ async def verify_translation_batch(
         translation_text = translation_map.get(item.location_path)
         if translation_text is None:
             error_items.append(
-                (
-                    item.location_path,
-                    item.item_type,
-                    item.role,
-                    list(item.original_lines),
-                    [],
-                    ERR_MISSING_KEY,
-                    [f"AI漏翻: 未找到键 {item.location_path}"],
+                TranslationErrorItem(
+                    location_path=item.location_path,
+                    item_type=item.item_type,
+                    role=item.role,
+                    original_lines=list(item.original_lines),
+                    translation_lines=[],
+                    error_type=ERR_MISSING_KEY,
+                    error_detail=[f"AI漏翻: 未找到键 {item.location_path}"],
                 )
             )
             continue
@@ -217,14 +250,14 @@ async def verify_translation_batch(
             translation_lines = translation_text.splitlines()
             if len(translation_lines) != len(item.original_lines):
                 error_items.append(
-                    (
-                        item.location_path,
-                        item.item_type,
-                        item.role,
-                        list(item.original_lines),
-                        list(translation_lines),
-                        ERR_PLACEHOLDER_MISMATCH,
-                        [f"选项行数不匹配: 期望 {len(item.original_lines)} 行, 实际 {len(translation_lines)} 行"],
+                    TranslationErrorItem(
+                        location_path=item.location_path,
+                        item_type=item.item_type,
+                        role=item.role,
+                        original_lines=list(item.original_lines),
+                        translation_lines=list(translation_lines),
+                        error_type=ERR_PLACEHOLDER_MISMATCH,
+                        error_detail=[f"选项行数不匹配: 期望 {len(item.original_lines)} 行, 实际 {len(translation_lines)} 行"],
                     )
                 )
                 continue
@@ -239,14 +272,14 @@ async def verify_translation_batch(
             item.restore_placeholders()
         except ValueError as error:
             error_items.append(
-                (
-                    item.location_path,
-                    item.item_type,
-                    item.role,
-                    list(item.original_lines),
-                    list(item.translation_lines_with_placeholders),
-                    ERR_PLACEHOLDER_MISMATCH,
-                    str(error).split(";\n"),
+                TranslationErrorItem(
+                    location_path=item.location_path,
+                    item_type=item.item_type,
+                    role=item.role,
+                    original_lines=list(item.original_lines),
+                    translation_lines=list(item.translation_lines_with_placeholders),
+                    error_type=ERR_PLACEHOLDER_MISMATCH,
+                    error_detail=str(error).split(";\n"),
                 )
             )
             continue
@@ -255,14 +288,14 @@ async def verify_translation_batch(
             text_rules.check_japanese_residual(item.translation_lines)
         except ValueError as error:
             error_items.append(
-                (
-                    item.location_path,
-                    item.item_type,
-                    item.role,
-                    list(item.original_lines),
-                    list(item.translation_lines),
-                    ERR_JAPANESE_RESIDUAL,
-                    [str(error)],
+                TranslationErrorItem(
+                    location_path=item.location_path,
+                    item_type=item.item_type,
+                    role=item.role,
+                    original_lines=list(item.original_lines),
+                    translation_lines=list(item.translation_lines),
+                    error_type=ERR_JAPANESE_RESIDUAL,
+                    error_detail=[str(error)],
                 )
             )
             continue

@@ -1,22 +1,21 @@
-"""
-多游戏数据库管理模块。
+"""多游戏数据库管理模块。"""
 
-本模块管理 `data/db` 下的多个 SQLite 数据库文件。数据库保存 CLI 流程所需的
-游戏元数据、译文、错误表、插件规则和术语表条目。
-"""
-
+import hashlib
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from types import TracebackType
 from typing import Self
 
 import aiosqlite
 
-from app.name_context.schemas import NameContextRegistry, NameEntryKind, NameRegistryEntry
+from app.name_context.schemas import NameContextRegistry
 from app.rmmz.schema import (
-    ItemType,
+    EventCommandParameterFilter,
+    EventCommandTextRuleRecord,
+    GameData,
     PluginTextRuleRecord,
     TranslationErrorItem,
     TranslationItem,
@@ -25,8 +24,6 @@ from app.rmmz.loader import read_game_title, resolve_game_directory
 from app.observability.logging import logger
 
 from .rows import (
-    decode_name_locations,
-    decode_plugin_translate_rules,
     decode_string_list,
     row_int,
     row_item_type,
@@ -37,27 +34,40 @@ from .rows import (
 from .sql import (
     CHECK_CONNECTION_READABLE,
     CREATE_ERROR_TABLE,
+    CREATE_EVENT_COMMAND_TEXT_RULE_FILTERS_TABLE,
+    CREATE_EVENT_COMMAND_TEXT_RULE_GROUPS_TABLE,
+    CREATE_EVENT_COMMAND_TEXT_RULE_PATHS_TABLE,
     CREATE_METADATA_TABLE,
-    CREATE_NAME_CONTEXT_ENTRIES_TABLE,
+    CREATE_NAME_CONTEXT_TERMS_TABLE,
     CREATE_PLUGIN_TEXT_RULES_TABLE,
     CREATE_TRANSLATION_TABLE,
-    DELETE_ALL_NAME_CONTEXT_ENTRIES,
+    DELETE_ALL_EVENT_COMMAND_TEXT_RULE_FILTERS,
+    DELETE_ALL_EVENT_COMMAND_TEXT_RULE_GROUPS,
+    DELETE_ALL_EVENT_COMMAND_TEXT_RULE_PATHS,
+    DELETE_ALL_NAME_CONTEXT_TERMS,
     DELETE_ALL_PLUGIN_TEXT_RULES,
+    DELETE_TRANSLATION_ITEM_BY_PATH,
     DELETE_TRANSLATION_ITEMS_BY_PREFIX,
     DROP_TABLE,
     INSERT_ERROR,
-    INSERT_NAME_CONTEXT_ENTRY,
+    INSERT_EVENT_COMMAND_TEXT_RULE_FILTER,
+    INSERT_EVENT_COMMAND_TEXT_RULE_GROUP,
+    INSERT_EVENT_COMMAND_TEXT_RULE_PATH,
+    INSERT_NAME_CONTEXT_TERM,
+    INSERT_PLUGIN_TEXT_RULE,
     INSERT_TRANSLATION,
     METADATA_KEY,
     SELECT_ALL,
+    SELECT_EVENT_COMMAND_TEXT_RULE_FILTERS,
+    SELECT_EVENT_COMMAND_TEXT_RULE_GROUPS,
+    SELECT_EVENT_COMMAND_TEXT_RULE_PATHS,
     SELECT_METADATA,
-    SELECT_NAME_CONTEXT_ENTRIES,
+    SELECT_NAME_CONTEXT_TERMS,
     SELECT_PLUGIN_TEXT_RULES,
     SELECT_TABLE_NAMES_BY_PREFIX,
     SELECT_TRANSLATED_ITEMS,
     SELECT_TRANSLATION_PATHS,
     UPSERT_METADATA,
-    UPSERT_PLUGIN_TEXT_RULE,
 )
 
 DEFAULT_ERROR_TABLE_PREFIX = "translation_errors"
@@ -84,6 +94,7 @@ async def open_connection(db_path: Path) -> aiosqlite.Connection:
     """打开 SQLite 连接并设置统一行工厂。"""
     connection = await aiosqlite.connect(db_path)
     connection.row_factory = aiosqlite.Row
+    _ = await connection.execute("PRAGMA foreign_keys = ON")
     return connection
 
 
@@ -103,7 +114,10 @@ async def create_static_tables(connection: aiosqlite.Connection) -> None:
     _ = await connection.execute(CREATE_TRANSLATION_TABLE)
     _ = await connection.execute(CREATE_METADATA_TABLE)
     _ = await connection.execute(CREATE_PLUGIN_TEXT_RULES_TABLE)
-    _ = await connection.execute(CREATE_NAME_CONTEXT_ENTRIES_TABLE)
+    _ = await connection.execute(CREATE_EVENT_COMMAND_TEXT_RULE_GROUPS_TABLE)
+    _ = await connection.execute(CREATE_EVENT_COMMAND_TEXT_RULE_FILTERS_TABLE)
+    _ = await connection.execute(CREATE_EVENT_COMMAND_TEXT_RULE_PATHS_TABLE)
+    _ = await connection.execute(CREATE_NAME_CONTEXT_TERMS_TABLE)
     await connection.commit()
 
 
@@ -119,7 +133,7 @@ async def read_metadata(connection: aiosqlite.Connection, db_path: Path) -> tupl
         async with connection.execute(SELECT_METADATA, (METADATA_KEY,)) as cursor:
             row = await cursor.fetchone()
     except aiosqlite.Error as error:
-        raise RuntimeError(f"数据库 metadata 表不是当前核心版 schema，请重新注册游戏: {db_path}") from error
+        raise RuntimeError(f"数据库 metadata 表不可读，请重新注册游戏: {db_path}") from error
 
     if row is None:
         raise RuntimeError(f"数据库缺少 metadata 元数据记录: {db_path}")
@@ -133,80 +147,63 @@ async def read_metadata(connection: aiosqlite.Connection, db_path: Path) -> tupl
     return game_title.strip(), Path(game_path).resolve()
 
 
-def _read_name_entry_kind(value: str, db_path: Path) -> NameEntryKind:
-    """读取并校验数据库中的术语表条目类型。"""
-    if value not in ("speaker_name", "map_display_name"):
-        raise TypeError(f"数据库字段 kind 不是有效术语表类型: {db_path}")
-    return value
-
-
 @dataclass(slots=True)
-class GameDatabaseItem:
-    """单个游戏数据库的运行时对象。"""
+class GameRecord:
+    """单个已注册游戏的数据库元数据。"""
 
     game_title: str
     game_path: Path
     db_path: Path
-    connection: aiosqlite.Connection
 
 
-class GameDatabaseManager:
-    """多游戏数据库管理器。"""
+class GameRegistry:
+    """游戏注册表，负责发现、注册和打开目标游戏数据库。"""
 
-    def __init__(self, items: dict[str, GameDatabaseItem], db_directory: Path = DB_DIRECTORY) -> None:
-        """初始化管理器。"""
-        self.items: dict[str, GameDatabaseItem] = items
+    def __init__(self, db_directory: Path = DB_DIRECTORY) -> None:
+        """初始化注册表。"""
         self.db_directory: Path = db_directory
 
-    @classmethod
-    async def new(cls, db_directory: Path = DB_DIRECTORY) -> Self:
-        """扫描 `data/db` 并恢复全部数据库对象。"""
-        ensure_db_directory(db_directory)
-        items: dict[str, GameDatabaseItem] = {}
-        for db_path in sorted(db_directory.glob("*.db")):
+    async def list_games(self) -> list[GameRecord]:
+        """扫描数据库目录并读取每个数据库的元数据。"""
+        ensure_db_directory(self.db_directory)
+        records: list[GameRecord] = []
+        for db_path in sorted(self.db_directory.glob("*.db")):
             connection = await open_connection(db_path)
             try:
                 await check_connection_readable(connection=connection, db_path=db_path)
                 game_title, game_path = await read_metadata(connection=connection, db_path=db_path)
-                await create_static_tables(connection)
-            except Exception:
+                records.append(
+                    GameRecord(
+                        game_title=game_title,
+                        game_path=game_path,
+                        db_path=db_path,
+                    )
+                )
+            finally:
                 await connection.close()
-                raise
+        return sorted(records, key=lambda record: record.game_title)
 
-            items[game_title] = GameDatabaseItem(
-                game_title=game_title,
-                game_path=game_path,
-                db_path=db_path,
-                connection=connection,
-            )
-        return cls(items=items, db_directory=db_directory)
-
-    async def create_database(self, game_path: str | Path) -> None:
-        """为指定游戏目录创建或更新数据库绑定。"""
+    async def register_game(self, game_path: str | Path) -> GameRecord:
+        """创建或更新单个游戏数据库绑定。"""
         ensure_db_directory(self.db_directory)
         resolved_game_path = resolve_game_directory(game_path)
         game_title = read_game_title(resolved_game_path)
-        if game_title in self.items:
-            item = self.items[game_title]
-            if item.game_path == resolved_game_path:
-                return
-            await write_metadata(item.connection, game_title, resolved_game_path)
-            item.game_path = resolved_game_path
-            logger.warning(
-                f"[tag.warning]检测到同标题游戏路径变化，已更新数据库绑定路径[/tag.warning] 标题 [tag.count]{game_title}[/tag.count] 新路径 [tag.path]{resolved_game_path}[/tag.path]"
-            )
-            return
-
         db_path = build_db_path(game_title, self.db_directory)
         db_already_exists = db_path.exists()
         connection = await open_connection(db_path)
+        previous_game_path: Path | None = None
         try:
             if db_already_exists:
                 await check_connection_readable(connection=connection, db_path=db_path)
-                _ = await read_metadata(connection=connection, db_path=db_path)
-                await create_static_tables(connection)
-            else:
-                await create_static_tables(connection)
+                previous_game_title, previous_game_path = await read_metadata(
+                    connection=connection,
+                    db_path=db_path,
+                )
+                if previous_game_title != game_title:
+                    raise RuntimeError(
+                        f"数据库元数据标题与文件名目标不一致: {db_path}"
+                    )
+            await create_static_tables(connection)
             await write_metadata(connection, game_title, resolved_game_path)
         except Exception:
             await connection.close()
@@ -214,291 +211,408 @@ class GameDatabaseManager:
                 db_path.unlink(missing_ok=True)
             raise
 
-        self.items[game_title] = GameDatabaseItem(
+        await connection.close()
+        if previous_game_path is not None and previous_game_path != resolved_game_path:
+            logger.warning(
+                f"[tag.warning]检测到同标题游戏路径变化，已更新数据库绑定路径[/tag.warning] 标题 [tag.count]{game_title}[/tag.count] 新路径 [tag.path]{resolved_game_path}[/tag.path]"
+            )
+        return GameRecord(
             game_title=game_title,
             game_path=resolved_game_path,
             db_path=db_path,
-            connection=connection,
         )
+
+    async def open_game(self, game_title: str) -> "TargetGameSession":
+        """打开目标游戏数据库，返回命令级会话。"""
+        ensure_db_directory(self.db_directory)
+        db_path = build_db_path(game_title, self.db_directory)
+        if not db_path.exists():
+            raise ValueError(f"未找到游戏数据库: {game_title}")
+
+        connection = await open_connection(db_path)
+        try:
+            await check_connection_readable(connection=connection, db_path=db_path)
+            await create_static_tables(connection)
+            metadata_title, game_path = await read_metadata(
+                connection=connection,
+                db_path=db_path,
+            )
+            if metadata_title != game_title:
+                raise RuntimeError(
+                    f"数据库元数据标题不匹配: 期望 {game_title}，实际 {metadata_title}"
+                )
+            return TargetGameSession(
+                record=GameRecord(
+                    game_title=metadata_title,
+                    game_path=game_path,
+                    db_path=db_path,
+                ),
+                connection=connection,
+            )
+        except Exception:
+            await connection.close()
+            raise
+
+
+class TargetGameSession:
+    """单个目标游戏的数据库会话。"""
+
+    def __init__(self, record: GameRecord, connection: aiosqlite.Connection) -> None:
+        """初始化单游戏数据库会话。"""
+        self.record: GameRecord = record
+        self.connection: aiosqlite.Connection = connection
+        self.game_data: GameData | None = None
+
+    @property
+    def game_title(self) -> str:
+        """返回当前会话绑定的游戏标题。"""
+        return self.record.game_title
+
+    @property
+    def game_path(self) -> Path:
+        """返回当前会话绑定的游戏目录。"""
+        return self.record.game_path
+
+    @property
+    def db_path(self) -> Path:
+        """返回当前会话绑定的数据库路径。"""
+        return self.record.db_path
+
+    async def __aenter__(self) -> Self:
+        """进入命令级数据库会话。"""
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        """退出命令级数据库会话并关闭连接。"""
+        await self.close()
+
+    def set_game_data(self, game_data: GameData) -> None:
+        """把当前命令已加载的游戏数据绑定到会话。"""
+        self.game_data = game_data
+
+    def require_game_data(self) -> GameData:
+        """读取当前会话已加载的游戏数据。"""
+        if self.game_data is None:
+            raise RuntimeError("当前命令尚未加载游戏数据")
+        return self.game_data
 
     async def write_translation_items(
         self,
-        game_title: str,
-        items: Sequence[tuple[str, ItemType, str | None, list[str], list[str]]],
+        items: Sequence[TranslationItem],
     ) -> None:
         """批量写入已完成译文到主翻译表。"""
-        item = self._get_item(game_title)
         if items:
             serialized_items = [
                 (
-                    location_path,
-                    item_type,
-                    role,
-                    json.dumps(original_lines, ensure_ascii=False),
-                    json.dumps(translation_lines, ensure_ascii=False),
+                    translation_item.location_path,
+                    translation_item.item_type,
+                    translation_item.role,
+                    json.dumps(translation_item.original_lines, ensure_ascii=False),
+                    json.dumps(translation_item.source_line_paths, ensure_ascii=False),
+                    json.dumps(translation_item.translation_lines, ensure_ascii=False),
                 )
-                for location_path, item_type, role, original_lines, translation_lines in items
+                for translation_item in items
             ]
-            _ = await item.connection.executemany(INSERT_TRANSLATION, serialized_items)
-        await item.connection.commit()
+            _ = await self.connection.executemany(INSERT_TRANSLATION, serialized_items)
+        await self.connection.commit()
 
-    async def read_translation_location_paths(self, game_title: str) -> set[str]:
+    async def read_translation_location_paths(self) -> set[str]:
         """读取主翻译表中的全部已完成路径。"""
-        item = self._get_item(game_title)
-        async with item.connection.execute(SELECT_TRANSLATION_PATHS) as cursor:
+        async with self.connection.execute(SELECT_TRANSLATION_PATHS) as cursor:
             rows = await cursor.fetchall()
-        return {row_str(row, "location_path", item.db_path) for row in rows}
+        return {row_str(row, "location_path", self.db_path) for row in rows}
 
-    async def read_translated_items(self, game_title: str) -> list[TranslationItem]:
+    async def read_translated_items(self) -> list[TranslationItem]:
         """读取主翻译表中的全部正文译文。"""
-        item = self._get_item(game_title)
-        async with item.connection.execute(SELECT_TRANSLATED_ITEMS) as cursor:
+        async with self.connection.execute(SELECT_TRANSLATED_ITEMS) as cursor:
             rows = await cursor.fetchall()
 
         translated_items: list[TranslationItem] = []
         for row in rows:
-            original_lines = decode_string_list(row_str(row, "original_lines", item.db_path), "original_lines")
-            translation_lines = decode_string_list(row_str(row, "translation_lines", item.db_path), "translation_lines")
+            original_lines = decode_string_list(row_str(row, "original_lines", self.db_path), "original_lines")
+            source_line_paths = decode_string_list(
+                row_str(row, "source_line_paths", self.db_path),
+                "source_line_paths",
+            )
+            translation_lines = decode_string_list(
+                row_str(row, "translation_lines", self.db_path),
+                "translation_lines",
+            )
             translated_items.append(
                 TranslationItem(
-                    location_path=row_str(row, "location_path", item.db_path),
-                    item_type=row_item_type(row, "item_type", item.db_path),
-                    role=row_optional_str(row, "role", item.db_path),
+                    location_path=row_str(row, "location_path", self.db_path),
+                    item_type=row_item_type(row, "item_type", self.db_path),
+                    role=row_optional_str(row, "role", self.db_path),
                     original_lines=original_lines,
+                    source_line_paths=source_line_paths,
                     translation_lines=translation_lines,
                 )
             )
         return translated_items
 
-    async def read_plugin_text_rules(self, game_title: str) -> list[PluginTextRuleRecord]:
-        """读取当前游戏保存的全部插件文本规则快照。"""
-        item = self._get_item(game_title)
-        async with item.connection.execute(SELECT_PLUGIN_TEXT_RULES) as cursor:
+    async def read_plugin_text_rules(self) -> list[PluginTextRuleRecord]:
+        """读取当前游戏保存的全部插件文本规则。"""
+        async with self.connection.execute(SELECT_PLUGIN_TEXT_RULES) as cursor:
             rows = await cursor.fetchall()
 
-        records: list[PluginTextRuleRecord] = []
+        grouped_records: dict[int, PluginTextRuleRecord] = {}
         for row in rows:
-            translate_rules = decode_plugin_translate_rules(
-                row_str(row, "translate_rules_json", item.db_path)
+            plugin_index = row_int(row, "plugin_index", self.db_path)
+            record = grouped_records.get(plugin_index)
+            if record is None:
+                record = PluginTextRuleRecord(
+                    plugin_index=plugin_index,
+                    plugin_name=row_str(row, "plugin_name", self.db_path),
+                    plugin_hash=row_str(row, "plugin_hash", self.db_path),
+                    path_templates=[],
+                )
+                grouped_records[plugin_index] = record
+            record.path_templates.append(row_str(row, "path_template", self.db_path))
+        return list(grouped_records.values())
+
+    async def replace_plugin_text_rules(
+        self,
+        rule_records: list[PluginTextRuleRecord],
+    ) -> None:
+        """用一次外部导入结果替换当前游戏的全部插件文本规则。"""
+        _ = await self.connection.execute(DELETE_ALL_PLUGIN_TEXT_RULES)
+        for rule_record in rule_records:
+            for path_template in rule_record.path_templates:
+                _ = await self.connection.execute(
+                    INSERT_PLUGIN_TEXT_RULE,
+                    (
+                        rule_record.plugin_index,
+                        rule_record.plugin_name,
+                        rule_record.plugin_hash,
+                        path_template,
+                    ),
+                )
+        await self.connection.commit()
+
+    async def read_event_command_text_rules(self) -> list[EventCommandTextRuleRecord]:
+        """读取当前游戏保存的事件指令文本规则。"""
+        async with self.connection.execute(SELECT_EVENT_COMMAND_TEXT_RULE_GROUPS) as cursor:
+            group_rows = await cursor.fetchall()
+        async with self.connection.execute(SELECT_EVENT_COMMAND_TEXT_RULE_FILTERS) as cursor:
+            filter_rows = await cursor.fetchall()
+        async with self.connection.execute(SELECT_EVENT_COMMAND_TEXT_RULE_PATHS) as cursor:
+            path_rows = await cursor.fetchall()
+
+        filters_by_group: dict[str, list[EventCommandParameterFilter]] = {}
+        for row in filter_rows:
+            group_key = row_str(row, "group_key", self.db_path)
+            filters_by_group.setdefault(group_key, []).append(
+                EventCommandParameterFilter(
+                    index=row_int(row, "parameter_index", self.db_path),
+                    value=row_str(row, "parameter_value", self.db_path),
+                )
             )
+
+        paths_by_group: dict[str, list[str]] = {}
+        for row in path_rows:
+            group_key = row_str(row, "group_key", self.db_path)
+            paths_by_group.setdefault(group_key, []).append(row_str(row, "path_template", self.db_path))
+
+        records: list[EventCommandTextRuleRecord] = []
+        for row in group_rows:
+            group_key = row_str(row, "group_key", self.db_path)
             records.append(
-                PluginTextRuleRecord(
-                    plugin_index=row_int(row, "plugin_index", item.db_path),
-                    plugin_name=row_str(row, "plugin_name", item.db_path),
-                    plugin_hash=row_str(row, "plugin_hash", item.db_path),
-                    plugin_reason=row_str(row, "plugin_reason", item.db_path),
-                    translate_rules=translate_rules,
-                    imported_at=row_str(row, "imported_at", item.db_path),
+                EventCommandTextRuleRecord(
+                    command_code=row_int(row, "command_code", self.db_path),
+                    parameter_filters=filters_by_group.get(group_key, []),
+                    path_templates=paths_by_group.get(group_key, []),
                 )
             )
         return records
 
-    async def upsert_plugin_text_rule(self, game_title: str, rule_record: PluginTextRuleRecord) -> None:
-        """写入或更新单个插件的文本路径规则快照。"""
-        item = self._get_item(game_title)
-        _ = await item.connection.execute(
-            UPSERT_PLUGIN_TEXT_RULE,
-            (
-                rule_record.plugin_index,
-                rule_record.plugin_name,
-                rule_record.plugin_hash,
-                rule_record.plugin_reason,
-                json.dumps(
-                    [rule.model_dump(mode="json") for rule in rule_record.translate_rules],
-                    ensure_ascii=False,
-                ),
-                rule_record.imported_at,
-            ),
-        )
-        await item.connection.commit()
-
-    async def replace_plugin_text_rules(
+    async def replace_event_command_text_rules(
         self,
-        game_title: str,
-        rule_records: list[PluginTextRuleRecord],
+        rule_records: list[EventCommandTextRuleRecord],
     ) -> None:
-        """用一次外部导入结果替换当前游戏的全部插件文本规则。"""
-        item = self._get_item(game_title)
-        _ = await item.connection.execute(DELETE_ALL_PLUGIN_TEXT_RULES)
+        """用一次外部导入结果替换当前游戏的事件指令文本规则。"""
+        _ = await self.connection.execute(DELETE_ALL_EVENT_COMMAND_TEXT_RULE_PATHS)
+        _ = await self.connection.execute(DELETE_ALL_EVENT_COMMAND_TEXT_RULE_FILTERS)
+        _ = await self.connection.execute(DELETE_ALL_EVENT_COMMAND_TEXT_RULE_GROUPS)
         for rule_record in rule_records:
-            _ = await item.connection.execute(
-                UPSERT_PLUGIN_TEXT_RULE,
-                (
-                    rule_record.plugin_index,
-                    rule_record.plugin_name,
-                    rule_record.plugin_hash,
-                    rule_record.plugin_reason,
-                    json.dumps(
-                        [rule.model_dump(mode="json") for rule in rule_record.translate_rules],
-                        ensure_ascii=False,
-                    ),
-                    rule_record.imported_at,
-                ),
+            group_key = build_event_command_group_key(rule_record)
+            _ = await self.connection.execute(
+                INSERT_EVENT_COMMAND_TEXT_RULE_GROUP,
+                (group_key, rule_record.command_code),
             )
-        await item.connection.commit()
+            for parameter_filter in rule_record.parameter_filters:
+                _ = await self.connection.execute(
+                    INSERT_EVENT_COMMAND_TEXT_RULE_FILTER,
+                    (group_key, parameter_filter.index, parameter_filter.value),
+                )
+            for path_template in rule_record.path_templates:
+                _ = await self.connection.execute(
+                    INSERT_EVENT_COMMAND_TEXT_RULE_PATH,
+                    (group_key, path_template),
+                )
+        await self.connection.commit()
 
     async def replace_name_context_registry(
         self,
-        game_title: str,
         registry: NameContextRegistry,
     ) -> None:
         """用一次外部导入结果替换当前游戏的全部术语表条目。"""
-        item = self._get_item(game_title)
-        updated_at = registry.generated_at
-        _ = await item.connection.execute(DELETE_ALL_NAME_CONTEXT_ENTRIES)
-        for entry in registry.entries:
-            _ = await item.connection.execute(
-                INSERT_NAME_CONTEXT_ENTRY,
-                (
-                    entry.entry_id,
-                    entry.kind,
-                    entry.source_text,
-                    entry.translated_text,
-                    json.dumps(
-                        [location.model_dump(mode="json") for location in entry.locations],
-                        ensure_ascii=False,
-                    ),
-                    entry.note,
-                    updated_at,
-                ),
+        _ = await self.connection.execute(DELETE_ALL_NAME_CONTEXT_TERMS)
+        for source_text, translated_text in registry.speaker_names.items():
+            _ = await self.connection.execute(
+                INSERT_NAME_CONTEXT_TERM,
+                ("speaker_name", source_text, translated_text),
             )
-        await item.connection.commit()
+        for source_text, translated_text in registry.map_display_names.items():
+            _ = await self.connection.execute(
+                INSERT_NAME_CONTEXT_TERM,
+                ("map_display_name", source_text, translated_text),
+            )
+        await self.connection.commit()
 
-    async def read_name_context_registry(self, game_title: str) -> NameContextRegistry | None:
+    async def read_name_context_registry(self) -> NameContextRegistry | None:
         """从数据库读取当前游戏已导入的术语表。"""
-        item = self._get_item(game_title)
-        async with item.connection.execute(SELECT_NAME_CONTEXT_ENTRIES) as cursor:
+        async with self.connection.execute(SELECT_NAME_CONTEXT_TERMS) as cursor:
             rows = await cursor.fetchall()
         if not rows:
             return None
 
-        entries: list[NameRegistryEntry] = []
-        generated_at = ""
+        speaker_names: dict[str, str] = {}
+        map_display_names: dict[str, str] = {}
         for row in rows:
-            if not generated_at:
-                generated_at = row_str(row, "updated_at", item.db_path)
-            entries.append(
-                NameRegistryEntry(
-                    entry_id=row_str(row, "entry_id", item.db_path),
-                    kind=_read_name_entry_kind(row_str(row, "kind", item.db_path), item.db_path),
-                    source_text=row_str(row, "source_text", item.db_path),
-                    translated_text=row_str(row, "translated_text", item.db_path),
-                    locations=decode_name_locations(row_str(row, "locations_json", item.db_path)),
-                    note=row_str(row, "note", item.db_path),
-                )
-            )
+            kind = row_str(row, "kind", self.db_path)
+            source_text = row_str(row, "source_text", self.db_path)
+            translated_text = row_str(row, "translated_text", self.db_path)
+            if kind == "speaker_name":
+                speaker_names[source_text] = translated_text
+            elif kind == "map_display_name":
+                map_display_names[source_text] = translated_text
+            else:
+                raise TypeError(f"数据库字段 kind 不是有效术语类型: {self.db_path}")
         return NameContextRegistry(
-            game_title=game_title,
-            generated_at=generated_at,
-            entries=entries,
+            speaker_names=speaker_names,
+            map_display_names=map_display_names,
         )
 
-    async def delete_translation_items_by_prefixes(self, game_title: str, prefixes: list[str]) -> int:
+    async def delete_translation_items_by_prefixes(self, prefixes: list[str]) -> int:
         """按路径前缀批量删除主翻译表中的记录。"""
-        item = self._get_item(game_title)
         deleted_rows = 0
         for prefix in prefixes:
-            cursor = await item.connection.execute(
+            cursor = await self.connection.execute(
                 DELETE_TRANSLATION_ITEMS_BY_PREFIX,
                 (f"{prefix}%",),
             )
             if cursor.rowcount > 0:
                 deleted_rows += cursor.rowcount
-        await item.connection.commit()
+        await self.connection.commit()
         return deleted_rows
 
-    async def read_error_table_names(self, game_title: str, prefix: str = DEFAULT_ERROR_TABLE_PREFIX) -> list[str]:
-        """读取指定前缀下的全部错误表名。"""
-        item = self._get_item(game_title)
-        async with item.connection.execute(SELECT_TABLE_NAMES_BY_PREFIX, (f"{prefix}_%",)) as cursor:
+    async def delete_translation_items_except_paths(
+        self,
+        allowed_paths: set[str],
+    ) -> int:
+        """删除当前提取规则之外的主翻译表记录。"""
+        async with self.connection.execute(SELECT_TRANSLATION_PATHS) as cursor:
             rows = await cursor.fetchall()
-        return [row_str(row, "name", item.db_path) for row in rows]
 
-    async def delete_error_tables(self, game_title: str, table_names: list[str]) -> int:
+        stored_paths = {row_str(row, "location_path", self.db_path) for row in rows}
+        stale_paths = sorted(stored_paths - allowed_paths)
+        if not stale_paths:
+            return 0
+
+        _ = await self.connection.executemany(
+            DELETE_TRANSLATION_ITEM_BY_PATH,
+            [(path,) for path in stale_paths],
+        )
+        await self.connection.commit()
+        return len(stale_paths)
+
+    async def read_error_table_names(self, prefix: str = DEFAULT_ERROR_TABLE_PREFIX) -> list[str]:
+        """读取指定前缀下的全部错误表名。"""
+        async with self.connection.execute(SELECT_TABLE_NAMES_BY_PREFIX, (f"{prefix}_%",)) as cursor:
+            rows = await cursor.fetchall()
+        return [row_str(row, "name", self.db_path) for row in rows]
+
+    async def delete_error_tables(self, table_names: list[str]) -> int:
         """批量删除指定错误表。"""
-        item = self._get_item(game_title)
         unique_table_names = [name for name in dict.fromkeys(table_names) if name]
         if not unique_table_names:
             return 0
 
-        async with item.connection.execute(SELECT_TABLE_NAMES_BY_PREFIX, ("%",)) as cursor:
+        async with self.connection.execute(SELECT_TABLE_NAMES_BY_PREFIX, ("%",)) as cursor:
             rows = await cursor.fetchall()
-        existing_table_names = {row_str(row, "name", item.db_path) for row in rows}
+        existing_table_names = {row_str(row, "name", self.db_path) for row in rows}
         deletable_table_names = [name for name in unique_table_names if name in existing_table_names]
         if not deletable_table_names:
             return 0
 
         for table_name in deletable_table_names:
-            _ = await item.connection.execute(DROP_TABLE.format(table_name=table_name))
-        await item.connection.commit()
+            _ = await self.connection.execute(DROP_TABLE.format(table_name=table_name))
+        await self.connection.commit()
         return len(deletable_table_names)
 
-    async def start_error_table(self, game_title: str, prefix: str = DEFAULT_ERROR_TABLE_PREFIX) -> str:
+    async def start_error_table(self, prefix: str = DEFAULT_ERROR_TABLE_PREFIX) -> str:
         """创建当前翻译任务使用的错误表，并返回新表名。"""
-        item = self._get_item(game_title)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         table_name = f"{prefix}_{timestamp}"
-        _ = await item.connection.execute(CREATE_ERROR_TABLE.format(table_name=table_name))
-        await item.connection.commit()
+        _ = await self.connection.execute(CREATE_ERROR_TABLE.format(table_name=table_name))
+        await self.connection.commit()
         return table_name
 
     async def write_error_items(
         self,
-        game_title: str,
         table_name: str,
         items: list[TranslationErrorItem],
     ) -> None:
         """向指定错误表追加写入错误数据。"""
-        item = self._get_item(game_title)
         if items:
             serialized_items = [
                 (
-                    location_path,
-                    item_type,
-                    role,
-                    json.dumps(original_lines, ensure_ascii=False),
-                    json.dumps(translation_lines, ensure_ascii=False),
-                    error_type,
-                    json.dumps(error_detail, ensure_ascii=False),
+                    error_item.location_path,
+                    error_item.item_type,
+                    error_item.role,
+                    json.dumps(error_item.original_lines, ensure_ascii=False),
+                    json.dumps(error_item.translation_lines, ensure_ascii=False),
+                    error_item.error_type,
+                    json.dumps(error_item.error_detail, ensure_ascii=False),
                 )
-                for location_path, item_type, role, original_lines, translation_lines, error_type, error_detail in items
+                for error_item in items
             ]
-            _ = await item.connection.executemany(INSERT_ERROR.format(table_name=table_name), serialized_items)
-        await item.connection.commit()
+            _ = await self.connection.executemany(INSERT_ERROR.format(table_name=table_name), serialized_items)
+        await self.connection.commit()
 
-    async def read_table(self, game_title: str, table_name: str) -> list[dict[str, object]]:
+    async def read_table(self, table_name: str) -> list[dict[str, object]]:
         """读取指定表的所有数据，并转成字典列表。"""
-        item = self._get_item(game_title)
-        async with item.connection.execute(SELECT_ALL.format(table_name=table_name)) as cursor:
+        async with self.connection.execute(SELECT_ALL.format(table_name=table_name)) as cursor:
             rows = await cursor.fetchall()
         return [row_to_dict(row) for row in rows]
 
     async def close(self) -> None:
-        """关闭当前管理器持有的全部数据库连接。"""
-        errors: list[str] = []
-        for item in self.items.values():
-            try:
-                await item.connection.close()
-            except Exception as exc:  # pragma: no cover
-                errors.append(f"{item.db_path}: {exc}")
+        """关闭当前游戏数据库连接。"""
+        await self.connection.close()
 
-        self.items.clear()
-        if errors:
-            error_message = "\n".join(errors)
-            raise RuntimeError(f"关闭数据库连接失败:\n{error_message}")
 
-    def _get_item(self, game_title: str) -> GameDatabaseItem:
-        """根据游戏标题查找已加载的数据库对象。"""
-        item = self.items.get(game_title)
-        if item is None:
-            raise ValueError(f"未找到游戏数据库: {game_title}")
-        return item
+def build_event_command_group_key(rule_record: EventCommandTextRuleRecord) -> str:
+    """生成事件指令规则组主键。"""
+    filter_text = "|".join(
+        f"{parameter_filter.index}={parameter_filter.value}"
+        for parameter_filter in rule_record.parameter_filters
+    )
+    payload = f"{rule_record.command_code}:{filter_text}"
+    digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+    return f"event_{rule_record.command_code}_{digest}"
+
 
 __all__: list[str] = [
     "DB_DIRECTORY",
     "DEFAULT_ERROR_TABLE_PREFIX",
-    "GameDatabaseItem",
-    "GameDatabaseManager",
+    "GameRecord",
+    "GameRegistry",
+    "TargetGameSession",
     "build_db_path",
     "ensure_db_directory",
 ]

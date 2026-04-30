@@ -10,16 +10,12 @@ from .common import (
 from .extraction import PluginTextExtraction
 from .exporter import export_plugins_json_file
 from .importer import (
-    PLUGIN_RULE_IMPORT_SCHEMA_VERSION,
-    PluginRuleImportEntry,
     PluginRuleImportFile,
     build_plugin_rule_records_from_import,
     load_plugin_rule_import_file,
 )
 
 __all__: list[str] = [
-    "PLUGIN_RULE_IMPORT_SCHEMA_VERSION",
-    "PluginRuleImportEntry",
     "PluginRuleImportFile",
     "PluginTextExtraction",
     "build_plugin_hash",
