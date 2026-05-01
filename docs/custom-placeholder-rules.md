@@ -33,11 +33,11 @@ grep -roP '\\\\[A-Za-z]+(\[[^\]]*\])?' <游戏根目录>/data/ | sort -u
 
 ```json
 {
-  "(?i)\\F\\d*\\[[^\\]]+\\]": "[CUSTOM_FACE_{index}]",
-  "(?i)\\FH\\[[^\\]]+\\]": "[CUSTOM_FACE_HIDE_{index}]",
-  "(?i)\\AA\\[[^\\]]+\\]": "[CUSTOM_AA_{index}]",
-  "(?i)\\MT\\[[^\\]]+\\]": "[CUSTOM_MT_{index}]",
-  "(?i)\\AC(?![A-Za-z\\[])": "[CUSTOM_AC_{index}]"
+  "(?i)\\F\\d*\\[[^\\]]+\\]": "[CUSTOM_FACE_PORTRAIT_{index}]",
+  "(?i)\\FH\\[[^\\]]+\\]": "[CUSTOM_FACE_HIDE_COMMAND_{index}]",
+  "(?i)\\AA\\[[^\\]]+\\]": "[CUSTOM_PLUGIN_AA_MARKER_{index}]",
+  "(?i)\\MT\\[[^\\]]+\\]": "[CUSTOM_PLUGIN_MT_MARKER_{index}]",
+  "(?i)\\AC(?![A-Za-z\\[])": "[CUSTOM_PLUGIN_AC_MARKER_{index}]"
 }
 ```
 
@@ -53,6 +53,8 @@ grep -roP '\\\\[A-Za-z]+(\[[^\]]*\])?' <游戏根目录>/data/ | sort -u
 - 必须生成形如 `[CUSTOM_NAME_数字]` 的方括号占位符
 - 必须包含 `{index}`，用于区分同一规则在同一条原文中的多次命中
 - 不能生成 `[RMMZ_...]` 前缀（该前缀由内置规则保留）
+- 推荐使用能让模型理解粗略用途的完整英文命名，例如 `[CUSTOM_FACE_PORTRAIT_{index}]`
+- 如果只知道插件控制符名字、不确定具体语义，使用 `[CUSTOM_PLUGIN_控制符名_MARKER_{index}]`，不要编造含义
 
 ### 规则冲突
 
@@ -66,21 +68,21 @@ grep -roP '\\\\[A-Za-z]+(\[[^\]]*\])?' <游戏根目录>/data/ | sort -u
 
 ```json
 {
-  "(?i)\\F\\d*\\[[^\\]]+\\]": "[CUSTOM_FACE_{index}]",
-  "(?i)\\AC(?![A-Za-z\\[])": "[CUSTOM_AC_{index}]"
+  "(?i)\\F\\d*\\[[^\\]]+\\]": "[CUSTOM_FACE_PORTRAIT_{index}]",
+  "(?i)\\AC(?![A-Za-z\\[])": "[CUSTOM_PLUGIN_AC_MARKER_{index}]"
 }
 ```
 
 翻译流程中的替换过程：
 
 ```
-原文：  \F[FinF]こんにちは\AC\!
-送模：  [CUSTOM_FACE_1]こんにちは[CUSTOM_AC_2][RMMZ_WAIT_INPUT]
-译文：  [CUSTOM_FACE_1]你好[CUSTOM_AC_2][RMMZ_WAIT_INPUT]
-写回：  \F[FinF]你好\AC\!
+原文：  \F[Face01]こんにちは\AC\!
+送模：  [CUSTOM_FACE_PORTRAIT_1]こんにちは[CUSTOM_PLUGIN_AC_MARKER_2][RMMZ_WAIT_INPUT]
+译文：  [CUSTOM_FACE_PORTRAIT_1]你好[CUSTOM_PLUGIN_AC_MARKER_2][RMMZ_WAIT_INPUT]
+写回：  \F[Face01]你好\AC\!
 ```
 
-其中 `[RMMZ_WAIT_INPUT]` 来自内置标准控制符保护，`[CUSTOM_FACE_1]` 和 `[CUSTOM_AC_2]` 来自自定义规则。
+其中 `[RMMZ_WAIT_INPUT]` 来自内置标准控制符保护，`[CUSTOM_FACE_PORTRAIT_1]` 和 `[CUSTOM_PLUGIN_AC_MARKER_2]` 来自自定义规则。
 
 ## CLI 直接传入
 
@@ -88,7 +90,7 @@ grep -roP '\\\\[A-Za-z]+(\[[^\]]*\])?' <游戏根目录>/data/ | sort -u
 
 ```bash
 uv run python main.py translate --game "<游戏标题>" \
-  --placeholder-rules '{"(?i)\\\\F\\\\d*\\\\[[^\\\\]]+\\\\]":"[CUSTOM_FACE_{index}]"}'
+  --placeholder-rules '{"(?i)\\\\F\\\\d*\\\\[[^\\\\]]+\\\\]":"[CUSTOM_FACE_PORTRAIT_{index}]"}'
 ```
 
 传入 `--placeholder-rules` 后，本次运行只解析该字符串，不读取 `custom_placeholder_rules.json` 文件。

@@ -1,7 +1,7 @@
 {
-  "(?i)\\\\F\\d*\\[[^\\]]+\\]": "[CUSTOM_FACE_{index}]",
-  "(?i)\\\\FH\\[[^\\]]+\\]": "[CUSTOM_FACE_HIDE_{index}]",
-  "(?i)\\\\AA\\[[^\\]]+\\]": "[CUSTOM_AA_{index}]",
-  "(?i)\\\\MT\\[[^\\]]+\\]": "[CUSTOM_MT_{index}]",
-  "(?i)\\\\AC(?![A-Za-z\\[])": "[CUSTOM_AC_{index}]"
+  "(?i)\\\\F\\d*\\[[^\\]]+\\]": "[CUSTOM_FACE_PORTRAIT_{index}]",
+  "(?i)\\\\FH\\[[^\\]]+\\]": "[CUSTOM_FACE_HIDE_COMMAND_{index}]",
+  "(?i)\\\\AA\\[[^\\]]+\\]": "[CUSTOM_PLUGIN_AA_MARKER_{index}]",
+  "(?i)\\\\MT\\[[^\\]]+\\]": "[CUSTOM_PLUGIN_MT_MARKER_{index}]",
+  "(?i)\\\\AC(?![A-Za-z\\[])": "[CUSTOM_PLUGIN_AC_MARKER_{index}]"
 }

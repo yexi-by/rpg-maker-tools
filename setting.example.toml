@@ -14,7 +14,7 @@ worker_count = 200
 rpm = 200
 retry_count = 3
 retry_delay = 2
-system_prompt_file = "prompts/text_translation_system.txt"
+system_prompt_file = "prompts/text_translation_system.md"
 
 [event_command_text]
 default_command_codes = [357]

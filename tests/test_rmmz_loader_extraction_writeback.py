@@ -76,7 +76,7 @@ async def test_fixture_custom_control_sequences_can_be_protected(minimal_game_di
     text_rules = TextRules.from_setting(
         TextRulesSetting(),
         custom_placeholder_rules=(
-            CustomPlaceholderRule.create(r"\\F\[[^\]]+\]", "[CUSTOM_FACE_{index}]"),
+            CustomPlaceholderRule.create(r"\\F\[[^\]]+\]", "[CUSTOM_FACE_PORTRAIT_{index}]"),
         ),
     )
     game_data = await load_game_data(minimal_game_dir)
@@ -89,8 +89,8 @@ async def test_fixture_custom_control_sequences_can_be_protected(minimal_game_di
 
     item.build_placeholders(text_rules)
 
-    assert item.original_lines_with_placeholders[0] == "[CUSTOM_FACE_1]テスト一行目です。[RMMZ_WAIT_INPUT]"
-    assert item.original_lines_with_placeholders[1] == "[RMMZ_C_4]重要語[RMMZ_C_0]を含む二行目です。"
+    assert item.original_lines_with_placeholders[0] == "[CUSTOM_FACE_PORTRAIT_1]テスト一行目です。[RMMZ_WAIT_INPUT]"
+    assert item.original_lines_with_placeholders[1] == "[RMMZ_TEXT_COLOR_4]重要語[RMMZ_TEXT_COLOR_0]を含む二行目です。"
 
 
 @pytest.mark.asyncio

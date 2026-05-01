@@ -44,7 +44,7 @@ class TranslationItem(BaseModel):
     placeholder_counts: dict[str, int] = Field(default_factory=dict)
 
     def build_placeholders(self, text_rules: TextRules | None = None) -> None:
-        """为原文中的 RM 控制符构建简短占位符。"""
+        """为原文中的 RM 控制符构建语义化占位符。"""
         rules = text_rules or get_default_text_rules()
         self.original_lines_with_placeholders.clear()
         self.placeholder_map.clear()

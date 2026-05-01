@@ -139,7 +139,8 @@ uv run python main.py scan-placeholder-candidates --game "<游戏标题>" --outp
 
 - 候选全部已覆盖：继续。
 - 存在未覆盖候选：编写自定义占位符规则，再复查。
-- 不确定候选含义：结合出现形态、插件语法和上下文判断；仍不确定时询问用户。
+- 自定义占位符模板必须使用完整语义命名，例如 `[CUSTOM_FACE_PORTRAIT_{index}]`。
+- 不确定候选含义：结合出现形态、插件语法和上下文判断；仍不确定时用 `[CUSTOM_PLUGIN_<控制符名>_MARKER_{index}]` 这类中性命名，并向用户说明。
 - 未覆盖候选仍存在：不执行 `translate`。
 
 复查：

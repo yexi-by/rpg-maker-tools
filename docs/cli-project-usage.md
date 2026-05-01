@@ -176,11 +176,11 @@ uv run python main.py scan-placeholder-candidates --game "<游戏标题>" --outp
 
 ```json
 {
-  "(?i)\\F\\d*\\[[^\\]]+\\]": "[CUSTOM_FACE_{index}]",
-  "(?i)\\FH\\[[^\\]]+\\]": "[CUSTOM_FACE_HIDE_{index}]",
-  "(?i)\\AA\\[[^\\]]+\\]": "[CUSTOM_AA_{index}]",
-  "(?i)\\MT\\[[^\\]]+\\]": "[CUSTOM_MT_{index}]",
-  "(?i)\\AC(?![A-Za-z\\[])": "[CUSTOM_AC_{index}]"
+  "(?i)\\F\\d*\\[[^\\]]+\\]": "[CUSTOM_FACE_PORTRAIT_{index}]",
+  "(?i)\\FH\\[[^\\]]+\\]": "[CUSTOM_FACE_HIDE_COMMAND_{index}]",
+  "(?i)\\AA\\[[^\\]]+\\]": "[CUSTOM_PLUGIN_AA_MARKER_{index}]",
+  "(?i)\\MT\\[[^\\]]+\\]": "[CUSTOM_PLUGIN_MT_MARKER_{index}]",
+  "(?i)\\AC(?![A-Za-z\\[])": "[CUSTOM_PLUGIN_AC_MARKER_{index}]"
 }
 ```
 
@@ -189,12 +189,13 @@ uv run python main.py scan-placeholder-candidates --game "<游戏标题>" --outp
 - 键必须是合法正则表达式，且不能匹配空字符串
 - 值必须包含 `{index}`，用于区分同一规则在同一条原文中的多次命中
 - 占位符生成结果必须匹配 `[CUSTOM_NAME_数字]` 格式
+- 占位符名称应尽量完整表达用途，例如 `FACE_PORTRAIT`；未知语义时使用 `PLUGIN_<控制符名>_MARKER`
 
 如果不想使用文件，也可以在翻译时通过 CLI 参数直接传入：
 
 ```bash
 uv run python main.py translate --game "<游戏标题>" \
-  --placeholder-rules '{"(?i)\\\\F\\\\d*\\\\[[^\\\\]]+\\\\]":"[CUSTOM_FACE_{index}]"}'
+  --placeholder-rules '{"(?i)\\\\F\\\\d*\\\\[[^\\\\]]+\\\\]":"[CUSTOM_FACE_PORTRAIT_{index}]"}'
 ```
 
 ---
@@ -539,7 +540,7 @@ worker_count = 200                       # 并发 worker 数
 rpm = 200                                # 每分钟请求数上限
 retry_count = 3                          # 可恢复错误重试次数
 retry_delay = 2                          # 重试间隔秒数
-system_prompt_file = "prompts/text_translation_system.txt"  # 提示词文件路径
+system_prompt_file = "prompts/text_translation_system.md"  # 提示词文件路径
 
 # ── 事件指令参数 ──
 [event_command_text]

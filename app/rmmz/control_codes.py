@@ -69,22 +69,30 @@ class CustomPlaceholderRule:
         )
 
 
-INDEXED_STANDARD_CODES: frozenset[str] = frozenset(
-    {"V", "N", "P", "C", "I", "PX", "PY", "FS"}
-)
+INDEXED_STANDARD_CODE_NAMES: dict[str, str] = {
+    "V": "VARIABLE",
+    "N": "ACTOR_NAME",
+    "P": "PARTY_MEMBER_NAME",
+    "C": "TEXT_COLOR",
+    "I": "ICON",
+    "PX": "TEXT_X_POSITION",
+    "PY": "TEXT_Y_POSITION",
+    "FS": "FONT_SIZE",
+}
+INDEXED_STANDARD_CODES: frozenset[str] = frozenset(INDEXED_STANDARD_CODE_NAMES)
 NO_PARAM_STANDARD_PLACEHOLDERS: dict[str, str] = {
-    "G": "[RMMZ_G]",
+    "G": "[RMMZ_CURRENCY_UNIT]",
 }
 SYMBOL_STANDARD_PLACEHOLDERS: dict[str, str] = {
     "{": "[RMMZ_FONT_LARGER]",
     "}": "[RMMZ_FONT_SMALLER]",
     "\\": "[RMMZ_BACKSLASH]",
-    "$": "[RMMZ_GOLD_WINDOW]",
+    "$": "[RMMZ_SHOW_GOLD_WINDOW]",
     ".": "[RMMZ_WAIT_SHORT]",
     "|": "[RMMZ_WAIT_LONG]",
     "!": "[RMMZ_WAIT_INPUT]",
-    ">": "[RMMZ_INSTANT_ON]",
-    "<": "[RMMZ_INSTANT_OFF]",
+    ">": "[RMMZ_INSTANT_TEXT_ON]",
+    "<": "[RMMZ_INSTANT_TEXT_OFF]",
     "^": "[RMMZ_NO_WAIT]",
 }
 
@@ -105,8 +113,12 @@ TERMS_PERCENT_PLACEHOLDER_PATTERN: re.Pattern[str] = re.compile(
 STANDARD_PLACEHOLDER_PATTERN: re.Pattern[str] = re.compile(
     "|".join(
         (
-            r"\[RMMZ_(?:V|N|P|C|I|PX|PY|FS)_\d+\]",
-            r"\[RMMZ_PERCENT_\d+\]",
+            (
+                r"\[RMMZ_(?:"
+                + "|".join(re.escape(name) for name in INDEXED_STANDARD_CODE_NAMES.values())
+                + r")_\d+\]"
+            ),
+            r"\[RMMZ_MESSAGE_ARGUMENT_\d+\]",
             *(
                 re.escape(placeholder)
                 for placeholder in [
@@ -182,7 +194,7 @@ def _iter_indexed_standard_control_spans(text: str) -> list[ControlSequenceSpan]
     for match in INDEXED_STANDARD_CONTROL_PATTERN.finditer(text):
         code = match.group("code").upper()
         param = match.group("param")
-        placeholder = f"[RMMZ_{code}_{param}]"
+        placeholder = f"[RMMZ_{INDEXED_STANDARD_CODE_NAMES[code]}_{param}]"
         spans.append(
             ControlSequenceSpan(
                 start_index=match.start(),
@@ -248,7 +260,7 @@ def _iter_terms_percent_spans(text: str) -> list[ControlSequenceSpan]:
                 end_index=match.end(),
                 original=match.group(0),
                 source="standard",
-                placeholder=f"[RMMZ_PERCENT_{param}]",
+                placeholder=f"[RMMZ_MESSAGE_ARGUMENT_{param}]",
                 custom_template=None,
                 priority=0,
             )

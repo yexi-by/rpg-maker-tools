@@ -53,7 +53,7 @@ async def test_scan_placeholder_candidates_marks_custom_rule_coverage(
     )
     covered_report = await service.scan_placeholder_candidates(
         game_title="テストゲーム",
-        custom_placeholder_rules_text='{"\\\\\\\\F\\\\[[^\\\\]]+\\\\]":"[CUSTOM_FACE_{index}]"}',
+        custom_placeholder_rules_text='{"\\\\\\\\F\\\\[[^\\\\]]+\\\\]":"[CUSTOM_FACE_PORTRAIT_{index}]"}',
     )
 
     assert uncovered_report.summary["uncovered_count"] != 0

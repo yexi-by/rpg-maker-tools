@@ -131,7 +131,7 @@ async def test_long_text_width_split_does_not_break_placeholders() -> None:
     """行宽兜底不会把占位符切成不可恢复的碎片。"""
     item = await _verify_single_long_text(
         original_lines=[r"\C[4]あいう\C[0]"],
-        translated_text="[RMMZ_C_4]甲乙丙丁[RMMZ_C_0]",
+        translated_text="[RMMZ_TEXT_COLOR_4]甲乙丙丁[RMMZ_TEXT_COLOR_0]",
         text_rules=_build_text_rules(width_limit=2),
     )
 

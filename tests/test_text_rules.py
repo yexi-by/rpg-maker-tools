@@ -42,26 +42,26 @@ def test_text_rules_replace_and_restore_standard_rmmz_control_sequences() -> Non
         "%9",
     ]
     placeholders = [
-        "[RMMZ_V_1]",
-        "[RMMZ_N_2]",
-        "[RMMZ_P_3]",
-        "[RMMZ_G]",
-        "[RMMZ_C_4]",
-        "[RMMZ_I_5]",
+        "[RMMZ_VARIABLE_1]",
+        "[RMMZ_ACTOR_NAME_2]",
+        "[RMMZ_PARTY_MEMBER_NAME_3]",
+        "[RMMZ_CURRENCY_UNIT]",
+        "[RMMZ_TEXT_COLOR_4]",
+        "[RMMZ_ICON_5]",
         "[RMMZ_FONT_LARGER]",
         "[RMMZ_FONT_SMALLER]",
         "[RMMZ_BACKSLASH]",
-        "[RMMZ_GOLD_WINDOW]",
+        "[RMMZ_SHOW_GOLD_WINDOW]",
         "[RMMZ_WAIT_SHORT]",
         "[RMMZ_WAIT_LONG]",
         "[RMMZ_WAIT_INPUT]",
-        "[RMMZ_INSTANT_ON]",
-        "[RMMZ_INSTANT_OFF]",
+        "[RMMZ_INSTANT_TEXT_ON]",
+        "[RMMZ_INSTANT_TEXT_OFF]",
         "[RMMZ_NO_WAIT]",
-        "[RMMZ_PX_6]",
-        "[RMMZ_PY_7]",
-        "[RMMZ_FS_8]",
-        "[RMMZ_PERCENT_9]",
+        "[RMMZ_TEXT_X_POSITION_6]",
+        "[RMMZ_TEXT_Y_POSITION_7]",
+        "[RMMZ_FONT_SIZE_8]",
+        "[RMMZ_MESSAGE_ARGUMENT_9]",
     ]
     item = TranslationItem(
         location_path="Map001.json/1/0/0",
@@ -104,8 +104,8 @@ def test_text_rules_can_apply_custom_placeholder_json_rules() -> None:
     rules = TextRules.from_setting(
         TextRulesSetting(line_width_count_pattern="@"),
         custom_placeholder_rules=(
-            CustomPlaceholderRule.create(r"@V\[\d+\]", "[CUSTOM_AT_VAR_{index}]"),
-            CustomPlaceholderRule.create(r"<tag:[^>]+>", "[CUSTOM_TAG_{index}]"),
+            CustomPlaceholderRule.create(r"@V\[\d+\]", "[CUSTOM_AT_VARIABLE_{index}]"),
+            CustomPlaceholderRule.create(r"<tag:[^>]+>", "[CUSTOM_INLINE_TAG_{index}]"),
         ),
     )
     item = TranslationItem(
@@ -116,11 +116,11 @@ def test_text_rules_can_apply_custom_placeholder_json_rules() -> None:
 
     item.build_placeholders(rules)
     assert item.original_lines_with_placeholders == [
-        "こんにちは[CUSTOM_AT_VAR_1][CUSTOM_TAG_2][RMMZ_V_2]"
+        "こんにちは[CUSTOM_AT_VARIABLE_1][CUSTOM_INLINE_TAG_2][RMMZ_VARIABLE_2]"
     ]
 
     item.translation_lines_with_placeholders = [
-        "你好[CUSTOM_AT_VAR_1][CUSTOM_TAG_2][RMMZ_V_2]"
+        "你好[CUSTOM_AT_VARIABLE_1][CUSTOM_INLINE_TAG_2][RMMZ_VARIABLE_2]"
     ]
     item.verify_placeholders(rules)
     item.restore_placeholders()
@@ -155,7 +155,7 @@ def test_custom_placeholder_rules_load_from_json_file(tmp_path: Path) -> None:
 def test_custom_placeholder_rules_load_from_cli_json_string() -> None:
     """CLI JSON 字符串会作为本次运行的规则来源。"""
     custom_rules = load_custom_placeholder_rules_text(
-        json.dumps({r"\\F\[[^\]]+\]": "[CUSTOM_FACE_{index}]"})
+        json.dumps({r"\\F\[[^\]]+\]": "[CUSTOM_FACE_PORTRAIT_{index}]"})
     )
     rules = TextRules.from_setting(
         TextRulesSetting(),
@@ -168,7 +168,7 @@ def test_custom_placeholder_rules_load_from_cli_json_string() -> None:
     )
 
     item.build_placeholders(rules)
-    assert item.original_lines_with_placeholders == ["[CUSTOM_FACE_1]こんにちは"]
+    assert item.original_lines_with_placeholders == ["[CUSTOM_FACE_PORTRAIT_1]こんにちは"]
 
 
 def test_custom_placeholder_rules_explicit_missing_file_fails(tmp_path: Path) -> None:
