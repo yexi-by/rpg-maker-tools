@@ -50,11 +50,13 @@ class AgentToolkitService:
         game_registry: GameRegistry | None = None,
         llm_handler: LLMHandler | None = None,
         llm_check: LlmCheckFunc = run_default_llm_check,
+        setting_path: str | Path | None = None,
     ) -> None:
         """初始化服务依赖。"""
         self.game_registry: GameRegistry = game_registry or GameRegistry()
         self.llm_handler: LLMHandler = llm_handler or LLMHandler()
         self.llm_check: LlmCheckFunc = llm_check
+        self.setting_path: str | Path | None = setting_path
 
     async def doctor(self, *, game_title: str | None, check_llm: bool) -> AgentReport:
         """检查项目配置、模型连接和可选目标游戏状态。"""
@@ -63,7 +65,7 @@ class AgentToolkitService:
         summary: JsonObject = {
             "python": platform.python_version(),
             "platform": platform.platform(),
-            "setting_path": str(resolve_setting_path()),
+            "setting_path": str(resolve_setting_path(self.setting_path)),
         }
         details: JsonObject = {
             "environment_overrides": [],
@@ -77,7 +79,7 @@ class AgentToolkitService:
             _append_check(details, "python_version", "ok")
 
         try:
-            setting = load_setting()
+            setting = load_setting(self.setting_path)
             _append_check(details, "setting", "ok")
             summary["llm_model"] = setting.llm.model
             environment_overrides = load_environment_overrides()
@@ -135,7 +137,7 @@ class AgentToolkitService:
             if custom_placeholder_rules_text is None
             else load_custom_placeholder_rules_text(custom_placeholder_rules_text)
         )
-        setting = load_setting()
+        setting = load_setting(self.setting_path)
         text_rules = TextRules.from_setting(
             setting.text_rules,
             custom_placeholder_rules=custom_rules,
@@ -164,7 +166,7 @@ class AgentToolkitService:
 
     async def quality_report(self, *, game_title: str) -> AgentReport:
         """生成目标游戏当前翻译状态和质量风险报告。"""
-        setting = load_setting()
+        setting = load_setting(self.setting_path)
         text_rules = TextRules.from_setting(
             setting.text_rules,
             custom_placeholder_rules=load_custom_placeholder_rules(),
@@ -262,7 +264,7 @@ class AgentToolkitService:
             warnings.append(issue("game_skipped", "配置不可用，已跳过目标游戏深度检查"))
             return
         try:
-            setting = load_setting()
+            setting = load_setting(self.setting_path)
             text_rules = TextRules.from_setting(
                 setting.text_rules,
                 custom_placeholder_rules=load_custom_placeholder_rules(),

@@ -9,6 +9,9 @@ from app.llm import LLMHandler
 from app.persistence import GameRegistry
 from app.rmmz.schema import TranslationErrorItem, TranslationItem
 
+ROOT = Path(__file__).resolve().parents[1]
+EXAMPLE_SETTING_PATH = ROOT / "setting.example.toml"
+
 
 @pytest.mark.asyncio
 async def test_doctor_uses_fake_llm_check_without_real_request(tmp_path: Path) -> None:
@@ -24,6 +27,7 @@ async def test_doctor_uses_fake_llm_check_without_real_request(tmp_path: Path) -
     service = AgentToolkitService(
         game_registry=GameRegistry(db_dir),
         llm_check=fake_llm_check,
+        setting_path=EXAMPLE_SETTING_PATH,
     )
 
     report = await service.doctor(game_title=None, check_llm=True)
@@ -41,7 +45,7 @@ async def test_scan_placeholder_candidates_marks_custom_rule_coverage(
     """扫描命令能区分内置控制符、未覆盖自定义控制符和 CLI 覆盖规则。"""
     registry = GameRegistry(tmp_path / "db")
     _ = await registry.register_game(minimal_game_dir)
-    service = AgentToolkitService(game_registry=registry)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
 
     uncovered_report = await service.scan_placeholder_candidates(
         game_title="テストゲーム",
@@ -97,7 +101,7 @@ async def test_quality_report_counts_errors_and_model_response(
             ],
         )
 
-    service = AgentToolkitService(game_registry=registry)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     report = await service.quality_report(game_title="テストゲーム")
 
     assert report.status == "error"
