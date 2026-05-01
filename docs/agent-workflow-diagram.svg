@@ -1,0 +1,165 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1040" viewBox="0 0 1600 1040" role="img" aria-labelledby="title desc">
+  <title id="title">RPG Maker MZ Agent 翻译工具包工作流程</title>
+  <desc id="desc">展示用户、外部 Agent、CLI、数据库、模型、质量报告和写回之间的协作流程。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f7efe3"/>
+      <stop offset="48%" stop-color="#edf7f2"/>
+      <stop offset="100%" stop-color="#e9eefb"/>
+    </linearGradient>
+    <linearGradient id="agent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffdf9a"/>
+      <stop offset="100%" stop-color="#ffb86b"/>
+    </linearGradient>
+    <linearGradient id="cli" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#b7e4d1"/>
+      <stop offset="100%" stop-color="#6fc7aa"/>
+    </linearGradient>
+    <linearGradient id="data" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#cbd7ff"/>
+      <stop offset="100%" stop-color="#8ca7f2"/>
+    </linearGradient>
+    <linearGradient id="risk" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffd6d6"/>
+      <stop offset="100%" stop-color="#f79999"/>
+    </linearGradient>
+    <filter id="shadow" x="-8%" y="-12%" width="116%" height="130%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#283044" flood-opacity="0.16"/>
+    </filter>
+    <marker id="arrow" markerWidth="14" markerHeight="14" refX="10" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#344054"/>
+    </marker>
+    <style>
+      .title { font: 800 38px 'Noto Sans SC', 'Microsoft YaHei', sans-serif; fill: #243047; }
+      .subtitle { font: 500 18px 'Noto Sans SC', 'Microsoft YaHei', sans-serif; fill: #596579; }
+      .lane-title { font: 800 24px 'Noto Sans SC', 'Microsoft YaHei', sans-serif; fill: #263247; }
+      .box-title { font: 800 21px 'Noto Sans SC', 'Microsoft YaHei', sans-serif; fill: #202a3d; }
+      .box-text { font: 500 16px 'Noto Sans SC', 'Microsoft YaHei', sans-serif; fill: #344054; }
+      .small { font: 500 14px 'Noto Sans SC', 'Microsoft YaHei', sans-serif; fill: #475467; }
+      .step { font: 800 15px 'Noto Sans SC', 'Microsoft YaHei', sans-serif; fill: #ffffff; }
+      .box { rx: 22; filter: url(#shadow); stroke: rgba(36,48,71,0.12); stroke-width: 1.5; }
+      .line { stroke: #344054; stroke-width: 3; fill: none; marker-end: url(#arrow); }
+      .soft-line { stroke: #667085; stroke-width: 2.5; fill: none; marker-end: url(#arrow); stroke-dasharray: 8 8; }
+      .loop { stroke: #d15b48; stroke-width: 3; fill: none; marker-end: url(#arrow); stroke-dasharray: 10 8; }
+      .badge { fill: #344054; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1040" fill="url(#bg)"/>
+  <circle cx="1360" cy="150" r="190" fill="#ffffff" opacity="0.28"/>
+  <circle cx="210" cy="850" r="240" fill="#ffffff" opacity="0.25"/>
+  <path d="M90 190 C260 80, 390 100, 515 210 S790 340, 960 160 S1260 30, 1495 150" stroke="#ffffff" stroke-width="42" opacity="0.28" fill="none"/>
+
+  <text x="70" y="78" class="title">RPG Maker MZ Agent 翻译工具包工作流程</text>
+  <text x="72" y="112" class="subtitle">程序负责确定性处理，Agent 负责判断和质量闭环；所有临时文件必须导入数据库后才进入主流程。</text>
+
+  <text x="70" y="168" class="lane-title">用户输入</text>
+  <text x="430" y="168" class="lane-title">外部 Agent</text>
+  <text x="785" y="168" class="lane-title">CLI 工具链</text>
+  <text x="1160" y="168" class="lane-title">数据库与游戏文件</text>
+
+  <rect x="55" y="198" width="300" height="145" fill="#fff7e6" class="box"/>
+  <circle cx="85" cy="226" r="16" class="badge"/><text x="80" y="232" class="step">1</text>
+  <text x="110" y="230" class="box-title">准备输入</text>
+  <text x="85" y="268" class="box-text">项目目录 / 游戏目录</text>
+  <text x="85" y="296" class="box-text">外部临时目录</text>
+  <text x="85" y="324" class="box-text">模型环境变量 / 写回许可</text>
+
+  <rect x="410" y="198" width="300" height="145" fill="url(#agent)" class="box"/>
+  <circle cx="440" cy="226" r="16" class="badge"/><text x="435" y="232" class="step">2</text>
+  <text x="465" y="230" class="box-title">读取 Skill</text>
+  <text x="440" y="268" class="box-text">SKILL.md 是唯一执行手册</text>
+  <text x="440" y="296" class="box-text">状态机 / 停止条件</text>
+  <text x="440" y="324" class="box-text">遇到阻断及时反馈用户</text>
+
+  <rect x="765" y="198" width="300" height="145" fill="url(#cli)" class="box"/>
+  <circle cx="795" cy="226" r="16" class="badge"/><text x="790" y="232" class="step">3</text>
+  <text x="820" y="230" class="box-title">doctor 检查</text>
+  <text x="795" y="268" class="box-text">项目配置 / Python / uv</text>
+  <text x="795" y="296" class="box-text">模型连通性可选检查</text>
+  <text x="795" y="324" class="box-text">目标游戏结构检查</text>
+
+  <rect x="1120" y="198" width="330" height="145" fill="url(#data)" class="box"/>
+  <circle cx="1150" cy="226" r="16" class="badge"/><text x="1145" y="232" class="step">4</text>
+  <text x="1175" y="230" class="box-title">注册游戏</text>
+  <text x="1150" y="268" class="box-text">一个游戏一个 SQLite 数据库</text>
+  <text x="1150" y="296" class="box-text">读取标准 RMMZ data</text>
+  <text x="1150" y="324" class="box-text">未知 data JSON 默认跳过</text>
+
+  <path d="M355 270 L410 270" class="line"/>
+  <path d="M710 270 L765 270" class="line"/>
+  <path d="M1065 270 L1120 270" class="line"/>
+
+  <rect x="55" y="420" width="300" height="155" fill="#fff7e6" class="box"/>
+  <circle cx="85" cy="448" r="16" class="badge"/><text x="80" y="454" class="step">5</text>
+  <text x="110" y="452" class="box-title">扫描占位符</text>
+  <text x="85" y="490" class="box-text">scan-placeholder-candidates</text>
+  <text x="85" y="518" class="box-text">识别自定义控制符候选</text>
+  <text x="85" y="546" class="box-text">未覆盖时禁止翻译</text>
+
+  <rect x="410" y="420" width="300" height="155" fill="url(#agent)" class="box"/>
+  <circle cx="440" cy="448" r="16" class="badge"/><text x="435" y="454" class="step">6</text>
+  <text x="465" y="452" class="box-title">外部规则准备</text>
+  <text x="440" y="490" class="box-text">术语表 name_registry</text>
+  <text x="440" y="518" class="box-text">插件 JSONPath 规则</text>
+  <text x="440" y="546" class="box-text">事件指令参数规则</text>
+
+  <rect x="765" y="420" width="300" height="155" fill="url(#cli)" class="box"/>
+  <circle cx="795" cy="448" r="16" class="badge"/><text x="790" y="454" class="step">7</text>
+  <text x="820" y="452" class="box-title">显式导入数据库</text>
+  <text x="795" y="490" class="box-text">import-name-context</text>
+  <text x="795" y="518" class="box-text">import-plugin-rules</text>
+  <text x="795" y="546" class="box-text">import-event-command-rules</text>
+
+  <rect x="1120" y="420" width="330" height="155" fill="url(#data)" class="box"/>
+  <circle cx="1150" cy="448" r="16" class="badge"/><text x="1145" y="454" class="step">8</text>
+  <text x="1175" y="452" class="box-title">主流程数据源</text>
+  <text x="1150" y="490" class="box-text">数据库中的术语与规则</text>
+  <text x="1150" y="518" class="box-text">翻译缓存 / 断点续传</text>
+  <text x="1150" y="546" class="box-text">临时 JSON 不直接参与主流程</text>
+
+  <path d="M205 343 L205 420" class="line"/>
+  <path d="M355 498 L410 498" class="line"/>
+  <path d="M710 498 L765 498" class="line"/>
+  <path d="M1065 498 L1120 498" class="line"/>
+
+  <rect x="55" y="655" width="300" height="155" fill="url(#cli)" class="box"/>
+  <circle cx="85" cy="683" r="16" class="badge"/><text x="80" y="689" class="step">9</text>
+  <text x="110" y="687" class="box-title">translate 翻译</text>
+  <text x="85" y="725" class="box-text">正文 / 插件 / 事件指令</text>
+  <text x="85" y="753" class="box-text">缓存命中与去重</text>
+  <text x="85" y="781" class="box-text">失败写入错误表</text>
+
+  <rect x="410" y="655" width="300" height="155" fill="url(#cli)" class="box"/>
+  <circle cx="440" cy="683" r="16" class="badge"/><text x="435" y="689" class="step">10</text>
+  <text x="465" y="687" class="box-title">quality-report</text>
+  <text x="440" y="725" class="box-text">错误表 / 模型原始返回</text>
+  <text x="440" y="753" class="box-text">日文残留 / 占位符风险</text>
+  <text x="440" y="781" class="box-text">长文本超宽 / 可写回数量</text>
+
+  <rect x="765" y="655" width="300" height="155" fill="url(#risk)" class="box"/>
+  <circle cx="795" cy="683" r="16" class="badge"/><text x="790" y="689" class="step">11</text>
+  <text x="820" y="687" class="box-title">阻断判断</text>
+  <text x="795" y="725" class="box-text">有阻断：暂停并反馈</text>
+  <text x="795" y="753" class="box-text">修正规则 / 提示词 / 模型</text>
+  <text x="795" y="781" class="box-text">无阻断：进入写回门禁</text>
+
+  <rect x="1120" y="655" width="330" height="155" fill="url(#data)" class="box"/>
+  <circle cx="1150" cy="683" r="16" class="badge"/><text x="1145" y="689" class="step">12</text>
+  <text x="1175" y="687" class="box-title">write-back 写回</text>
+  <text x="1150" y="725" class="box-text">复制受影响原文件留档</text>
+  <text x="1150" y="753" class="box-text">写回 data 与 plugins.js</text>
+  <text x="1150" y="781" class="box-text">字体复制与引用替换</text>
+
+  <path d="M1285 575 L1285 655" class="line"/>
+  <path d="M1120 733 L1065 733" class="soft-line"/>
+  <path d="M355 733 L410 733" class="line"/>
+  <path d="M710 733 L765 733" class="line"/>
+  <path d="M1065 733 L1120 733" class="line"/>
+  <path d="M915 655 C915 610, 560 610, 560 655" class="loop"/>
+  <text x="625" y="628" class="small">有阻断时回到规则/模型修正，再重新翻译</text>
+
+  <rect x="330" y="900" width="940" height="86" fill="#ffffff" opacity="0.82" class="box"/>
+  <text x="370" y="933" class="box-title">交付门禁</text>
+  <text x="370" y="964" class="box-text">质量报告无阻断错误 + 用户允许写回 + 游戏目录可写。写回后建议用户实机抽查开场、菜单、插件界面、地图名、名字框、长文本和含控制符文本。</text>
+</svg>
