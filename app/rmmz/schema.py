@@ -155,6 +155,7 @@ class TranslationErrorItem(BaseModel):
     translation_lines: list[str] = Field(default_factory=list)
     error_type: ErrorType
     error_detail: list[str] = Field(default_factory=list)
+    model_response: str = ""
 
 
 class TranslationData(BaseModel):

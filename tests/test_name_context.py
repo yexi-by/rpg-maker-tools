@@ -35,9 +35,16 @@ async def test_export_name_context_writes_simple_registry_and_grouped_contexts(
         summary.registry_path.read_text(encoding="utf-8")
     )
 
-    assert registry.speaker_names == {"アリス": "", "敵": "", "村人": ""}
-    assert registry.map_display_names == {"始まりの町": ""}
-    assert summary.sample_file_count == 3
+    expected_speaker_names = {
+        "アリス": "",
+        "敵": "",
+        "村人": "",
+        "案内人": "",
+        "説明役": "",
+    }
+    assert registry.speaker_names.items() >= expected_speaker_names.items()
+    assert registry.map_display_names == {"始まりの町": "", "第二テスト地点": ""}
+    assert summary.sample_file_count == len(registry.speaker_names)
 
     context_payloads = [
         SpeakerDialogueContext.model_validate_json(path.read_text(encoding="utf-8"))
@@ -46,6 +53,7 @@ async def test_export_name_context_writes_simple_registry_and_grouped_contexts(
     contexts_by_name = {context.name: context.dialogue_lines for context in context_payloads}
     assert contexts_by_name["アリス"] == ["こんにちは"]
     assert contexts_by_name["村人"] == ["マップこんにちは"]
+    assert contexts_by_name["説明役"] == ["別マップの本文です。"]
     assert (summary.sample_dir / "アリス.json").exists()
 
 

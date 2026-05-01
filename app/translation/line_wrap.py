@@ -23,21 +23,9 @@ def align_long_text_lines(
     location_path: str | None,
     text_rules: TextRules,
 ) -> list[str]:
-    """按模型断句做行数适配，再执行行宽兜底。"""
-    normalized_target_lines = max(1, target_lines)
-    if not text:
-        return [""] * normalized_target_lines
-
-    lines = text.split("\n")
-
-    if len(lines) > normalized_target_lines:
-        keep_lines = lines[: max(normalized_target_lines - 1, 0)]
-        merged_tail = " ".join(lines[max(normalized_target_lines - 1, 0) :])
-        keep_lines.append(merged_tail)
-        lines = keep_lines
-
-    if len(lines) < normalized_target_lines:
-        lines.extend([""] * (normalized_target_lines - len(lines)))
+    """按模型断句保留译文行，再执行行宽兜底。"""
+    _ = target_lines
+    lines = text.splitlines()
 
     return split_overwide_lines(
         lines=lines,

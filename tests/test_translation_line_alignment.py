@@ -53,27 +53,53 @@ async def _verify_single_long_text(
 
 
 @pytest.mark.asyncio
-async def test_long_text_pads_empty_lines_when_model_returns_fewer_lines() -> None:
-    """模型返回行数不足时在尾部补空行。"""
+async def test_long_text_keeps_fewer_model_lines_without_padding() -> None:
+    """模型返回行数较少时不再补空行。"""
     item = await _verify_single_long_text(
         original_lines=["あ", "い", "う"],
         translated_text="甲\n乙",
         text_rules=_build_text_rules(width_limit=47),
     )
 
-    assert item.translation_lines == ["甲", "乙", ""]
+    assert item.translation_lines == ["甲", "乙"]
 
 
 @pytest.mark.asyncio
-async def test_long_text_merges_overflow_lines_into_last_original_line() -> None:
-    """模型返回行数过多时把溢出内容合并到原末行。"""
+async def test_invalid_model_response_is_recorded_on_error_items() -> None:
+    """模型返回无法解析时，错误条目保留原始模型返回。"""
+    item = TranslationItem(
+        location_path="Map001.json/1/0/0",
+        item_type="long_text",
+        original_lines=["あ"],
+    )
+    raw_response = "无法解析的模型输出"
+    right_queue: asyncio.Queue[list[TranslationItem] | None] = asyncio.Queue()
+    error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
+
+    await verify_translation_batch(
+        ai_result=raw_response,
+        items=[item],
+        right_queue=right_queue,
+        error_queue=error_queue,
+        text_rules=_build_text_rules(width_limit=47),
+    )
+
+    assert right_queue.empty()
+    error_items = await error_queue.get()
+    assert error_items is not None
+    assert error_items[0].model_response == raw_response
+
+
+@pytest.mark.asyncio
+async def test_long_text_keeps_more_model_lines_without_merging() -> None:
+    """模型返回行数较多时保留额外译文行。"""
     item = await _verify_single_long_text(
         original_lines=["あ", "い", "う"],
         translated_text="甲\n乙\n丙\n丁",
         text_rules=_build_text_rules(width_limit=47),
     )
 
-    assert item.translation_lines == ["甲", "乙", "丙 丁"]
+    assert item.translation_lines == ["甲", "乙", "丙", "丁"]
 
 
 @pytest.mark.asyncio
@@ -81,11 +107,11 @@ async def test_long_text_keeps_empty_lines_when_width_split_expands_lines() -> N
     """行宽兜底切分非空行时保留模型输出的空行。"""
     item = await _verify_single_long_text(
         original_lines=["あ", "い"],
-        translated_text="甲乙丙丁\n",
+        translated_text="甲乙丙丁\n\n乙",
         text_rules=_build_text_rules(width_limit=2),
     )
 
-    assert item.translation_lines == ["甲乙", "丙丁", ""]
+    assert item.translation_lines == ["甲乙", "丙丁", "", "乙"]
 
 
 @pytest.mark.asyncio

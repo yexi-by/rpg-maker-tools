@@ -50,6 +50,7 @@ async def verify_translation_batch(
                     translation_lines=[],
                     error_type=ERR_MISSING_KEY,
                     error_detail=["模型返回无法解析为 JSON 对象", f"详细错误: {error}"],
+                    model_response=ai_result,
                 )
             )
         if error_items:
@@ -68,6 +69,7 @@ async def verify_translation_batch(
                     translation_lines=[],
                     error_type=ERR_MISSING_KEY,
                     error_detail=[f"AI漏翻: 未找到键 {item.location_path}"],
+                    model_response=ai_result,
                 )
             )
             continue
@@ -91,6 +93,7 @@ async def verify_translation_batch(
                         translation_lines=list(translation_lines),
                         error_type=ERR_PLACEHOLDER_MISMATCH,
                         error_detail=[f"选项行数不匹配: 期望 {len(item.original_lines)} 行, 实际 {len(translation_lines)} 行"],
+                        model_response=ai_result,
                     )
                 )
                 continue
@@ -113,6 +116,7 @@ async def verify_translation_batch(
                     translation_lines=list(item.translation_lines_with_placeholders),
                     error_type=ERR_PLACEHOLDER_MISMATCH,
                     error_detail=str(error).split(";\n"),
+                    model_response=ai_result,
                 )
             )
             continue
@@ -129,6 +133,7 @@ async def verify_translation_batch(
                     translation_lines=list(item.translation_lines),
                     error_type=ERR_JAPANESE_RESIDUAL,
                     error_detail=[str(error)],
+                    model_response=ai_result,
                 )
             )
             continue

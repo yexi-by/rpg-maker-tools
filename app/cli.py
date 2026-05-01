@@ -16,6 +16,7 @@ from typing import Self, cast
 from rich.progress import Progress, TaskID
 from rich.table import Table
 
+from app.agent_toolkit import AgentReport, AgentToolkitService
 from app.application.handler import TextTranslationSummary, TranslationHandler
 from app.config import SettingOverrides
 from app.observability import console, get_progress, logger
@@ -121,6 +122,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     _ = subparsers.add_parser("list", help="列出当前已注册游戏")
 
+    doctor_parser = subparsers.add_parser("doctor", help="检查项目配置、模型连接和目标游戏状态")
+    _ = doctor_parser.add_argument("--game", help="目标游戏标题；不传时只检查项目级状态")
+    _ = doctor_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+    _ = doctor_parser.add_argument("--no-check-llm", action="store_true", help="跳过模型连通性检查")
+
     add_game_parser = subparsers.add_parser("add-game", help="注册新的 RPG Maker 游戏目录")
     _ = add_game_parser.add_argument("--path", required=True, help="RPG Maker 游戏根目录")
 
@@ -160,6 +166,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _ = import_event_command_parser.add_argument("--game", required=True, help="目标游戏标题")
     _ = import_event_command_parser.add_argument("--input", required=True, help="外部事件指令规则 JSON 文件")
+
+    scan_placeholder_parser = subparsers.add_parser(
+        "scan-placeholder-candidates",
+        help="扫描疑似自定义控制符候选",
+    )
+    _ = scan_placeholder_parser.add_argument("--game", required=True, help="目标游戏标题")
+    _ = scan_placeholder_parser.add_argument("--output", help="写出 JSON 报告文件")
+    _ = scan_placeholder_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+    _ = scan_placeholder_parser.add_argument(
+        "--placeholder-rules",
+        help="本次扫描使用的自定义占位符规则 JSON 字符串；传入后不会读取项目根目录默认规则",
+    )
+
+    quality_report_parser = subparsers.add_parser(
+        "quality-report",
+        help="生成当前游戏翻译质量报告",
+    )
+    _ = quality_report_parser.add_argument("--game", required=True, help="目标游戏标题")
+    _ = quality_report_parser.add_argument("--output", help="写出 JSON 报告文件")
+    _ = quality_report_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
     translate_parser = subparsers.add_parser("translate", help="翻译指定游戏的正文")
     _ = translate_parser.add_argument("--game", required=True, help="目标游戏标题")
@@ -212,8 +238,6 @@ def build_parser() -> argparse.ArgumentParser:
 def add_setting_override_arguments(parser: argparse.ArgumentParser) -> None:
     """为正文翻译命令增加 `setting.toml` 等价覆盖参数。"""
     group = parser.add_argument_group("配置覆盖")
-    _ = group.add_argument("--llm-base-url", help="正文模型服务 URL")
-    _ = group.add_argument("--llm-api-key", help="正文模型服务 API Key")
     _ = group.add_argument("--llm-model", help="正文模型名称")
     _ = group.add_argument("--llm-timeout", type=int, help="正文模型请求超时秒数")
     _ = group.add_argument("--translation-token-size", type=int, help="每批目标 token 上限")
@@ -278,6 +302,8 @@ async def dispatch_command(args: argparse.Namespace) -> int:
 
     if command == "list":
         return await run_list_command()
+    if command == "doctor":
+        return await run_doctor_command(args)
     if command == "add-game":
         return await run_add_game_command(args)
     if command == "export-plugins-json":
@@ -288,6 +314,10 @@ async def dispatch_command(args: argparse.Namespace) -> int:
         return await run_export_event_commands_json_command(args)
     if command == "import-event-command-rules":
         return await run_import_event_command_rules_command(args)
+    if command == "scan-placeholder-candidates":
+        return await run_scan_placeholder_candidates_command(args)
+    if command == "quality-report":
+        return await run_quality_report_command(args)
     if command == "translate":
         return await run_translate_command(args)
     if command == "write-back":
@@ -340,6 +370,16 @@ async def run_import_plugin_rules_command(args: argparse.Namespace) -> int:
     return 0
 
 
+async def run_doctor_command(args: argparse.Namespace) -> int:
+    """执行 `doctor` 命令。"""
+    game_title = read_optional_str_arg(args, "game")
+    check_llm = not read_bool_arg(args, "no_check_llm")
+    service = AgentToolkitService()
+    report = await service.doctor(game_title=game_title, check_llm=check_llm)
+    write_report_outputs(report=report, args=args, title="环境诊断报告")
+    return 1 if report.status == "error" else 0
+
+
 async def run_export_plugins_json_command(args: argparse.Namespace) -> int:
     """执行 `export-plugins-json` 命令。"""
     game_title = read_str_arg(args, "game")
@@ -370,6 +410,28 @@ async def run_import_event_command_rules_command(args: argparse.Namespace) -> in
     async with HandlerSession() as handler:
         _ = await handler.import_event_command_rules(game_title=game_title, input_path=input_path)
     return 0
+
+
+async def run_scan_placeholder_candidates_command(args: argparse.Namespace) -> int:
+    """执行 `scan-placeholder-candidates` 命令。"""
+    game_title = read_str_arg(args, "game")
+    placeholder_rules_text = read_optional_str_arg(args, "placeholder_rules")
+    service = AgentToolkitService()
+    report = await service.scan_placeholder_candidates(
+        game_title=game_title,
+        custom_placeholder_rules_text=placeholder_rules_text,
+    )
+    write_report_outputs(report=report, args=args, title="自定义控制符候选报告")
+    return 1 if report.status == "error" else 0
+
+
+async def run_quality_report_command(args: argparse.Namespace) -> int:
+    """执行 `quality-report` 命令。"""
+    game_title = read_str_arg(args, "game")
+    service = AgentToolkitService()
+    report = await service.quality_report(game_title=game_title)
+    write_report_outputs(report=report, args=args, title="翻译质量报告")
+    return 1 if report.status == "error" else 0
 
 
 async def run_translate_command(args: argparse.Namespace) -> int:
@@ -504,12 +566,54 @@ def ensure_text_translation_success(summary: TextTranslationSummary) -> None:
         raise CliBusinessError(f"正文翻译产生错误条目，已停止后续流程：成功 {summary.success_count} 条，失败 {summary.error_count} 条")
 
 
+def write_report_outputs(*, report: AgentReport, args: argparse.Namespace, title: str) -> None:
+    """按用户参数输出 Agent 工具包报告。"""
+    output_path = read_optional_path_arg(args, "output")
+    json_text = report.to_json_text()
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        _ = output_path.write_text(f"{json_text}\n", encoding="utf-8")
+
+    if read_bool_arg(args, "json_output"):
+        print(json_text)
+        return
+
+    render_agent_report(report=report, title=title)
+    if output_path is not None:
+        logger.success(f"[tag.success]JSON 报告已写出[/tag.success] 文件 [tag.path]{output_path}[/tag.path]")
+
+
+def render_agent_report(*, report: AgentReport, title: str) -> None:
+    """用 Rich 表格展示报告摘要和问题列表。"""
+    summary_table = Table(title=title)
+    summary_table.add_column("字段", style="cyan")
+    summary_table.add_column("值", style="magenta")
+    summary_table.add_row("状态", report.status)
+    for key, value in report.summary.items():
+        summary_table.add_row(key, str(value))
+    console.print(summary_table)
+
+    if report.errors:
+        error_table = Table(title="阻断错误")
+        error_table.add_column("代码", style="red")
+        error_table.add_column("说明", style="white")
+        for item in report.errors:
+            error_table.add_row(item.code, item.message)
+        console.print(error_table)
+
+    if report.warnings:
+        warning_table = Table(title="告警")
+        warning_table.add_column("代码", style="yellow")
+        warning_table.add_column("说明", style="white")
+        for item in report.warnings:
+            warning_table.add_row(item.code, item.message)
+        console.print(warning_table)
+
+
 def build_setting_overrides(args: argparse.Namespace) -> SettingOverrides:
     """从 CLI 参数构建配置覆盖对象。"""
     rpm_value, rpm_is_set = read_optional_rpm_arg(args, "translation_rpm")
     return SettingOverrides(
-        llm_base_url=read_optional_str_arg(args, "llm_base_url"),
-        llm_api_key=read_optional_str_arg(args, "llm_api_key"),
         llm_model=read_optional_str_arg(args, "llm_model"),
         llm_timeout=read_optional_int_arg(args, "llm_timeout"),
         translation_token_size=read_optional_int_arg(args, "translation_token_size"),

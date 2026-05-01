@@ -1,7 +1,7 @@
 [llm]
-base_url = "https://api.deepseek.com"
-api_key = "YOUR_TEXT_API_KEY"
-model = "deepseek-v4-pro"
+base_url = "https://api.example.com/v1"
+api_key = "YOUR_API_KEY"
+model = "example-model"
 timeout = 600
 
 [translation_context]
@@ -26,10 +26,12 @@ replacement_font_path = "fonts/NotoSansSC-Regular.ttf"
 strip_wrapping_punctuation_pairs = [["「", "」"]]
 allowed_japanese_chars = ["っ", "ッ", "ー", "・", "。", "～", "…"]
 allowed_japanese_tail_chars = ["あ", "い", "う", "え", "お", "っ", "ッ", "ん", "ー", "よ", "ね", "な", "か"]
-line_split_punctuations = ["，", "。", "、", "；", "：", "！", "？", "…", "～", "—", "♪", "♡", "）", "】", "」", "』", ",", ".", ";", ":", "!", "?"]
+line_split_punctuations = [
+  "，", "。", "、", "；", "：", "！", "？", "…", "～", "—", "♪", "♡",
+  "）", "】", "」", "』", ",", ".", ";", ":", "!", "?",
+]
 long_text_line_width_limit = 26
 line_width_count_pattern = "\\S"
 source_text_required_pattern = "[\\u3040-\\u309F\\u30A0-\\u30FF\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uF900-\\uFAFF]+"
 japanese_segment_pattern = "[\\u3040-\\u309F\\u30A0-\\u30FF]+"
 residual_escape_sequence_pattern = "\\\\[nrt]"
-

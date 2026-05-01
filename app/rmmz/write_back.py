@@ -117,16 +117,15 @@ def _write_line_commands_by_paths(
         raise ValueError(f"长文本缺少逐行写回路径: {item.location_path}")
 
     existing_line_count = len(item.source_line_paths)
-    padded_translation_lines = _prepare_long_text_write_lines(
+    translation_lines = _prepare_long_text_write_lines(
         item=item,
         text_rules=text_rules,
     )
-    if len(padded_translation_lines) < existing_line_count:
-        padded_translation_lines.extend([""] * (existing_line_count - len(padded_translation_lines)))
+    write_line_count = min(existing_line_count, len(translation_lines))
 
     for source_line_path, translated_text in zip(
-        item.source_line_paths,
-        padded_translation_lines[:existing_line_count],
+        item.source_line_paths[:write_line_count],
+        translation_lines[:write_line_count],
         strict=True,
     ):
         commands, command_index = _locate_commands(
@@ -137,10 +136,19 @@ def _write_line_commands_by_paths(
         if target_command.get("code") != expected_code:
             raise RuntimeError(
                 f"逐行路径指向的指令类型错误: {source_line_path}"
-            )
+        )
         _write_first_parameter(target_command, translated_text)
 
-    extra_lines = padded_translation_lines[existing_line_count:]
+    if len(translation_lines) < existing_line_count:
+        _delete_surplus_line_commands(
+            writable_data=game_data.writable_data,
+            item=item,
+            expected_code=expected_code,
+            surplus_source_line_paths=item.source_line_paths[len(translation_lines) :],
+        )
+        return
+
+    extra_lines = translation_lines[existing_line_count:]
     if not extra_lines:
         return
 
@@ -152,6 +160,40 @@ def _write_line_commands_by_paths(
     )
 
 
+def _delete_surplus_line_commands(
+    *,
+    writable_data: dict[str, JsonValue],
+    item: TranslationItem,
+    expected_code: Code,
+    surplus_source_line_paths: list[str],
+) -> None:
+    """删除译文不再需要的原始 401/405 行指令。"""
+    if not surplus_source_line_paths:
+        return
+    _ensure_source_paths_share_command_list(item.source_line_paths, item.location_path)
+    indexes: list[int] = []
+    command_array: JsonArray | None = None
+    for source_line_path in surplus_source_line_paths:
+        current_command_array, command_index = _locate_command_array(
+            writable_data=writable_data,
+            location_path=source_line_path,
+        )
+        if command_array is None:
+            command_array = current_command_array
+        elif command_array is not current_command_array:
+            raise ValueError(f"长文本逐行路径跨事件列表，无法删除多余行: {item.location_path}")
+
+        target_command = ensure_json_object(current_command_array[command_index], source_line_path)
+        if target_command.get("code") != expected_code:
+            raise RuntimeError(f"多余行删除锚点指令类型错误: {source_line_path}")
+        indexes.append(command_index)
+
+    if command_array is None:
+        return
+    for command_index in sorted(indexes, reverse=True):
+        del command_array[command_index]
+
+
 def _prepare_long_text_write_lines(
     *,
     item: TranslationItem,
@@ -159,12 +201,20 @@ def _prepare_long_text_write_lines(
 ) -> list[str]:
     """在写回前按当前配置再次执行长文本行宽兜底。"""
     if text_rules is None:
-        return list(item.translation_lines)
-    return split_overwide_lines(
+        return _strip_trailing_empty_lines(list(item.translation_lines))
+    return _strip_trailing_empty_lines(split_overwide_lines(
         lines=list(item.translation_lines),
         location_path=item.location_path,
         text_rules=text_rules,
-    )
+    ))
+
+
+def _strip_trailing_empty_lines(lines: list[str]) -> list[str]:
+    """删除长文本尾部空行，保留中间空行。"""
+    stripped_lines = list(lines)
+    while stripped_lines and not stripped_lines[-1]:
+        _ = stripped_lines.pop()
+    return stripped_lines
 
 
 def _insert_extra_line_commands(

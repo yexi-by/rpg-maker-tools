@@ -94,6 +94,20 @@ def is_debug_enabled(args: argparse.Namespace) -> bool:
     return isinstance(debug_value, bool) and debug_value
 
 
+def is_json_output_enabled(args: argparse.Namespace) -> bool:
+    """
+    判断当前命令是否要求标准输出保持纯 JSON。
+
+    Args:
+        args: argparse 返回的命名空间对象。
+
+    Returns:
+        用户是否启用了当前子命令的 `--json` 输出。
+    """
+    json_value = getattr(args, "json_output", False)
+    return isinstance(json_value, bool) and json_value
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """
     解析参数并执行对应 CLI 子命令。
@@ -106,7 +120,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     raw_argv = tuple(argv) if argv is not None else tuple(sys.argv[1:])
     args = build_parser().parse_args(raw_argv)
-    setup_logger(level="DEBUG" if is_debug_enabled(args) else "INFO")
+    setup_logger(
+        level="DEBUG" if is_debug_enabled(args) else "INFO",
+        use_console=not is_json_output_enabled(args),
+    )
 
     started_at = time.perf_counter()
     exit_code = 0

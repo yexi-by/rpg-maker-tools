@@ -10,6 +10,11 @@ import tomllib
 from pathlib import Path
 from typing import cast
 
+from app.config.environment import (
+    EnvironmentOverrides,
+    apply_environment_overrides,
+    load_environment_overrides,
+)
 from app.config.overrides import SettingOverrides, apply_setting_overrides
 from app.config.schemas import Setting
 from app.observability.logging import logger
@@ -37,6 +42,8 @@ def load_setting(
         overrides=overrides,
     )
     apply_setting_overrides(raw_config=raw_config, overrides=overrides)
+    environment_overrides = load_environment_overrides()
+    apply_environment_overrides(raw_config=raw_config, overrides=environment_overrides)
     raw_config_snapshot = copy.deepcopy(raw_config)
 
     setting = Setting.model_validate(raw_config)
@@ -46,6 +53,7 @@ def load_setting(
             setting_path=resolved_setting_path,
             raw_config=raw_config_snapshot,
             overrides=overrides,
+            environment_overrides=environment_overrides,
         )
     )
     return setting
@@ -121,6 +129,7 @@ def _build_setting_summary(
     setting_path: Path,
     raw_config: dict[str, object],
     overrides: SettingOverrides | None,
+    environment_overrides: EnvironmentOverrides,
 ) -> str:
     """构造适合直接输出到日志的配置摘要。"""
     text_service = setting.llm
@@ -139,6 +148,9 @@ def _build_setting_summary(
     ]
     if overrides is not None and overrides.has_any():
         lines.append("CLI 覆盖: 已应用本次命令传入的配置值")
+    if environment_overrides.has_any():
+        names = "、".join(environment_overrides.enabled_names())
+        lines.append(f"环境变量覆盖: 已应用 [tag.count]{names}[/tag.count]")
     return "\n".join(lines)
 
 

@@ -579,6 +579,7 @@ class TargetGameSession:
                     json.dumps(error_item.translation_lines, ensure_ascii=False),
                     error_item.error_type,
                     json.dumps(error_item.error_detail, ensure_ascii=False),
+                    error_item.model_response,
                 )
                 for error_item in items
             ]

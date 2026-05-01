@@ -31,7 +31,8 @@ CREATE_ERROR_TABLE = """
         original_lines    TEXT NOT NULL,
         translation_lines TEXT NOT NULL,
         error_type        TEXT NOT NULL,
-        error_detail      TEXT NOT NULL
+        error_detail      TEXT NOT NULL,
+        model_response    TEXT NOT NULL
     )
 ;
 """
@@ -112,8 +113,8 @@ INSERT_TRANSLATION = f"""
 INSERT_ERROR = """
 --sql
     INSERT OR REPLACE INTO [{table_name}]
-    (location_path, item_type, role, original_lines, translation_lines, error_type, error_detail)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    (location_path, item_type, role, original_lines, translation_lines, error_type, error_detail, model_response)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ;
 """
 

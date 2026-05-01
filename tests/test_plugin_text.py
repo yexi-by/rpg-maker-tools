@@ -70,6 +70,8 @@ async def test_plugin_text_extracts_rule_matched_leaves(minimal_game_dir: Path) 
     leaf_paths = {leaf.path for leaf in leaves}
     assert "$['parameters']['Message']" in leaf_paths
     assert "$['parameters']['Nested']['text']" in leaf_paths
+    assert "$['parameters']['List'][0]['text']" in leaf_paths
+    assert "$['parameters']['List'][1]['text']" in leaf_paths
 
     rule_record = PluginTextRuleRecord(
         plugin_index=0,
@@ -78,6 +80,8 @@ async def test_plugin_text_extracts_rule_matched_leaves(minimal_game_dir: Path) 
         path_templates=[
             "$['parameters']['Message']",
             "$['parameters']['Nested']['text']",
+            "$['parameters']['List'][0]['text']",
+            "$['parameters']['List'][1]['text']",
             "$['parameters']['Count']",
         ],
     )
@@ -87,6 +91,8 @@ async def test_plugin_text_extracts_rule_matched_leaves(minimal_game_dir: Path) 
     assert {item.location_path for item in items} == {
         "plugins.js/0/Message",
         "plugins.js/0/Nested/text",
+        "plugins.js/0/List/0/text",
+        "plugins.js/0/List/1/text",
     }
 
 

@@ -8,8 +8,6 @@ from typing import cast
 class SettingOverrides:
     """命令行传入的运行配置覆盖值。"""
 
-    llm_base_url: str | None = None
-    llm_api_key: str | None = None
     llm_model: str | None = None
     llm_timeout: int | None = None
     translation_token_size: int | None = None
@@ -37,8 +35,6 @@ class SettingOverrides:
         """判断本次命令是否传入了任何配置覆盖。"""
         return any(
             (
-                self.llm_base_url is not None,
-                self.llm_api_key is not None,
                 self.llm_model is not None,
                 self.llm_timeout is not None,
                 self.translation_token_size is not None,
@@ -73,8 +69,6 @@ def apply_setting_overrides(
         return
 
     llm = _read_or_create_section(raw_config, "llm")
-    _set_if_present(llm, "base_url", overrides.llm_base_url)
-    _set_if_present(llm, "api_key", overrides.llm_api_key)
     _set_if_present(llm, "model", overrides.llm_model)
     _set_if_present(llm, "timeout", overrides.llm_timeout)
 

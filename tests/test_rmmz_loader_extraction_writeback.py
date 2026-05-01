@@ -11,6 +11,7 @@ from app.application.file_writer import write_game_files
 from app.application.font_replacement import apply_font_replacement
 from app.config.schemas import TextRulesSetting
 from app.rmmz import DataTextExtraction, load_game_data
+from app.rmmz.control_codes import CustomPlaceholderRule
 from app.rmmz.schema import PLUGINS_FILE_NAME
 from app.rmmz.text_rules import JsonValue, TextRules, coerce_json_value, ensure_json_array, ensure_json_object, get_default_text_rules
 from app.rmmz.write_back import write_data_text
@@ -34,7 +35,9 @@ async def test_loader_only_keeps_standard_rmmz_data_files(minimal_game_dir: Path
     assert "UnknownPluginData.json" not in game_data.data
     assert "System.json" in game_data.data
     assert "Map001.json" in game_data.map_data
+    assert "Map002.json" in game_data.map_data
     assert game_data.plugins_js[0]["name"] == "TestPlugin"
+    assert game_data.plugins_js[1]["name"] == "ComplexPlugin"
 
 
 @pytest.mark.asyncio
@@ -53,9 +56,41 @@ async def test_data_extraction_covers_core_text_sources(minimal_game_dir: Path) 
     assert "CommonEvents.json/1/2" in paths
     assert "CommonEvents.json/1/3" in paths
     assert "CommonEvents.json/1/4/parameters/3/message" not in paths
+    assert "CommonEvents.json/2/0" in paths
+    assert "CommonEvents.json/2/4" in paths
+    assert "CommonEvents.json/2/5" in paths
+    assert "CommonEvents.json/2/8" in paths
+    assert "Map001.json/2/0/0" in paths
+    assert "Map001.json/2/0/3" in paths
+    assert "Map002.json/1/0/0" in paths
     assert "System.json/gameTitle" in paths
     assert "System.json/terms/basic/1" not in paths
     assert "Actors.json/1/name" in paths
+    assert "Items.json/1/description" in paths
+    assert "Skills.json/1/message1" in paths
+
+
+@pytest.mark.asyncio
+async def test_fixture_custom_control_sequences_can_be_protected(minimal_game_dir: Path) -> None:
+    """测试夹具里的自定义控制符可通过外部规则保护。"""
+    text_rules = TextRules.from_setting(
+        TextRulesSetting(),
+        custom_placeholder_rules=(
+            CustomPlaceholderRule.create(r"\\F\[[^\]]+\]", "[CUSTOM_FACE_{index}]"),
+        ),
+    )
+    game_data = await load_game_data(minimal_game_dir)
+    extracted = DataTextExtraction(game_data, text_rules).extract_all_text()
+    item = next(
+        candidate
+        for candidate in extracted["CommonEvents.json"].translation_items
+        if candidate.location_path == "CommonEvents.json/2/0"
+    )
+
+    item.build_placeholders(text_rules)
+
+    assert item.original_lines_with_placeholders[0] == "[CUSTOM_FACE_1]テスト一行目です。[RMMZ_WAIT_INPUT]"
+    assert item.original_lines_with_placeholders[1] == "[RMMZ_C_4]重要語[RMMZ_C_0]を含む二行目です。"
 
 
 @pytest.mark.asyncio
@@ -153,6 +188,84 @@ async def test_name_text_write_back_inserts_extra_401_lines(minimal_game_dir: Pa
 
 
 @pytest.mark.asyncio
+async def test_write_back_inserts_401_without_shifting_later_name_block(minimal_game_dir: Path) -> None:
+    """前一个名字框插入额外 401 时，后一个名字框仍按原始定位正确写回。"""
+    common_events_path = minimal_game_dir / "data" / "CommonEvents.json"
+    raw_events = _read_test_json(common_events_path)
+    events = ensure_json_array(raw_events, "CommonEvents")
+    event = ensure_json_object(events[1], "CommonEvents[1]")
+    event["list"] = [
+        {"code": 101, "parameters": [0, 0, 0, 2, "案内人A"]},
+        {"code": 401, "parameters": ["前半一行目"]},
+        {"code": 101, "parameters": [0, 0, 0, 2, "案内人B"]},
+        {"code": 401, "parameters": ["後半一行目"]},
+        {"code": 0, "parameters": []},
+    ]
+    _rewrite_json(common_events_path, raw_events)
+
+    game_data = await load_game_data(minimal_game_dir)
+    extracted = DataTextExtraction(game_data, get_default_text_rules()).extract_all_text()
+    common_items = extracted["CommonEvents.json"].translation_items
+    first_item = next(item for item in common_items if item.location_path == "CommonEvents.json/1/0")
+    second_item = next(item for item in common_items if item.location_path == "CommonEvents.json/1/2")
+    first_item.translation_lines = ["前半译文一", "前半译文二", "前半译文三"]
+    second_item.translation_lines = ["后半译文"]
+
+    reset_writable_copies(game_data)
+    write_data_text(game_data, [first_item, second_item])
+
+    common_events = ensure_json_array(game_data.writable_data["CommonEvents.json"], "CommonEvents")
+    common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
+    commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
+
+    assert ensure_json_object(commands[0], "command0")["code"] == 101
+    assert ensure_json_array(ensure_json_object(commands[1], "command1")["parameters"], "command1.parameters")[0] == "前半译文一"
+    assert ensure_json_array(ensure_json_object(commands[2], "command2")["parameters"], "command2.parameters")[0] == "前半译文二"
+    assert ensure_json_array(ensure_json_object(commands[3], "command3")["parameters"], "command3.parameters")[0] == "前半译文三"
+    assert ensure_json_object(commands[4], "command4")["code"] == 101
+    assert ensure_json_array(ensure_json_object(commands[5], "command5")["parameters"], "command5.parameters")[0] == "后半译文"
+
+
+@pytest.mark.asyncio
+async def test_write_back_deletes_401_without_shifting_later_name_block(minimal_game_dir: Path) -> None:
+    """前一个名字框删除多余 401 时，后一个名字框仍按原始定位正确写回。"""
+    common_events_path = minimal_game_dir / "data" / "CommonEvents.json"
+    raw_events = _read_test_json(common_events_path)
+    events = ensure_json_array(raw_events, "CommonEvents")
+    event = ensure_json_object(events[1], "CommonEvents[1]")
+    event["list"] = [
+        {"code": 101, "parameters": [0, 0, 0, 2, "案内人A"]},
+        {"code": 401, "parameters": ["前半一行目"]},
+        {"code": 401, "parameters": ["前半二行目"]},
+        {"code": 101, "parameters": [0, 0, 0, 2, "案内人B"]},
+        {"code": 401, "parameters": ["後半一行目"]},
+        {"code": 0, "parameters": []},
+    ]
+    _rewrite_json(common_events_path, raw_events)
+
+    game_data = await load_game_data(minimal_game_dir)
+    extracted = DataTextExtraction(game_data, get_default_text_rules()).extract_all_text()
+    common_items = extracted["CommonEvents.json"].translation_items
+    first_item = next(item for item in common_items if item.location_path == "CommonEvents.json/1/0")
+    second_item = next(item for item in common_items if item.location_path == "CommonEvents.json/1/3")
+    first_item.translation_lines = ["前半译文"]
+    second_item.translation_lines = ["后半译文"]
+
+    reset_writable_copies(game_data)
+    write_data_text(game_data, [first_item, second_item])
+
+    common_events = ensure_json_array(game_data.writable_data["CommonEvents.json"], "CommonEvents")
+    common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
+    commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
+
+    assert ensure_json_object(commands[0], "command0")["code"] == 101
+    assert ensure_json_array(ensure_json_object(commands[1], "command1")["parameters"], "command1.parameters")[0] == "前半译文"
+    assert ensure_json_object(commands[2], "command2")["code"] == 101
+    assert ensure_json_array(ensure_json_object(commands[3], "command3")["parameters"], "command3.parameters")[0] == "后半译文"
+    assert ensure_json_object(commands[4], "command4")["code"] == 0
+
+
+@pytest.mark.asyncio
 async def test_write_data_text_splits_overwide_long_text_before_write_back(minimal_game_dir: Path) -> None:
     """写回阶段按当前行宽配置再次切分已有长译文。"""
     game_data = await load_game_data(minimal_game_dir)
@@ -236,8 +349,8 @@ async def test_scroll_text_commands_are_grouped_by_adjacent_405(minimal_game_dir
 
 
 @pytest.mark.asyncio
-async def test_long_text_write_back_clears_extra_original_lines(minimal_game_dir: Path) -> None:
-    """译文行数少于原始 405 行数时，剩余原始行写为空字符串。"""
+async def test_long_text_write_back_deletes_extra_original_lines(minimal_game_dir: Path) -> None:
+    """译文行数少于原始 405 行数时，删除多余原始行指令。"""
     common_events_path = minimal_game_dir / "data" / "CommonEvents.json"
     raw_events = _read_test_json(common_events_path)
     events = ensure_json_array(raw_events, "CommonEvents")
@@ -266,7 +379,40 @@ async def test_long_text_write_back_clears_extra_original_lines(minimal_game_dir
     common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
     commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
     assert ensure_json_array(ensure_json_object(commands[0], "command0")["parameters"], "command0.parameters")[0] == "滚动第一行"
-    assert ensure_json_array(ensure_json_object(commands[1], "command1")["parameters"], "command1.parameters")[0] == ""
+    assert ensure_json_object(commands[1], "command1")["code"] == 0
+
+
+@pytest.mark.asyncio
+async def test_long_text_write_back_ignores_trailing_empty_translation_lines(minimal_game_dir: Path) -> None:
+    """长文本写回忽略译文尾部空行，避免生成空白文本指令。"""
+    common_events_path = minimal_game_dir / "data" / "CommonEvents.json"
+    raw_events = _read_test_json(common_events_path)
+    events = ensure_json_array(raw_events, "CommonEvents")
+    event = ensure_json_object(events[1], "CommonEvents[1]")
+    event["list"] = [
+        {"code": 405, "parameters": ["スクロール一行目"]},
+        {"code": 405, "parameters": ["スクロール二行目"]},
+        {"code": 0, "parameters": []},
+    ]
+    _rewrite_json(common_events_path, raw_events)
+
+    game_data = await load_game_data(minimal_game_dir)
+    extracted = DataTextExtraction(game_data, get_default_text_rules()).extract_all_text()
+    scroll_item = next(
+        candidate
+        for candidate in extracted["CommonEvents.json"].translation_items
+        if candidate.location_path == "CommonEvents.json/1/0"
+    )
+    scroll_item.translation_lines = ["滚动第一行", ""]
+
+    reset_writable_copies(game_data)
+    write_data_text(game_data, [scroll_item])
+
+    common_events = ensure_json_array(game_data.writable_data["CommonEvents.json"], "CommonEvents")
+    common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
+    commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
+    assert ensure_json_array(ensure_json_object(commands[0], "command0")["parameters"], "command0.parameters")[0] == "滚动第一行"
+    assert ensure_json_object(commands[1], "command1")["code"] == 0
 
 
 @pytest.mark.asyncio

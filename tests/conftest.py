@@ -63,6 +63,37 @@ def minimal_game_dir(tmp_path: Path) -> Path:
                     {"code": 0, "parameters": []},
                 ],
             },
+            {
+                "id": 2,
+                "list": [
+                    {"code": 101, "parameters": [0, 0, 0, 2, "案内人"]},
+                    {"code": 401, "parameters": [r"\F[GuideA]テスト一行目です。\!"]},
+                    {"code": 401, "parameters": [r"\C[4]重要語\C[0]を含む二行目です。"]},
+                    {"code": 401, "parameters": ["Plain English helper line"]},
+                    {"code": 102, "parameters": [["第一選択", "English Choice"], 0, 0, 2, 0]},
+                    {"code": 405, "parameters": ["スクロール一行目"]},
+                    {"code": 405, "parameters": ["スクロール二行目"]},
+                    {"code": 405, "parameters": [""]},
+                    {"code": 405, "parameters": [r"\F[ScrollFace]別スクロール"]},
+                    {
+                        "code": 357,
+                        "parameters": [
+                            "ComplexPlugin",
+                            "ShowWindow",
+                            0,
+                            {
+                                "window": {
+                                    "title": "複雑タイトル",
+                                    "body": "複雑本文",
+                                },
+                                "choices": ["第一項目", "第二項目"],
+                                "file": "img/pictures/Window.png",
+                            },
+                        ],
+                    },
+                    {"code": 0, "parameters": []},
+                ],
+            },
         ],
     )
     write_json(
@@ -104,6 +135,46 @@ def minimal_game_dir(tmp_path: Path) -> Path:
                         }
                     ],
                 },
+                {
+                    "id": 2,
+                    "name": "案内イベント",
+                    "note": "",
+                    "pages": [
+                        {
+                            "list": [
+                                {"code": 101, "parameters": [0, 0, 0, 2, "案内人"]},
+                                {"code": 401, "parameters": [r"\F[MapFace]マップ案内です。"]},
+                                {"code": 401, "parameters": ["重要地点へ進みます。"]},
+                                {"code": 102, "parameters": [["進む", "戻る"], 0, 0, 2, 0]},
+                                {"code": 0, "parameters": []},
+                            ]
+                        }
+                    ],
+                },
+            ],
+        },
+    )
+    write_json(
+        data_dir / "Map002.json",
+        {
+            "displayName": "第二テスト地点",
+            "note": "",
+            "events": [
+                None,
+                {
+                    "id": 1,
+                    "name": "説明役",
+                    "note": "",
+                    "pages": [
+                        {
+                            "list": [
+                                {"code": 101, "parameters": [0, 0, 0, 2, "説明役"]},
+                                {"code": 401, "parameters": ["別マップの本文です。"]},
+                                {"code": 0, "parameters": []},
+                            ]
+                        }
+                    ],
+                },
             ],
         },
     )
@@ -120,6 +191,31 @@ def minimal_game_dir(tmp_path: Path) -> Path:
             },
         ],
     )
+    write_json(
+        data_dir / "Items.json",
+        [
+            None,
+            {
+                "id": 1,
+                "name": "回復薬",
+                "note": "",
+                "description": "体力を回復する。",
+            },
+        ],
+    )
+    write_json(
+        data_dir / "Skills.json",
+        [
+            None,
+            {
+                "id": 1,
+                "name": "火の術",
+                "note": "",
+                "description": "炎で攻撃する。",
+                "message1": "は火の術を唱えた！",
+            },
+        ],
+    )
     write_json(data_dir / "UnknownPluginData.json", [{"id": 1, "name": "これは無視される"}])
 
     plugins: list[JsonValue] = [
@@ -130,10 +226,39 @@ def minimal_game_dir(tmp_path: Path) -> Path:
             "parameters": {
                 "Message": "プラグイン本文",
                 "Nested": json.dumps({"text": "入れ子本文", "file": "Actor1.png"}, ensure_ascii=False),
+                "List": json.dumps(
+                    [
+                        {"text": "配列本文", "file": "Window.png"},
+                        {"text": "二つ目の本文", "enabled": "true"},
+                    ],
+                    ensure_ascii=False,
+                ),
                 "File": "img/pictures/Actor1.png",
                 "Count": "123",
             },
-        }
+        },
+        {
+            "name": "ComplexPlugin",
+            "status": True,
+            "description": "複雑テスト",
+            "parameters": {
+                "Window": json.dumps(
+                    {
+                        "title": "ウィンドウ見出し",
+                        "body": "ウィンドウ本文",
+                        "font": "GameFont",
+                    },
+                    ensure_ascii=False,
+                ),
+                "Rows": json.dumps(
+                    [
+                        {"label": "一行目", "path": "img/system/Icon.png"},
+                        {"label": "二行目", "value": "auto"},
+                    ],
+                    ensure_ascii=False,
+                ),
+            },
+        },
     ]
     plugins_text = f"var $plugins = {json.dumps(plugins, ensure_ascii=False, indent=2)};\n"
     _ = (js_dir / "plugins.js").write_text(plugins_text, encoding="utf-8")

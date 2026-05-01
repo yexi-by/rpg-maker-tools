@@ -906,6 +906,7 @@ class TranslationHandler:
                         translation_lines=list(error_item.translation_lines),
                         error_type=error_item.error_type,
                         error_detail=list(error_item.error_detail),
+                        model_response=error_item.model_response,
                     )
                 )
         return expanded_error_items

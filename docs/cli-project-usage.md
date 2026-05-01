@@ -28,8 +28,8 @@
 
 核心流程分为三个阶段：
 
-1. **准备阶段**：注册游戏 → 识别自定义控制符 → 通过外部 Agent 产出插件规则、事件指令规则和术语表 → 导入数据库
-2. **翻译阶段**：从游戏文件中提取正文 → 调用 LLM 翻译 → 译文写入数据库
+1. **准备阶段**：诊断环境 → 注册游戏 → 识别自定义控制符 → 通过外部 Agent 产出插件规则、事件指令规则和术语表 → 导入数据库
+2. **翻译阶段**：从游戏文件中提取正文 → 调用 LLM 翻译 → 译文写入数据库 → 生成质量报告
 3. **回写阶段**：从数据库读取译文 → 写回游戏 `data/*.json` 和 `js/plugins.js` → 同步字体引用
 
 程序启动入口是项目根目录下的 `main.py`，所有命令通过 `uv run python main.py <命令>` 执行。
@@ -57,7 +57,13 @@ uv sync
 
 ### 配置文件
 
-项目根目录的 `setting.toml` 是默认配置文件。开始前至少需要确认以下字段：
+项目根目录的 `setting.toml` 是默认配置文件。首次使用时先从示例文件复制本地配置：
+
+```bash
+cp setting.example.toml setting.toml
+```
+
+`setting.toml` 只保存本机配置，不进入版本库。开始前至少需要确认以下字段：
 
 ```
 [llm]
@@ -84,19 +90,29 @@ uv run pytest
 
 | 步骤 | 命令 | 说明 |
 | --- | --- | --- |
-| 1 | `add-game` | 注册游戏 |
-| 2 | 手动检查 | 识别游戏自定义控制符，编写 `custom_placeholder_rules.json` |
-| 3 | `export-plugins-json` + 外部 Agent + `import-plugin-rules` | 准备插件文本规则 |
-| 4 | `export-event-commands-json` + 外部 Agent + `import-event-command-rules` | 准备事件指令文本规则 |
-| 5 | `export-name-context` + 外部 Agent + `import-name-context` | 准备名字框和地图名术语 |
-| 6 | `translate` | 正文翻译 |
-| 7 | `write-back` | 回写游戏文件 |
+| 1 | `doctor` | 检查项目配置和模型连接 |
+| 2 | `add-game` | 注册游戏 |
+| 3 | `scan-placeholder-candidates` | 识别游戏自定义控制符候选 |
+| 4 | `export-plugins-json` + 外部 Agent + `import-plugin-rules` | 准备插件文本规则 |
+| 5 | `export-event-commands-json` + 外部 Agent + `import-event-command-rules` | 准备事件指令文本规则 |
+| 6 | `export-name-context` + 外部 Agent + `import-name-context` | 准备名字框和地图名术语 |
+| 7 | `translate` | 正文翻译 |
+| 8 | `quality-report` | 检查错误表、残留、占位符和超宽行 |
+| 9 | `write-back` | 回写游戏文件 |
 
-第 2 ~ 5 步的顺序可以灵活调整，但第 6 步翻译必须在规则和术语导入之后执行。第 7 步回写必须在翻译完成后执行。不想逐步执行的话，第 6 + 7 步可以用 `run-all` 一步完成。
+第 3 ~ 6 步的顺序可以灵活调整，但第 7 步翻译必须在规则和术语导入之后执行。第 9 步回写必须在质量报告没有阻断错误后执行。不想逐步执行的话，第 7 + 9 步可以用 `run-all` 一步完成。
 
 ---
 
 ## 4. 第一步：注册游戏
+
+注册前可以先执行项目级诊断：
+
+```bash
+uv run python main.py doctor --no-check-llm
+```
+
+需要检查模型连通性时去掉 `--no-check-llm`。
 
 ```bash
 uv run python main.py add-game --path "<游戏根目录>"
@@ -108,6 +124,12 @@ uv run python main.py add-game --path "<游戏根目录>"
 
 ```bash
 uv run python main.py list
+```
+
+检查目标游戏状态：
+
+```bash
+uv run python main.py doctor --game "<游戏标题>" --no-check-llm
 ```
 
 输出示例：
@@ -131,7 +153,15 @@ RPG Maker MZ 的标准控制符（`\V[n]`、`\C[n]`、`\N[n]`、`\.`、`\!`、`\
 
 但很多游戏会通过插件引入自定义控制符，例如 `\F[FinF]`（表情差分）、`\AC`（自动换行）、`\MT[xxx]`（自定义标记）等。在启动翻译前，必须把这些自定义控制符写成正则规则，否则它们会被当作普通日文送进模型，导致翻译质量下降甚至译文损坏。
 
-### 检查游戏文本中的自定义控制符
+### 扫描候选控制符
+
+```bash
+uv run python main.py scan-placeholder-candidates --game "<游戏标题>" --output "<外部临时目录>/placeholder-candidates.json"
+```
+
+候选报告会标记每个反斜杠控制符是否已被内置标准规则覆盖，或是否已被当前自定义规则覆盖。需要给 Agent 解析时可加 `--json`。
+
+### 人工确认游戏文本中的自定义控制符
 
 翻看游戏 `data/` 目录下的 JSON 文件（尤其是 `MapXXX.json`、`CommonEvents.json`、`Troops.json`），搜索反斜杠开头的非标准标记。常见形态：
 
@@ -323,7 +353,7 @@ uv run python main.py translate --game "<游戏标题>"
 6. 跳过数据库中已有译文的条目（断点续传）
 7. 按正文内容去重（同原文、同类型、同角色的条目只送模型一次）
 8. 分批送入 LLM 翻译
-9. 成功译文写入主翻译表，失败记录写入错误表
+9. 成功译文写入主翻译表，失败记录写入错误表；错误表的 `model_response` 字段保留本批模型原始返回，方便排查 JSON 解析失败和批量输出不稳定
 
 ### 9.2 CLI 参数说明
 
@@ -332,8 +362,6 @@ uv run python main.py translate --game "<游戏标题>" [选项]
 
 选项：
   --placeholder-rules <JSON>     自定义占位符规则 JSON 字符串
-  --llm-base-url <URL>           LLM 服务地址
-  --llm-api-key <KEY>            LLM API Key
   --llm-model <MODEL>            LLM 模型名称
   --llm-timeout <秒>            请求超时
   --translation-token-size <数量> 每批目标 token 上限
@@ -377,6 +405,16 @@ uv run python main.py translate --game "<游戏标题>" [选项]
 ```
 
 详细日志写入 `logs/` 目录，包含每批请求的开始、成功、失败和重试记录。
+
+### 9.5 质量报告
+
+翻译后执行：
+
+```bash
+uv run python main.py quality-report --game "<游戏标题>" --output "<外部临时目录>/quality-report.json"
+```
+
+报告会统计待翻译数量、最新错误表、错误类型、模型原始返回数量、日文残留、占位符风险、超宽行和可写回数量。存在阻断错误时先修正规则、提示词或模型配置，再重新执行 `translate`。
 
 ---
 
@@ -457,17 +495,35 @@ uv run python main.py run-all --game "<游戏标题>" --skip-write-back
 
 ### 13.1 配置优先级
 
+模型连接密钥相关配置：
+
+环境变量 > `setting.toml`
+
+其他运行配置：
+
 CLI 参数 > `setting.toml` > 内置默认值
 
-当 CLI 传入某参数时，本次运行完全使用 CLI 值，忽略 `setting.toml` 对应字段。未传参数则使用 `setting.toml` 配置。
+当环境变量 `RPG_MAKER_TOOLS_LLM_BASE_URL` 或 `RPG_MAKER_TOOLS_LLM_API_KEY` 存在时，本次运行优先使用环境变量中的模型地址或密钥。这样可以临时切换服务，同时避免把密钥写进命令行参数日志。
+
+除模型地址和密钥外，当 CLI 传入某参数时，本次运行完全使用 CLI 值，忽略 `setting.toml` 对应字段。未传参数则使用 `setting.toml` 配置。
+
+PowerShell 示例：
+
+```powershell
+$env:RPG_MAKER_TOOLS_LLM_BASE_URL = "https://api.example.com"
+$env:RPG_MAKER_TOOLS_LLM_API_KEY = "<API_KEY>"
+uv run python main.py translate --game "<游戏标题>"
+```
 
 ### 13.2 `setting.toml` 完整说明
+
+项目提交 `setting.example.toml` 作为示例配置。实际运行前复制为 `setting.toml`，并按本机模型服务和游戏需求调整。
 
 ```toml
 # ── LLM 服务连接 ──
 [llm]
 base_url = "https://api.deepseek.com"   # 模型服务地址
-api_key = "YOUR_TEXT_API_KEY"                  # API 密钥
+api_key = "<API_KEY>"                  # API 密钥
 model = "deepseek-chat"                  # 模型名称
 timeout = 600                            # 请求超时秒数
 
@@ -510,8 +566,8 @@ residual_escape_sequence_pattern = "\\\\[nrt]"  # 残留检查前剥离的转义
 
 | `setting.toml` 字段 | CLI 参数 |
 | --- | --- |
-| `llm.base_url` | `--llm-base-url` |
-| `llm.api_key` | `--llm-api-key` |
+| `llm.base_url` | 环境变量 `RPG_MAKER_TOOLS_LLM_BASE_URL` |
+| `llm.api_key` | 环境变量 `RPG_MAKER_TOOLS_LLM_API_KEY` |
 | `llm.model` | `--llm-model` |
 | `llm.timeout` | `--llm-timeout` |
 | `translation_context.token_size` | `--translation-token-size` |
@@ -533,7 +589,9 @@ residual_escape_sequence_pattern = "\\\\[nrt]"  # 残留检查前剥离的转义
 | 命令 | 用途 | 示例 |
 | --- | --- | --- |
 | `list` | 列出已注册游戏 | `uv run python main.py list` |
+| `doctor` | 检查项目或目标游戏状态 | `uv run python main.py doctor --game "<标题>" --no-check-llm` |
 | `add-game` | 注册新游戏 | `uv run python main.py add-game --path "<游戏根目录>"` |
+| `scan-placeholder-candidates` | 扫描疑似自定义控制符 | `uv run python main.py scan-placeholder-candidates --game "<标题>" --output "<临时目录>/placeholder-candidates.json"` |
 | `export-plugins-json` | 导出插件配置 | `uv run python main.py export-plugins-json --game "<标题>" --output "<临时目录>/plugins.json"` |
 | `import-plugin-rules` | 导入插件规则 | `uv run python main.py import-plugin-rules --game "<标题>" --input "<临时目录>/plugin-rules.json"` |
 | `export-event-commands-json` | 导出事件指令参数 | `uv run python main.py export-event-commands-json --game "<标题>" --output "<临时目录>/ec.json" --code 357 355` |
@@ -542,6 +600,7 @@ residual_escape_sequence_pattern = "\\\\[nrt]"  # 残留检查前剥离的转义
 | `import-name-context` | 导入术语表 | `uv run python main.py import-name-context --game "<标题>" --input "<临时目录>/names/name_registry.json"` |
 | `write-name-context` | 单独写回名字框和地图名 | `uv run python main.py write-name-context --game "<标题>"` |
 | `translate` | 正文翻译 | `uv run python main.py translate --game "<标题>"` |
+| `quality-report` | 生成翻译质量报告 | `uv run python main.py quality-report --game "<标题>" --output "<临时目录>/quality-report.json"` |
 | `write-back` | 回写游戏文件 | `uv run python main.py write-back --game "<标题>"` |
 | `run-all` | 翻译 + 回写一步完成 | `uv run python main.py run-all --game "<标题>"` |
 
@@ -565,7 +624,7 @@ residual_escape_sequence_pattern = "\\\\[nrt]"  # 残留检查前剥离的转义
 
 两种方式：
 
-1. 每次执行时用 CLI 参数覆盖：`--llm-model "model-name" --llm-api-key "key"`
+1. 每次执行时用 CLI 参数覆盖模型名，并用环境变量覆盖模型地址或密钥
 2. 修改 `setting.toml` 后再执行
 
 ### Q: 只想翻译不写回文件？
@@ -579,8 +638,9 @@ uv run python main.py run-all --game "<游戏标题>" --skip-write-back
 ### Q: 如何验证翻译质量？
 
 1. 先用 `translate --game "<标题>"` 翻译
-2. 检查 `data/db/<游戏标题>.db` 中的错误表（`translation_errors_*`）
-3. 不满意时修改规则或提示词后重新 `import-*` + `translate`
+2. 执行 `quality-report --game "<标题>" --output "<临时目录>/quality-report.json"`
+3. 根据报告中的错误类型、模型原始返回、日文残留、占位符风险和超宽行修正规则或提示词
+4. 重新执行 `translate` 并再次生成质量报告
 
 ### Q: 多个游戏可以共享插件规则吗？
 
@@ -597,5 +657,4 @@ uv run python main.py run-all --game "<游戏标题>" --skip-write-back
 ```bash
 uv run pytest
 ```
-
 

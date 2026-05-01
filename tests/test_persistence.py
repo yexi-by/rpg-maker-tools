@@ -10,6 +10,7 @@ from app.rmmz.schema import (
     EventCommandParameterFilter,
     EventCommandTextRuleRecord,
     PluginTextRuleRecord,
+    TranslationErrorItem,
     TranslationItem,
 )
 
@@ -102,3 +103,22 @@ async def test_registry_and_target_session_use_injected_directory(minimal_game_d
         )
         await session.replace_name_context_registry(name_registry)
         assert await session.read_name_context_registry() == name_registry
+
+        error_table_name = await session.start_error_table()
+        await session.write_error_items(
+            error_table_name,
+            [
+                TranslationErrorItem(
+                    location_path="Map001.json/1/0/0",
+                    item_type="long_text",
+                    role=None,
+                    original_lines=["原文"],
+                    translation_lines=[],
+                    error_type="AI漏翻",
+                    error_detail=["无法解析"],
+                    model_response="模型原始返回",
+                )
+            ],
+        )
+        error_rows = await session.read_table(error_table_name)
+        assert error_rows[0]["model_response"] == "模型原始返回"

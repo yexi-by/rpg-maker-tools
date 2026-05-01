@@ -40,14 +40,24 @@ async def test_event_command_json_export_uses_configured_command_codes(
         ),
     )
 
-    assert command_count == 1
+    assert command_count == 2
     json_value_adapter: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
     exported_value = json_value_adapter.validate_json(output_path.read_text(encoding="utf-8"))
     root = ensure_json_object(exported_value, "event-commands.json")
     commands = ensure_json_array(root["357"], "event-commands.json.357")
-    first_parameters = ensure_json_array(commands[0], "event-commands.json.357[0]")
-    assert first_parameters[0] == "TestPlugin"
-    assert first_parameters[1] == "Show"
+    plugin_actions: set[tuple[str, str]] = set()
+    for index, command in enumerate(commands):
+        parameters = ensure_json_array(command, f"event-commands.json.357[{index}]")
+        plugin_name = parameters[0]
+        action_name = parameters[1]
+        assert isinstance(plugin_name, str)
+        assert isinstance(action_name, str)
+        plugin_actions.add((plugin_name, action_name))
+
+    assert plugin_actions == {
+        ("TestPlugin", "Show"),
+        ("ComplexPlugin", "ShowWindow"),
+    }
 
 
 def test_event_command_code_resolution_uses_configured_default_array() -> None:
