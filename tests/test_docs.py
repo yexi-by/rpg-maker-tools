@@ -46,6 +46,17 @@ def test_translation_skill_covers_blocking_paths() -> None:
         "event-command-rules.json",
         "plugin-rules.json",
         "name_registry.json",
+        "当前游戏数据库中的术语表、插件规则或事件指令规则为空且尚未确认游戏本身没有对应内容时，不执行 `translate`",
+        "必须由当前 Agent 自己分析导出文件；有内容就生成导入 JSON",
+        "三类数据都是翻译前强制检查项",
+        "强制的是导出、分析、确认和验收，不是凭空产出非空规则",
+        "不要编造规则或术语",
+        "确认游戏本身没有对应内容",
+        "即使数据库计数仍为 0",
+        "plugins.json` 是空数组",
+        "所有编码数组都为空",
+        "把没有看懂结构的情况当成“游戏没有对应内容”",
+        "删除 `<外部临时目录>` 下的 `name-context`",
         "反馈模板",
     ]
     for phrase in required_phrases:
