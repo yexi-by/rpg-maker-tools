@@ -48,6 +48,22 @@ async def test_doctor_uses_fake_llm_check_without_real_request(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_doctor_creates_missing_db_directory(tmp_path: Path) -> None:
+    """doctor 会自愈创建缺失的固定数据库目录。"""
+    db_dir = tmp_path / "missing-db"
+    service = AgentToolkitService(
+        game_registry=GameRegistry(db_dir),
+        setting_path=EXAMPLE_SETTING_PATH,
+    )
+
+    report = await service.doctor(game_title=None, check_llm=False)
+
+    error_codes = {error.code for error in report.errors}
+    assert "db_dir" not in error_codes
+    assert db_dir.exists()
+
+
+@pytest.mark.asyncio
 async def test_scan_placeholder_candidates_marks_custom_rule_coverage(
     minimal_game_dir: Path,
     tmp_path: Path,

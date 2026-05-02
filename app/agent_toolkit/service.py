@@ -25,7 +25,7 @@ from app.application.file_writer import reset_writable_copies
 from app.config import load_custom_placeholder_rules_text
 from app.config.environment import load_environment_overrides
 from app.llm import ChatMessage, LLMHandler
-from app.persistence import GameRegistry, TargetGameSession
+from app.persistence import GameRegistry, TargetGameSession, ensure_db_directory
 from app.plugin_text import (
     PluginTextExtraction,
     build_plugin_rule_records_from_import,
@@ -985,10 +985,12 @@ class AgentToolkitService:
         """检查项目固定目录和终端编码。"""
         _ = warnings
         db_dir = self.game_registry.db_directory
-        if not db_dir.exists():
-            errors.append(issue("db_dir", "数据库目录不存在"))
-        else:
-            _append_check(details, "db_dir", "ok")
+        db_dir_already_exists = db_dir.exists()
+        try:
+            ensure_db_directory(db_dir)
+            _append_check(details, "db_dir", "ok" if db_dir_already_exists else "created")
+        except Exception as error:
+            errors.append(issue("db_dir", f"数据库目录创建失败: {type(error).__name__}: {error}"))
         if not Path("logs").exists():
             Path("logs").mkdir(exist_ok=True)
         try:
