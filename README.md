@@ -44,7 +44,7 @@ uv run python main.py run-all --game "<游戏标题>"
 - [外部 Agent 使用指南](docs/agent-user-guide.md)：面向用户，说明如何把翻译任务交给外部 Agent。
 - [Agent 翻译流程概览](docs/agent-workflow.md)：面向用户，说明 Agent、CLI 和用户的职责边界。
 - [Agent 工作流程图](docs/agent-workflow-diagram.svg)：图形化展示用户、Agent、CLI、数据库和写回之间的协作关系。
-- [项目专用 Skill](skills/rpg-maker-translation/SKILL.md)：面向 Agent，提供完整执行规程、异常处理和写回门禁。
+- [项目专用 Skill](skills/att-mz/SKILL.md)：面向 Agent，提供完整执行规程、异常处理和写回门禁。
 - [自定义占位符规则](docs/custom-placeholder-rules.md)：说明游戏自定义控制符的扫描、配置和还原流程。
 - [名字框与地图名 Agent 提示词](docs/name-context-agent-prompt.md)：供外部 Agent 填写术语表时参考。
 - [插件规则 Agent 提示词](docs/plugin-rules-agent-prompt.md)：供外部 Agent 识别插件可翻译字段时参考。
@@ -238,5 +238,6 @@ uv run python main.py --help
 ## 许可证
 
 本项目采用 [MIT License](LICENSE)。
+
 
 

@@ -1,9 +1,9 @@
 ---
-name: rpg-maker-translation
+name: att-mz
 description: Use this skill when an agent operates this RPG Maker MZ translation toolkit end-to-end: project discovery, game validation, placeholder rules, name context, plugin rules, event command rules, translation loops, quality reports, failure triage, manual completion, and write-back gating.
 ---
 
-# RPG Maker MZ 翻译工具包
+# A.T.T MZ Skill
 
 本 Skill 是执行协议。CLI 负责确定性工作；Agent 负责语义判断；用户负责提供输入和写回许可。不要把它当背景文章读完再行动，按阶段加载 reference。
 
@@ -70,3 +70,4 @@ description: Use this skill when an agent operates this RPG Maker MZ translation
 - 把没看懂结构当成“游戏没有对应内容”。
 - 子代理还没结束就导入半成品或启动翻译。
 - `quality-report` 有阻断错误仍写回。
+
