@@ -770,9 +770,6 @@ class AgentToolkitService:
         placeholder_rules_path = target_dir / "placeholder-rules.json"
         async with aiofiles.open(placeholder_rules_path, "w", encoding="utf-8") as file:
             _ = await file.write(f"{json.dumps(placeholder_rule_drafts, ensure_ascii=False, indent=2)}\n")
-        workspace_guide_path = target_dir / "WORKSPACE.md"
-        async with aiofiles.open(workspace_guide_path, "w", encoding="utf-8") as file:
-            _ = await file.write(_build_agent_workspace_guide())
         generated_summary: JsonObject = {
             "speaker_entry_count": name_summary.speaker_entry_count,
             "map_entry_count": name_summary.map_entry_count,
@@ -787,7 +784,6 @@ class AgentToolkitService:
             str(event_commands_path),
             str(placeholder_path),
             str(placeholder_rules_path),
-            str(workspace_guide_path),
         ]
         manifest: JsonObject = {
             "files": manifest_files,
@@ -1300,81 +1296,6 @@ def _count_overwide_lines(items: list[TranslationItem], text_rules: TextRules) -
             if line and count_line_width_chars(line, text_rules) > limit:
                 count += 1
     return count
-
-
-def _build_agent_workspace_guide() -> str:
-    """生成工作区内的短操作说明，避免 Agent 为规则格式翻源码。"""
-    return """# Agent 工作区说明
-
-本目录是临时分析工作区。主流程不会直接读取这里的文件，所有结论都必须通过 CLI 校验并导入当前游戏数据库。
-
-## 先看这些文件
-
-- `manifest.json`：本工作区产物清单。
-- `placeholder-rules.json`：占位符规则草稿，先改它，再校验并导入。
-- `name-context/name_registry.json`：术语表，只填写 value。
-- `plugins.json`：插件配置原始 JSON，用来判断插件可见文本字段。
-- `event-commands.json`：事件指令参数原始 JSON，用来判断指定事件指令中的可见文本字段。
-
-不要整文件阅读很大的候选报告。优先读取本说明、manifest、规则草稿和校验报告。
-
-## 必须产出的文件
-
-- `placeholder-rules.json`：对象，key 是正则表达式字符串，value 是语义化占位符模板。
-- `plugin-rules.json`：对象，key 是插件名，value 是 JSONPath 字符串数组。
-- `event-command-rules.json`：对象，key 是事件指令编码字符串，value 是规则数组。
-- `name-context/name_registry.json`：保持两个顶层字典不变，只填写译名。
-
-游戏本身没有对应内容时，允许 `plugin-rules.json` 或 `event-command-rules.json` 写成空对象 `{}`，但必须先用导出文件确认确实没有可见文本。
-
-## 插件规则格式
-
-```json
-{
-  "PluginName": [
-    "$['parameters']['visibleText']",
-    "$['parameters']['nested']['message']"
-  ]
-}
-```
-
-## 事件指令规则格式
-
-```json
-{
-  "357": [
-    {
-      "match": {
-        "0": "PluginName"
-      },
-      "paths": [
-        "$['parameters'][3]['message']"
-      ]
-    }
-  ]
-}
-```
-
-`match` 用来限定参数值，`paths` 指向需要翻译的字符串字段。没有限定条件时使用空对象 `{}`。
-
-## 校验与导入命令
-
-```bash
-uv run python main.py --agent-mode validate-placeholder-rules --game <游戏标题> --input <工作区>/placeholder-rules.json --json
-uv run python main.py --agent-mode import-placeholder-rules --game <游戏标题> --input <工作区>/placeholder-rules.json
-
-uv run python main.py --agent-mode validate-plugin-rules --game <游戏标题> --input <工作区>/plugin-rules.json --json
-uv run python main.py --agent-mode import-plugin-rules --game <游戏标题> --input <工作区>/plugin-rules.json
-
-uv run python main.py --agent-mode validate-event-command-rules --game <游戏标题> --input <工作区>/event-command-rules.json --json
-uv run python main.py --agent-mode import-event-command-rules --game <游戏标题> --input <工作区>/event-command-rules.json
-
-uv run python main.py --agent-mode import-name-context --game <游戏标题> --input <工作区>/name-context/name_registry.json
-uv run python main.py --agent-mode validate-agent-workspace --game <游戏标题> --workspace <工作区> --json
-```
-
-如果校验报告出现 0 命中、占位符不可还原、空译名、格式错误，先修文件再导入。不要通过修改项目源码绕过校验。
-"""
 
 
 __all__: list[str] = [

@@ -2,242 +2,81 @@
 
 Autonomous Translation Toolkit for RPG Maker MZ.
 
-面向 Agent 的 RPG Maker MZ 自主翻译工具包。将日文 RPG Maker MZ 游戏翻译为简体中文的命令行工具链。围绕"一个游戏一个数据库"运行——每款游戏的译文、术语表、插件规则和事件指令规则全部存放在 `data/db/<游戏标题>.db` 这一个 SQLite 文件中。
-
-## 核心能力
-
-- **正文翻译**：从 `data/*.json`、`js/plugins.js` 和事件指令深层参数中提取日文文本，分批调用 LLM 翻译为简体中文，支持断点续传和内容去重
-- **控制符保护**：内置 RPG Maker MZ 全部标准控制符保护，自定义控制符通过正则表达式规则配置
-- **名称术语管理**：导出说话人名字框和地图显示名上下文，交由外部 Agent 统一填写译名后导入数据库，翻译时自动注入提示词
-- **插件文本翻译**：通过外部 Agent 分析 `plugins.js` 结构并产出 JSONPath 规则，按规则提取和翻译插件配置中的界面文本
-- **事件指令文本翻译**：通过外部 Agent 按指令编码定义深层参数提取规则，翻译指令中嵌入的可显示文本
-- **译文回写**：将数据库中的译文写回 `data/*.json` 和 `js/plugins.js`，自动备份原始文件，支持字体替换
+A.T.T MZ 是面向 RPG Maker MZ 日文游戏的命令行翻译工具。项目负责确定性提取、缓存、规则导入、质量报告和写回；Agent 或人工负责术语、插件字段、事件指令字段和少量失败项的语义判断。
 
 ## 环境要求
 
 - Python 3.14+
-- `uv` 包管理器
-- 一份 RPG Maker MZ 日文游戏的完整目录
+- uv
+- RPG Maker MZ 标准游戏目录
+- OpenAI 兼容格式的模型服务
 
-## 快速开始
+## 初始化
 
 ```bash
-# 安装依赖
 uv sync
-
-# 复制示例配置为本地配置，并填入模型服务地址和 API Key
-cp setting.example.toml setting.toml
-
-# 注册你的游戏
-uv run python main.py add-game --path "<游戏根目录>"
-
-# 查看已注册游戏
-uv run python main.py list
-
-# 一键翻译 + 回写
-uv run python main.py run-all --game "<游戏标题>"
-```
-
-## 文档导航
-
-- [CLI 完整使用指南](docs/cli-project-usage.md)：面向人工操作，说明从注册游戏到翻译写回的完整流程。
-- [外部 Agent 使用指南](docs/agent-user-guide.md)：面向用户，说明如何把翻译任务交给外部 Agent。
-- [Agent 翻译流程概览](docs/agent-workflow.md)：面向用户，说明 Agent、CLI 和用户的职责边界。
-- [Agent 工作流程图](docs/agent-workflow-diagram.svg)：图形化展示用户、Agent、CLI、数据库和写回之间的协作关系。
-- [项目专用 Skill](skills/att-mz/SKILL.md)：面向 Agent，提供完整执行规程、异常处理和写回门禁。
-- [自定义占位符规则](docs/custom-placeholder-rules.md)：说明游戏自定义控制符的扫描、配置和还原流程。
-- [名字框与地图名 Agent 提示词](docs/name-context-agent-prompt.md)：供外部 Agent 填写术语表时参考。
-- [插件规则 Agent 提示词](docs/plugin-rules-agent-prompt.md)：供外部 Agent 识别插件可翻译字段时参考。
-- [事件指令规则 Agent 提示词](docs/event-command-rules-agent-prompt.md)：供外部 Agent 识别事件指令深层参数文本时参考。
-
-## 命令一览
-
-```
-uv run python main.py list
-uv run python main.py doctor [--game <标题> | --game-path <游戏根目录>] [--json] [--no-check-llm]
-uv run python main.py add-game --path <游戏根目录> [--json]
-uv run python main.py scan-placeholder-candidates --game <标题> [--output <路径>] [--json] [--placeholder-rules <JSON字符串> | --input <路径>]
-uv run python main.py build-placeholder-rules --game <标题> --output <路径> [--json]
-uv run python main.py validate-placeholder-rules [--game <标题>] [--json] [--output <路径>] [--placeholder-rules <JSON字符串> | --input <路径>]
-uv run python main.py import-placeholder-rules --game <标题> (--rules <JSON字符串> | --input <路径>)
-uv run python main.py prepare-agent-workspace --game <标题> --output-dir <目录> [--json]
-uv run python main.py validate-agent-workspace --game <标题> --workspace <目录> [--json]
-uv run python main.py cleanup-agent-workspace --workspace <目录> [--json]
-uv run python main.py export-plugins-json --game <标题> --output <路径>
-uv run python main.py validate-plugin-rules --game <标题> (--rules <JSON字符串> | --input <路径>) [--json]
-uv run python main.py import-plugin-rules --game <标题> --input <路径>
-uv run python main.py export-event-commands-json --game <标题> --output <路径> [--code ...]
-uv run python main.py validate-event-command-rules --game <标题> (--rules <JSON字符串> | --input <路径>) [--json]
-uv run python main.py import-event-command-rules --game <标题> --input <路径>
-uv run python main.py export-name-context --game <标题> --output-dir <目录>
-uv run python main.py import-name-context --game <标题> --input <路径>
-uv run python main.py write-name-context --game <标题>
-uv run python main.py translate --game <标题> [--json] [--max-items N] [--max-batches N] [--time-limit-seconds N]
-uv run python main.py translation-status --game <标题> [--json]
-uv run python main.py export-pending-translations --game <标题> --output <路径> [--limit N] [--json]
-uv run python main.py import-manual-translations --game <标题> --input <路径> [--json]
-uv run python main.py quality-report --game <标题> [--json] [--output <路径>]
-uv run python main.py write-back --game <标题>
-uv run python main.py run-all --game <标题> [--skip-write-back]
-```
-
-全局 `--debug` 和 `--agent-mode` 参数可加在子命令前：
-
-```bash
-uv run python main.py --debug translate --game "<游戏标题>"
-uv run python main.py --agent-mode translate --game "<游戏标题>"
-```
-
-## 工作流程
-
-```
-doctor 检查 → 注册游戏 → prepare-agent-workspace 导出 Agent 工作区
-           → validate/import 工作区内的占位符规则草稿
-           → 准备插件规则 → 准备事件指令规则 → 准备名字术语
-           → 正文翻译 → quality-report 质量检查 → 回写游戏文件
-```
-
-![Agent 工作流程图](docs/agent-workflow-diagram.svg)
-
-Agent 工作区会同时包含术语表输入、插件参数、事件指令参数、占位符候选和占位符规则草稿。规则和术语准备完成后，通过对应的 `import-*` 命令导入数据库。准备就绪后，`translate` 从数据库读取规则和术语进行翻译，`write-back` 将译文写回游戏文件。`run-all` 将这两步合并执行。
-
-## 配置
-
-项目提供 `setting.example.toml` 作为示例配置。首次使用时复制为本地配置：
-
-```bash
 cp setting.example.toml setting.toml
 ```
 
-`setting.toml` 是本机配置文件，不进入版本库。主配置结构：
-
-```toml
-[llm]
-base_url = "https://api.deepseek.com"
-api_key = "YOUR_KEY"
-model = "deepseek-chat"
-timeout = 600
-
-[translation_context]
-token_size = 1024
-factor = 3.5
-max_command_items = 5
-
-[text_translation]
-worker_count = 200
-rpm = 200
-retry_count = 3
-retry_delay = 2
-system_prompt_file = "prompts/text_translation_system.md"
-
-[event_command_text]
-default_command_codes = [357]
-
-[write_back]
-replacement_font_path = "fonts/NotoSansSC-Regular.ttf"
-
-[text_rules]
-strip_wrapping_punctuation_pairs = [["「", "」"]]
-allowed_japanese_chars = ["っ", "ッ", "ー", "・", "。", "～", "…"]
-allowed_japanese_tail_chars = ["あ", "い", "う", "え", "お", "っ", "ッ", "ん", "ー", "よ", "ね", "な", "か"]
-line_split_punctuations = ["，", "。", "、", "；", "：", "！", "？", "…", "～", "—", "♪", "♡", "）", "】", "」", "』", ",", ".", ";", ":", "!", "?"]
-long_text_line_width_limit = 26
-line_width_count_pattern = "\\S"
-source_text_required_pattern = "[\\u3040-\\u309F\\u30A0-\\u30FF\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uF900-\\uFAFF]+"
-japanese_segment_pattern = "[\\u3040-\\u309F\\u30A0-\\u30FF]+"
-residual_escape_sequence_pattern = "\\\\[nrt]"
-```
-
-模型地址和密钥可以用环境变量覆盖，便于临时切换服务且避免把密钥写进 CLI 日志：
+模型地址和 API Key 推荐通过环境变量提供：
 
 ```powershell
-$env:RPG_MAKER_TOOLS_LLM_BASE_URL = "https://api.example.com"
+$env:RPG_MAKER_TOOLS_LLM_BASE_URL = "<模型服务地址>"
 $env:RPG_MAKER_TOOLS_LLM_API_KEY = "<API_KEY>"
-uv run python main.py translate --game "<游戏标题>"
 ```
 
-除模型地址和密钥外，其他运行配置可通过 CLI 参数覆盖，详见 [CLI 完整使用指南](docs/cli-project-usage.md) 的配置体系章节。
-
-## 自定义占位符规则
-
-RPG Maker MZ 标准控制符（`\V[n]`、`\C[n]`、`\.`、`\!` 等）由程序内置保护。游戏通过插件引入的自定义控制符（如 `\F[xxx]`、`\AC`）需要为当前游戏建立自定义占位符规则。推荐先生成草稿，再校验并导入当前游戏数据库：
+## 基本命令
 
 ```bash
-uv run python main.py build-placeholder-rules --game "<游戏标题>" --output "<外部临时目录>/placeholder-rules.json"
-uv run python main.py validate-placeholder-rules --game "<游戏标题>" --input "<外部临时目录>/placeholder-rules.json" --json
-uv run python main.py import-placeholder-rules --game "<游戏标题>" --input "<外部临时目录>/placeholder-rules.json"
-```
-
-规则 JSON 格式：
-
-```json
-{
-  "(?i)\\\\F\\d*\\[[^\\]]+\\]": "[CUSTOM_FACE_PORTRAIT_{index}]",
-  "(?i)\\\\AC(?![A-Za-z\\[])": "[CUSTOM_PLUGIN_AC_MARKER_{index}]"
-}
-```
-
-占位符模板应使用完整语义命名，让模型能理解粗略用途，同时仍把标记原样保留。`translate` 默认读取当前游戏数据库里的规则；如果传入 `--placeholder-rules`，本次运行只使用 CLI 字符串，不读取数据库规则。详见 [自定义占位符规则](docs/custom-placeholder-rules.md)。
-
-## 外部 Agent 协作
-
-以下流程依赖外部 Agent 分析导出文件并产出规则：
-
-| 导出命令 | 产物 | 外部 Agent 产出 | 导入命令 |
-| --- | --- | --- | --- |
-| `export-plugins-json` | 插件参数 JSON | `plugin-rules.json` | `import-plugin-rules` |
-| `export-event-commands-json` | 事件指令参数 JSON | `event-command-rules.json` | `import-event-command-rules` |
-| `export-name-context` | 名字上下文 JSON | `name_registry.json`（填写译名） | `import-name-context` |
-
-每个外部 Agent 任务的参考提示词见 [名字框与地图名 Agent 提示词](docs/name-context-agent-prompt.md)、[插件规则 Agent 提示词](docs/plugin-rules-agent-prompt.md) 和 [事件指令规则 Agent 提示词](docs/event-command-rules-agent-prompt.md)。
-
-## 数据存储
-
-- 游戏数据库：`data/db/<游戏标题>.db`
-- 日志文件：`logs/`
-- 原始文件备份（首次回写时自动创建）：`data_origin/`、`js/plugins_origin.js`
-
-## 项目结构
-
-```
-att-mz/
-├── app/
-│   ├── cli.py                  # argparse 子命令入口
-│   ├── application/            # 业务编排、文件回写、字体替换
-│   ├── config/                 # setting.toml 配置模型与解析
-│   ├── event_command_text/     # 事件指令规则导出、导入与提取
-│   ├── llm/                    # OpenAI 兼容异步客户端
-│   ├── name_context/           # 名字框/地图名导出、导入、提示词注入
-│   ├── observability/          # 日志系统
-│   ├── persistence/            # SQLite 仓储层
-│   ├── plugin_text/            # 插件规则导入、JSONPath 提取与回写
-│   ├── rmmz/                   # RMMZ 数据模型、文件加载、文本提取、控制符
-│   ├── translation/            # 翻译引擎、校验、缓存、上下文切批
-│   └── utils/                  # 工具函数
-├── docs/                       # 使用指南和 Agent 提示词文档
-├── prompts/                    # LLM 提示词文件
-├── data/db/                    # 游戏数据库目录
-├── logs/                       # 运行日志
-├── tests/                      # 测试套件
-├── main.py                     # CLI 入口
-├── setting.example.toml        # 示例配置文件
-├── custom_placeholder_rules.json  # 自定义控制符规则草稿示例
-├── pyproject.toml
-└── uv.lock
-```
-
-## 开发
-
-```bash
-uv sync
-uv run basedpyright          # 类型检查
-uv run pytest                # 运行测试
 uv run python main.py --help
+uv run python main.py doctor --no-check-llm --json
+uv run python main.py add-game --path <游戏目录> --json
+uv run python main.py list --json
 ```
 
-## 许可证
+## Agent 工作流
 
-本项目采用 [MIT License](LICENSE)。
+Agent 执行翻译任务时必须使用项目 Skill：`skills/att-mz/SKILL.md`。
 
+核心顺序：
 
+```bash
+uv run python main.py --agent-mode doctor --game <游戏标题> --json
+uv run python main.py --agent-mode prepare-agent-workspace --game <游戏标题> --output-dir <工作区> --json
+uv run python main.py --agent-mode validate-placeholder-rules --game <游戏标题> --input <工作区>/placeholder-rules.json --json
+uv run python main.py --agent-mode import-placeholder-rules --game <游戏标题> --input <工作区>/placeholder-rules.json
+uv run python main.py --agent-mode validate-agent-workspace --game <游戏标题> --workspace <工作区> --json
+uv run python main.py --agent-mode translate --game <游戏标题> --max-batches 1 --json
+uv run python main.py --agent-mode translation-status --game <游戏标题> --json
+uv run python main.py --agent-mode quality-report --game <游戏标题> --json
+uv run python main.py --agent-mode translate --game <游戏标题> --json
+uv run python main.py --agent-mode write-back --game <游戏标题>
+```
 
+`translate` 返回 0 表示本轮命令正常结束，不代表所有条目都成功。失败条目、pending 和质量风险由 `translation-status`、`quality-report` 和人工补译命令处理。
+
+## 外部分析数据
+
+工作区中的分析结果必须通过 CLI 导入数据库，主翻译流程只读取数据库和本次 CLI 参数。
+
+```bash
+uv run python main.py --agent-mode import-name-context --game <游戏标题> --input <工作区>/name-context/name_registry.json
+uv run python main.py --agent-mode validate-plugin-rules --game <游戏标题> --input <工作区>/plugin-rules.json --json
+uv run python main.py --agent-mode import-plugin-rules --game <游戏标题> --input <工作区>/plugin-rules.json
+uv run python main.py --agent-mode validate-event-command-rules --game <游戏标题> --input <工作区>/event-command-rules.json --json
+uv run python main.py --agent-mode import-event-command-rules --game <游戏标题> --input <工作区>/event-command-rules.json
+```
+
+## 人工补译
+
+```bash
+uv run python main.py --agent-mode export-pending-translations --game <游戏标题> --limit 20 --output <工作区>/pending-translations.json --json
+uv run python main.py --agent-mode import-manual-translations --game <游戏标题> --input <工作区>/pending-translations.json --json
+```
+
+## 验收
+
+```bash
+uv run basedpyright
+uv run pytest
+```
