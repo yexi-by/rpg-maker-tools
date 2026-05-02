@@ -59,7 +59,7 @@ class CustomPlaceholderRule:
             )
         if CUSTOM_PLACEHOLDER_PATTERN.fullmatch(preview) is None:
             raise ValueError(
-                "自定义占位符模板必须生成形如 [CUSTOM_NAME_1] 的方括号占位符"
+                f"自定义占位符模板必须生成形如 [CUSTOM_NAME_1] 的方括号占位符，当前生成: {preview}"
             )
 
         return cls(

@@ -128,12 +128,12 @@
   <text x="110" y="687" class="box-title">translate 翻译</text>
   <text x="85" y="725" class="box-text">正文 / 插件 / 事件指令</text>
   <text x="85" y="753" class="box-text">缓存命中与去重</text>
-  <text x="85" y="781" class="box-text">失败写入错误表</text>
+  <text x="85" y="781" class="box-text">质量错误入库</text>
 
   <rect x="410" y="655" width="300" height="155" fill="url(#cli)" class="box"/>
   <circle cx="440" cy="683" r="16" class="badge"/><text x="435" y="689" class="step">10</text>
   <text x="465" y="687" class="box-title">quality-report</text>
-  <text x="440" y="725" class="box-text">错误表 / 模型原始返回</text>
+  <text x="440" y="725" class="box-text">运行故障 / 质量错误</text>
   <text x="440" y="753" class="box-text">日文残留 / 占位符风险</text>
   <text x="440" y="781" class="box-text">长文本超宽 / 可写回数量</text>
 

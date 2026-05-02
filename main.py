@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+import json
 import sys
 import time
 import warnings
@@ -55,6 +56,7 @@ _configure_stdio_encoding()
 _suppress_known_third_party_warnings()
 
 from app.cli import (  # noqa: E402
+    CliArgumentError,
     CliBusinessError,
     build_parser,
     dispatch_command,
@@ -108,6 +110,53 @@ def is_json_output_enabled(args: argparse.Namespace) -> bool:
     return isinstance(json_value, bool) and json_value
 
 
+def is_agent_mode_enabled(args: argparse.Namespace) -> bool:
+    """
+    判断当前命令是否启用 Agent 简洁日志模式。
+
+    Args:
+        args: argparse 返回的命名空间对象。
+
+    Returns:
+        用户是否启用了 `--agent-mode`。
+    """
+    agent_mode_value = getattr(args, "agent_mode", False)
+    return isinstance(agent_mode_value, bool) and agent_mode_value
+
+
+def raw_flag_enabled(argv: Sequence[str], flag: str) -> bool:
+    """
+    在参数解析前检查原始开关是否存在。
+
+    解析失败时仍需决定 stdout 是否保持 JSON，以及终端日志是否使用 Agent 模式。
+    """
+    return flag in argv
+
+
+def print_json_error(*, code: str, message: str, detail: str = "") -> None:
+    """向 stdout 输出统一结构的 JSON 错误报告。
+
+    `--json` 命令必须保证 stdout 可被外部 Agent 直接解析。命令执行过程中
+    即使出现业务错误或未知异常，也要返回和正常报告相同的外层结构。
+    """
+    details: dict[str, str] = {}
+    if detail:
+        details["detail"] = detail
+    payload = {
+        "status": "error",
+        "errors": [
+            {
+                "code": code,
+                "message": message,
+            }
+        ],
+        "warnings": [],
+        "summary": {},
+        "details": details,
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """
     解析参数并执行对应 CLI 子命令。
@@ -119,10 +168,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         进程退出码。
     """
     raw_argv = tuple(argv) if argv is not None else tuple(sys.argv[1:])
-    args = build_parser().parse_args(raw_argv)
+    raw_json_output = raw_flag_enabled(raw_argv, "--json")
+    raw_agent_mode = raw_flag_enabled(raw_argv, "--agent-mode")
+    try:
+        args = build_parser().parse_args(raw_argv)
+    except CliArgumentError as error:
+        setup_logger(
+            level="DEBUG" if raw_flag_enabled(raw_argv, "--debug") else "INFO",
+            use_console=not raw_json_output,
+            agent_mode=raw_agent_mode,
+        )
+        if raw_json_output:
+            print_json_error(code="argument_error", message=str(error))
+        else:
+            logger.error(f"[tag.failure]命令参数错误[/tag.failure]：{error}")
+        return 2
+
     setup_logger(
         level="DEBUG" if is_debug_enabled(args) else "INFO",
         use_console=not is_json_output_enabled(args),
+        agent_mode=is_agent_mode_enabled(args),
     )
 
     started_at = time.perf_counter()
@@ -143,15 +208,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     except CliBusinessError as error:
         exit_code = 1
         status = "失败"
+        if is_json_output_enabled(args):
+            print_json_error(code="business_error", message=str(error))
         logger.error(f"[tag.failure]命令执行失败[/tag.failure]：{error}")
     except KeyboardInterrupt:
         exit_code = 130
         status = "中断"
+        if is_json_output_enabled(args):
+            print_json_error(code="keyboard_interrupt", message="用户中断运行")
         logger.warning("[tag.warning]用户中断运行[/tag.warning]")
     except Exception as error:
         exit_code = 1
         status = "异常"
         summary = format_exception_summary(error)
+        if is_json_output_enabled(args):
+            print_json_error(
+                code="unexpected_error",
+                message=summary,
+                detail=f"完整 traceback 已写入 {LOG_FILE_PATH}",
+            )
         logger.error(f"[tag.exception]未知异常[/tag.exception]：{summary}，完整 traceback 已写入 [tag.path]{LOG_FILE_PATH}[/tag.path]")
         logger.bind(file_only=True).exception(
             f"[tag.exception]命令执行失败完整异常[/tag.exception]：{summary}"

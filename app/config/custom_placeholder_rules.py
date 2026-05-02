@@ -66,12 +66,16 @@ def parse_custom_placeholder_rules(
     for pattern_text, placeholder_template in raw_rules.items():
         if not isinstance(placeholder_template, str):
             raise TypeError(f"{source_label} 中 {pattern_text} 的值必须是字符串")
-        rules.append(
-            CustomPlaceholderRule.create(
+        try:
+            rule = CustomPlaceholderRule.create(
                 pattern_text=pattern_text,
                 placeholder_template=placeholder_template,
             )
-        )
+        except ValueError as error:
+            raise ValueError(
+                f"{source_label} 中规则 {pattern_text} -> {placeholder_template} 无效: {error}"
+            ) from error
+        rules.append(rule)
     return tuple(rules)
 
 

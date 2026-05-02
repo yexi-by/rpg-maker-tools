@@ -2,7 +2,6 @@
 
 from .repository import (
     DB_DIRECTORY,
-    DEFAULT_ERROR_TABLE_PREFIX,
     GameRecord,
     GameRegistry,
     TargetGameSession,
@@ -12,7 +11,6 @@ from .repository import (
 
 __all__: list[str] = [
     "DB_DIRECTORY",
-    "DEFAULT_ERROR_TABLE_PREFIX",
     "GameRecord",
     "GameRegistry",
     "TargetGameSession",

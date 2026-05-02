@@ -9,6 +9,8 @@ from app.persistence import GameRegistry
 from app.rmmz.schema import (
     EventCommandParameterFilter,
     EventCommandTextRuleRecord,
+    LlmFailureRecord,
+    PlaceholderRuleRecord,
     PluginTextRuleRecord,
     TranslationErrorItem,
     TranslationItem,
@@ -104,9 +106,21 @@ async def test_registry_and_target_session_use_injected_directory(minimal_game_d
         await session.replace_name_context_registry(name_registry)
         assert await session.read_name_context_registry() == name_registry
 
-        error_table_name = await session.start_error_table()
-        await session.write_error_items(
-            error_table_name,
+        placeholder_rule = PlaceholderRuleRecord(
+            pattern_text=r"\\F\[[^\]]+\]",
+            placeholder_template="[CUSTOM_FACE_PORTRAIT_{index}]",
+        )
+        await session.replace_placeholder_rules([placeholder_rule])
+        assert await session.read_placeholder_rules() == [placeholder_rule]
+
+        run_record = await session.start_translation_run(
+            total_extracted=10,
+            pending_count=4,
+            deduplicated_count=3,
+            batch_count=2,
+        )
+        await session.write_translation_quality_errors(
+            run_record.run_id,
             [
                 TranslationErrorItem(
                     location_path="Map001.json/1/0/0",
@@ -120,5 +134,19 @@ async def test_registry_and_target_session_use_injected_directory(minimal_game_d
                 )
             ],
         )
-        error_rows = await session.read_table(error_table_name)
-        assert error_rows[0]["model_response"] == "模型原始返回"
+        quality_errors = await session.read_translation_quality_errors(run_record.run_id)
+        assert quality_errors[0].model_response == "模型原始返回"
+
+        await session.write_llm_failure(
+            LlmFailureRecord(
+                run_id=run_record.run_id,
+                category="rate_limit",
+                error_type="RateLimitError",
+                error_message="请求过于频繁",
+                retryable=True,
+                attempt_count=3,
+                created_at="2026-01-01T00:00:00",
+            )
+        )
+        llm_failures = await session.read_llm_failures(run_record.run_id)
+        assert llm_failures[0].category == "rate_limit"

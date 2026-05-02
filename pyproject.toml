@@ -1,7 +1,7 @@
 [project]
-name = "rpg-maker-tools"
+name = "att-mz"
 version = "0.1.0"
-description = "Add your description here"
+description = "Autonomous Translation Toolkit for RPG Maker MZ"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -40,3 +40,4 @@ asyncio_mode = "auto"
 pythonpath = [
     ".",
 ]
+

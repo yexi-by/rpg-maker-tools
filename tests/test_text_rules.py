@@ -86,7 +86,7 @@ def test_text_rules_filter_resource_and_japanese_residual() -> None:
         rules.check_japanese_residual(["你好カ"])
 
 
-def test_text_rules_requires_source_language_characters_for_translation() -> None:
+def test_text_rules_requires_configured_source_characters_for_translation() -> None:
     """原文必须包含平假名、片假名或汉字才进入正文翻译。"""
     rules = get_default_text_rules()
 

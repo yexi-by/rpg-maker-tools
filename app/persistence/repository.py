@@ -15,10 +15,16 @@ from app.name_context.schemas import NameContextRegistry
 from app.rmmz.schema import (
     EventCommandParameterFilter,
     EventCommandTextRuleRecord,
+    ErrorType,
     GameData,
+    LlmFailureCategory,
+    LlmFailureRecord,
+    PlaceholderRuleRecord,
     PluginTextRuleRecord,
     TranslationErrorItem,
     TranslationItem,
+    TranslationRunRecord,
+    TranslationRunStatus,
 )
 from app.rmmz.loader import read_game_title, resolve_game_directory
 from app.observability.logging import logger
@@ -29,48 +35,55 @@ from .rows import (
     row_item_type,
     row_optional_str,
     row_str,
-    row_to_dict,
 )
 from .sql import (
     CHECK_CONNECTION_READABLE,
-    CREATE_ERROR_TABLE,
     CREATE_EVENT_COMMAND_TEXT_RULE_FILTERS_TABLE,
     CREATE_EVENT_COMMAND_TEXT_RULE_GROUPS_TABLE,
     CREATE_EVENT_COMMAND_TEXT_RULE_PATHS_TABLE,
+    CREATE_LLM_FAILURES_TABLE,
     CREATE_METADATA_TABLE,
     CREATE_NAME_CONTEXT_TERMS_TABLE,
+    CREATE_PLACEHOLDER_RULES_TABLE,
     CREATE_PLUGIN_TEXT_RULES_TABLE,
+    CREATE_TRANSLATION_QUALITY_ERRORS_TABLE,
+    CREATE_TRANSLATION_RUNS_TABLE,
     CREATE_TRANSLATION_TABLE,
     DELETE_ALL_EVENT_COMMAND_TEXT_RULE_FILTERS,
     DELETE_ALL_EVENT_COMMAND_TEXT_RULE_GROUPS,
     DELETE_ALL_EVENT_COMMAND_TEXT_RULE_PATHS,
     DELETE_ALL_NAME_CONTEXT_TERMS,
+    DELETE_ALL_PLACEHOLDER_RULES,
     DELETE_ALL_PLUGIN_TEXT_RULES,
     DELETE_TRANSLATION_ITEM_BY_PATH,
     DELETE_TRANSLATION_ITEMS_BY_PREFIX,
-    DROP_TABLE,
-    INSERT_ERROR,
     INSERT_EVENT_COMMAND_TEXT_RULE_FILTER,
     INSERT_EVENT_COMMAND_TEXT_RULE_GROUP,
     INSERT_EVENT_COMMAND_TEXT_RULE_PATH,
+    INSERT_LLM_FAILURE,
     INSERT_NAME_CONTEXT_TERM,
+    INSERT_PLACEHOLDER_RULE,
     INSERT_PLUGIN_TEXT_RULE,
+    INSERT_TRANSLATION_QUALITY_ERROR,
     INSERT_TRANSLATION,
     METADATA_KEY,
-    SELECT_ALL,
+    SELECT_LATEST_TRANSLATION_RUN,
+    SELECT_LLM_FAILURES_BY_RUN,
     SELECT_EVENT_COMMAND_TEXT_RULE_FILTERS,
     SELECT_EVENT_COMMAND_TEXT_RULE_GROUPS,
     SELECT_EVENT_COMMAND_TEXT_RULE_PATHS,
     SELECT_METADATA,
     SELECT_NAME_CONTEXT_TERMS,
+    SELECT_PLACEHOLDER_RULES,
     SELECT_PLUGIN_TEXT_RULES,
-    SELECT_TABLE_NAMES_BY_PREFIX,
+    SELECT_TRANSLATION_QUALITY_ERRORS_BY_RUN,
+    SELECT_TRANSLATION_RUN,
     SELECT_TRANSLATED_ITEMS,
     SELECT_TRANSLATION_PATHS,
     UPSERT_METADATA,
+    UPSERT_TRANSLATION_RUN,
 )
 
-DEFAULT_ERROR_TABLE_PREFIX = "translation_errors"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DB_DIRECTORY = PROJECT_ROOT / "data" / "db"
 INVALID_FILE_NAME_CHARS = set('<>:"/\\|?*')
@@ -118,6 +131,10 @@ async def create_static_tables(connection: aiosqlite.Connection) -> None:
     _ = await connection.execute(CREATE_EVENT_COMMAND_TEXT_RULE_FILTERS_TABLE)
     _ = await connection.execute(CREATE_EVENT_COMMAND_TEXT_RULE_PATHS_TABLE)
     _ = await connection.execute(CREATE_NAME_CONTEXT_TERMS_TABLE)
+    _ = await connection.execute(CREATE_PLACEHOLDER_RULES_TABLE)
+    _ = await connection.execute(CREATE_TRANSLATION_RUNS_TABLE)
+    _ = await connection.execute(CREATE_LLM_FAILURES_TABLE)
+    _ = await connection.execute(CREATE_TRANSLATION_QUALITY_ERRORS_TABLE)
     await connection.commit()
 
 
@@ -252,6 +269,15 @@ class GameRegistry:
         except Exception:
             await connection.close()
             raise
+
+    async def resolve_registered_title_by_path(self, game_path: str | Path) -> str:
+        """根据已注册游戏目录解析数据库中的游戏标题。"""
+        resolved_game_path = resolve_game_directory(game_path)
+        for record in await self.list_games():
+            if record.game_path == resolved_game_path:
+                return record.game_title
+        title = read_game_title(resolved_game_path)
+        raise ValueError(f"游戏目录尚未注册，请先执行 add-game: {title}")
 
 
 class TargetGameSession:
@@ -498,6 +524,200 @@ class TargetGameSession:
             map_display_names=map_display_names,
         )
 
+    async def replace_placeholder_rules(
+        self,
+        rules: list[PlaceholderRuleRecord],
+    ) -> None:
+        """用当前游戏专用规则替换数据库中的自定义占位符规则。"""
+        _ = await self.connection.execute(DELETE_ALL_PLACEHOLDER_RULES)
+        for rule in rules:
+            _ = await self.connection.execute(
+                INSERT_PLACEHOLDER_RULE,
+                (rule.pattern_text, rule.placeholder_template),
+            )
+        await self.connection.commit()
+
+    async def read_placeholder_rules(self) -> list[PlaceholderRuleRecord]:
+        """读取当前游戏专用自定义占位符规则。"""
+        async with self.connection.execute(SELECT_PLACEHOLDER_RULES) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            PlaceholderRuleRecord(
+                pattern_text=row_str(row, "pattern_text", self.db_path),
+                placeholder_template=row_str(row, "placeholder_template", self.db_path),
+            )
+            for row in rows
+        ]
+
+    async def start_translation_run(
+        self,
+        *,
+        total_extracted: int,
+        pending_count: int,
+        deduplicated_count: int,
+        batch_count: int,
+    ) -> TranslationRunRecord:
+        """创建新的正文翻译运行状态。"""
+        now = current_timestamp_text()
+        run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S_%f")
+        record = TranslationRunRecord(
+            run_id=run_id,
+            status="running",
+            total_extracted=total_extracted,
+            pending_count=pending_count,
+            deduplicated_count=deduplicated_count,
+            batch_count=batch_count,
+            success_count=0,
+            quality_error_count=0,
+            llm_failure_count=0,
+            started_at=now,
+            updated_at=now,
+            finished_at=None,
+            stop_reason="",
+            last_error="",
+        )
+        await self.write_translation_run(record)
+        return record
+
+    async def write_translation_run(self, record: TranslationRunRecord) -> None:
+        """写入正文翻译运行状态快照。"""
+        _ = await self.connection.execute(
+            UPSERT_TRANSLATION_RUN,
+            (
+                record.run_id,
+                record.status,
+                record.total_extracted,
+                record.pending_count,
+                record.deduplicated_count,
+                record.batch_count,
+                record.success_count,
+                record.quality_error_count,
+                record.llm_failure_count,
+                record.started_at,
+                current_timestamp_text(),
+                record.finished_at,
+                record.stop_reason,
+                record.last_error,
+            ),
+        )
+        await self.connection.commit()
+
+    async def read_latest_translation_run(self) -> TranslationRunRecord | None:
+        """读取最新正文翻译运行状态。"""
+        async with self.connection.execute(SELECT_LATEST_TRANSLATION_RUN) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._decode_translation_run(row)
+
+    async def read_translation_run(self, run_id: str) -> TranslationRunRecord | None:
+        """按运行 ID 读取正文翻译状态。"""
+        async with self.connection.execute(SELECT_TRANSLATION_RUN, (run_id,)) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._decode_translation_run(row)
+
+    async def write_llm_failure(self, failure: LlmFailureRecord) -> None:
+        """写入运行级模型故障。"""
+        _ = await self.connection.execute(
+            INSERT_LLM_FAILURE,
+            (
+                failure.run_id,
+                failure.category,
+                failure.error_type,
+                failure.error_message,
+                1 if failure.retryable else 0,
+                failure.attempt_count,
+                failure.created_at,
+            ),
+        )
+        await self.connection.commit()
+
+    async def read_llm_failures(self, run_id: str) -> list[LlmFailureRecord]:
+        """读取指定运行的模型故障记录。"""
+        async with self.connection.execute(SELECT_LLM_FAILURES_BY_RUN, (run_id,)) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            LlmFailureRecord(
+                run_id=row_str(row, "run_id", self.db_path),
+                category=parse_llm_failure_category(row_str(row, "category", self.db_path), self.db_path),
+                error_type=row_str(row, "error_type", self.db_path),
+                error_message=row_str(row, "error_message", self.db_path),
+                retryable=row_int(row, "retryable", self.db_path) == 1,
+                attempt_count=row_int(row, "attempt_count", self.db_path),
+                created_at=row_str(row, "created_at", self.db_path),
+            )
+            for row in rows
+        ]
+
+    async def write_translation_quality_errors(
+        self,
+        run_id: str,
+        items: list[TranslationErrorItem],
+    ) -> None:
+        """写入最终译文质量错误。"""
+        if items:
+            serialized_items = [
+                (
+                    run_id,
+                    error_item.location_path,
+                    error_item.item_type,
+                    error_item.role,
+                    json.dumps(error_item.original_lines, ensure_ascii=False),
+                    json.dumps(error_item.translation_lines, ensure_ascii=False),
+                    error_item.error_type,
+                    json.dumps(error_item.error_detail, ensure_ascii=False),
+                    error_item.model_response,
+                )
+                for error_item in items
+            ]
+            _ = await self.connection.executemany(
+                INSERT_TRANSLATION_QUALITY_ERROR,
+                serialized_items,
+            )
+        await self.connection.commit()
+
+    async def read_translation_quality_errors(self, run_id: str) -> list[TranslationErrorItem]:
+        """读取指定运行的最终译文质量错误。"""
+        async with self.connection.execute(SELECT_TRANSLATION_QUALITY_ERRORS_BY_RUN, (run_id,)) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            TranslationErrorItem(
+                location_path=row_str(row, "location_path", self.db_path),
+                item_type=row_item_type(row, "item_type", self.db_path),
+                role=row_optional_str(row, "role", self.db_path),
+                original_lines=decode_string_list(row_str(row, "original_lines", self.db_path), "original_lines"),
+                translation_lines=decode_string_list(
+                    row_str(row, "translation_lines", self.db_path),
+                    "translation_lines",
+                ),
+                error_type=parse_error_type(row_str(row, "error_type", self.db_path), self.db_path),
+                error_detail=decode_string_list(row_str(row, "error_detail", self.db_path), "error_detail"),
+                model_response=row_str(row, "model_response", self.db_path),
+            )
+            for row in rows
+        ]
+
+    def _decode_translation_run(self, row: aiosqlite.Row) -> TranslationRunRecord:
+        """把 SQLite 行转换成正文翻译运行状态。"""
+        return TranslationRunRecord(
+            run_id=row_str(row, "run_id", self.db_path),
+            status=parse_translation_run_status(row_str(row, "status", self.db_path), self.db_path),
+            total_extracted=row_int(row, "total_extracted", self.db_path),
+            pending_count=row_int(row, "pending_count", self.db_path),
+            deduplicated_count=row_int(row, "deduplicated_count", self.db_path),
+            batch_count=row_int(row, "batch_count", self.db_path),
+            success_count=row_int(row, "success_count", self.db_path),
+            quality_error_count=row_int(row, "quality_error_count", self.db_path),
+            llm_failure_count=row_int(row, "llm_failure_count", self.db_path),
+            started_at=row_str(row, "started_at", self.db_path),
+            updated_at=row_str(row, "updated_at", self.db_path),
+            finished_at=row_optional_str(row, "finished_at", self.db_path),
+            stop_reason=row_str(row, "stop_reason", self.db_path),
+            last_error=row_str(row, "last_error", self.db_path),
+        )
+
     async def delete_translation_items_by_prefixes(self, prefixes: list[str]) -> int:
         """按路径前缀批量删除主翻译表中的记录。"""
         deleted_rows = 0
@@ -531,67 +751,6 @@ class TargetGameSession:
         await self.connection.commit()
         return len(stale_paths)
 
-    async def read_error_table_names(self, prefix: str = DEFAULT_ERROR_TABLE_PREFIX) -> list[str]:
-        """读取指定前缀下的全部错误表名。"""
-        async with self.connection.execute(SELECT_TABLE_NAMES_BY_PREFIX, (f"{prefix}_%",)) as cursor:
-            rows = await cursor.fetchall()
-        return [row_str(row, "name", self.db_path) for row in rows]
-
-    async def delete_error_tables(self, table_names: list[str]) -> int:
-        """批量删除指定错误表。"""
-        unique_table_names = [name for name in dict.fromkeys(table_names) if name]
-        if not unique_table_names:
-            return 0
-
-        async with self.connection.execute(SELECT_TABLE_NAMES_BY_PREFIX, ("%",)) as cursor:
-            rows = await cursor.fetchall()
-        existing_table_names = {row_str(row, "name", self.db_path) for row in rows}
-        deletable_table_names = [name for name in unique_table_names if name in existing_table_names]
-        if not deletable_table_names:
-            return 0
-
-        for table_name in deletable_table_names:
-            _ = await self.connection.execute(DROP_TABLE.format(table_name=table_name))
-        await self.connection.commit()
-        return len(deletable_table_names)
-
-    async def start_error_table(self, prefix: str = DEFAULT_ERROR_TABLE_PREFIX) -> str:
-        """创建当前翻译任务使用的错误表，并返回新表名。"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        table_name = f"{prefix}_{timestamp}"
-        _ = await self.connection.execute(CREATE_ERROR_TABLE.format(table_name=table_name))
-        await self.connection.commit()
-        return table_name
-
-    async def write_error_items(
-        self,
-        table_name: str,
-        items: list[TranslationErrorItem],
-    ) -> None:
-        """向指定错误表追加写入错误数据。"""
-        if items:
-            serialized_items = [
-                (
-                    error_item.location_path,
-                    error_item.item_type,
-                    error_item.role,
-                    json.dumps(error_item.original_lines, ensure_ascii=False),
-                    json.dumps(error_item.translation_lines, ensure_ascii=False),
-                    error_item.error_type,
-                    json.dumps(error_item.error_detail, ensure_ascii=False),
-                    error_item.model_response,
-                )
-                for error_item in items
-            ]
-            _ = await self.connection.executemany(INSERT_ERROR.format(table_name=table_name), serialized_items)
-        await self.connection.commit()
-
-    async def read_table(self, table_name: str) -> list[dict[str, object]]:
-        """读取指定表的所有数据，并转成字典列表。"""
-        async with self.connection.execute(SELECT_ALL.format(table_name=table_name)) as cursor:
-            rows = await cursor.fetchall()
-        return [row_to_dict(row) for row in rows]
-
     async def close(self) -> None:
         """关闭当前游戏数据库连接。"""
         await self.connection.close()
@@ -608,9 +767,51 @@ def build_event_command_group_key(rule_record: EventCommandTextRuleRecord) -> st
     return f"event_{rule_record.command_code}_{digest}"
 
 
+def current_timestamp_text() -> str:
+    """生成数据库状态记录使用的本地时间文本。"""
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def parse_translation_run_status(value: str, db_path: Path) -> TranslationRunStatus:
+    """校验并收窄数据库中的翻译运行状态。"""
+    allowed: set[TranslationRunStatus] = {"running", "completed", "blocked", "cancelled", "failed", "stopped"}
+    if value in allowed:
+        return value
+    raise RuntimeError(f"数据库字段 status 不是有效翻译运行状态: {db_path}")
+
+
+def parse_llm_failure_category(value: str, db_path: Path) -> LlmFailureCategory:
+    """校验并收窄数据库中的模型故障分类。"""
+    allowed: set[LlmFailureCategory] = {
+        "rate_limit",
+        "timeout",
+        "connection",
+        "server",
+        "conflict",
+        "fatal",
+        "unknown",
+    }
+    if value in allowed:
+        return value
+    raise RuntimeError(f"数据库字段 category 不是有效模型故障分类: {db_path}")
+
+
+def parse_error_type(value: str, db_path: Path) -> ErrorType:
+    """校验并收窄数据库中的译文质量错误类型。"""
+    allowed: set[ErrorType] = {
+        "模型返回不可解析",
+        "AI漏翻",
+        "控制符不匹配",
+        "日文残留",
+        "选项行数不匹配",
+    }
+    if value in allowed:
+        return value
+    raise RuntimeError(f"数据库字段 error_type 不是有效译文质量错误类型: {db_path}")
+
+
 __all__: list[str] = [
     "DB_DIRECTORY",
-    "DEFAULT_ERROR_TABLE_PREFIX",
     "GameRecord",
     "GameRegistry",
     "TargetGameSession",

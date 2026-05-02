@@ -92,12 +92,12 @@ uv run pytest
 | --- | --- | --- |
 | 1 | `doctor` | 检查项目配置和模型连接 |
 | 2 | `add-game` | 注册游戏 |
-| 3 | `scan-placeholder-candidates` | 识别游戏自定义控制符候选 |
+| 3 | `prepare-agent-workspace` / `scan-placeholder-candidates` | 导出 Agent 工作区并识别游戏自定义控制符候选 |
 | 4 | `export-plugins-json` + 外部 Agent + `import-plugin-rules` | 准备插件文本规则 |
 | 5 | `export-event-commands-json` + 外部 Agent + `import-event-command-rules` | 准备事件指令文本规则 |
 | 6 | `export-name-context` + 外部 Agent + `import-name-context` | 准备名字框和地图名术语 |
 | 7 | `translate` | 正文翻译 |
-| 8 | `quality-report` | 检查错误表、残留、占位符和超宽行 |
+| 8 | `quality-report` | 检查运行故障、译文质量错误、残留、占位符和超宽行 |
 | 9 | `write-back` | 回写游戏文件 |
 
 第 3 ~ 6 步的顺序可以灵活调整，但第 7 步翻译必须在规则和术语导入之后执行。第 9 步回写必须在质量报告没有阻断错误后执行。不想逐步执行的话，第 7 + 9 步可以用 `run-all` 一步完成。
@@ -172,15 +172,15 @@ uv run python main.py scan-placeholder-candidates --game "<游戏标题>" --outp
 
 ### 编写规则文件
 
-在项目根目录的 `custom_placeholder_rules.json` 中编写规则。键是正则表达式（匹配原始控制符），值是占位符模板（翻译时送给模型的替代文本）：
+推荐先生成规则草稿，再把确认后的规则 JSON 导入当前游戏数据库。键是正则表达式（匹配原始控制符），值是占位符模板（翻译时送给模型的替代文本）：
 
 ```json
 {
-  "(?i)\\F\\d*\\[[^\\]]+\\]": "[CUSTOM_FACE_PORTRAIT_{index}]",
-  "(?i)\\FH\\[[^\\]]+\\]": "[CUSTOM_FACE_HIDE_COMMAND_{index}]",
-  "(?i)\\AA\\[[^\\]]+\\]": "[CUSTOM_PLUGIN_AA_MARKER_{index}]",
-  "(?i)\\MT\\[[^\\]]+\\]": "[CUSTOM_PLUGIN_MT_MARKER_{index}]",
-  "(?i)\\AC(?![A-Za-z\\[])": "[CUSTOM_PLUGIN_AC_MARKER_{index}]"
+  "(?i)\\\\F\\d*\\[[^\\]]+\\]": "[CUSTOM_FACE_PORTRAIT_{index}]",
+  "(?i)\\\\FH\\[[^\\]]+\\]": "[CUSTOM_FACE_HIDE_COMMAND_{index}]",
+  "(?i)\\\\AA\\[[^\\]]+\\]": "[CUSTOM_PLUGIN_AA_MARKER_{index}]",
+  "(?i)\\\\MT\\[[^\\]]+\\]": "[CUSTOM_PLUGIN_MT_MARKER_{index}]",
+  "(?i)\\\\AC(?![A-Za-z\\[])": "[CUSTOM_PLUGIN_AC_MARKER_{index}]"
 }
 ```
 
@@ -191,12 +191,30 @@ uv run python main.py scan-placeholder-candidates --game "<游戏标题>" --outp
 - 占位符生成结果必须匹配 `[CUSTOM_NAME_数字]` 格式
 - 占位符名称应尽量完整表达用途，例如 `FACE_PORTRAIT`；未知语义时使用 `PLUGIN_<控制符名>_MARKER`
 
-如果不想使用文件，也可以在翻译时通过 CLI 参数直接传入：
+导入数据库：
+
+```bash
+uv run python main.py validate-placeholder-rules --game "<游戏标题>" --input "<外部临时目录>/placeholder-rules.json" --json
+uv run python main.py import-placeholder-rules --game "<游戏标题>" --input "<外部临时目录>/placeholder-rules.json"
+```
+
+如果需要本次命令临时覆盖数据库规则，也可以在翻译时通过 CLI 参数直接传入短 JSON 字符串：
 
 ```bash
 uv run python main.py translate --game "<游戏标题>" \
-  --placeholder-rules '{"(?i)\\\\F\\\\d*\\\\[[^\\\\]]+\\\\]":"[CUSTOM_FACE_PORTRAIT_{index}]"}'
+  --placeholder-rules '{"(?i)\\\\F\\d*\\[[^\\]]+\\]":"[CUSTOM_FACE_PORTRAIT_{index}]"}'
 ```
+
+翻译前建议先校验并预览规则效果：
+
+```bash
+uv run python main.py validate-placeholder-rules --json \
+  --game "<游戏标题>" \
+  --input "<外部临时目录>/placeholder-rules.json" \
+  --sample "\F[FaceId]テキスト\V[1]"
+```
+
+报告会展示模型实际看到的占位符文本、占位符映射和还原结果。`--json` 输出为纯 JSON，适合 Agent 直接读取。
 
 ---
 
@@ -346,7 +364,7 @@ uv run python main.py translate --game "<游戏标题>"
 
 此命令执行以下流程：
 
-1. 加载 `setting.toml` 配置和 `custom_placeholder_rules.json`
+1. 加载 `setting.toml` 配置和当前游戏数据库中的占位符规则；如果传入 `--placeholder-rules`，则只使用 CLI 字符串
 2. 打开游戏数据库，加载游戏数据
 3. 读取数据库中的插件规则、事件指令规则和术语表
 4. 从游戏 `data/*.json` 和 `js/plugins.js` 中提取所有可翻译文本
@@ -354,7 +372,7 @@ uv run python main.py translate --game "<游戏标题>"
 6. 跳过数据库中已有译文的条目（断点续传）
 7. 按正文内容去重（同原文、同类型、同角色的条目只送模型一次）
 8. 分批送入 LLM 翻译
-9. 成功译文写入主翻译表，失败记录写入错误表；错误表的 `model_response` 字段保留本批模型原始返回，方便排查 JSON 解析失败和批量输出不稳定
+9. 成功译文写入主翻译表；最终译文问题写入译文质量错误表，模型限流、超时和连接失败写入运行级故障表
 
 ### 9.2 CLI 参数说明
 
@@ -415,7 +433,7 @@ uv run python main.py translate --game "<游戏标题>" [选项]
 uv run python main.py quality-report --game "<游戏标题>" --output "<外部临时目录>/quality-report.json"
 ```
 
-报告会统计待翻译数量、最新错误表、错误类型、模型原始返回数量、日文残留、占位符风险、超宽行和可写回数量。存在阻断错误时先修正规则、提示词或模型配置，再重新执行 `translate`。
+报告会统计待翻译数量、最新运行状态、运行级模型故障、译文质量错误、模型原始返回数量、日文残留、占位符风险、超宽行和可写回数量。存在阻断错误时先修正规则、提示词或模型配置，再重新执行 `translate`。
 
 ---
 
@@ -593,14 +611,25 @@ residual_escape_sequence_pattern = "\\\\[nrt]"  # 残留检查前剥离的转义
 | `doctor` | 检查项目或目标游戏状态 | `uv run python main.py doctor --game "<标题>" --no-check-llm` |
 | `add-game` | 注册新游戏 | `uv run python main.py add-game --path "<游戏根目录>"` |
 | `scan-placeholder-candidates` | 扫描疑似自定义控制符 | `uv run python main.py scan-placeholder-candidates --game "<标题>" --output "<临时目录>/placeholder-candidates.json"` |
+| `build-placeholder-rules` | 生成占位符规则草稿 | `uv run python main.py build-placeholder-rules --game "<标题>" --output "<临时目录>/placeholder-rules.json"` |
+| `validate-placeholder-rules` | 校验并预览占位符规则 | `uv run python main.py validate-placeholder-rules --game "<标题>" --input "<临时目录>/placeholder-rules.json" --json` |
+| `import-placeholder-rules` | 导入游戏级占位符规则 | `uv run python main.py import-placeholder-rules --game "<标题>" --input "<临时目录>/placeholder-rules.json"` |
+| `prepare-agent-workspace` | 导出 Agent 分析工作区 | `uv run python main.py prepare-agent-workspace --game "<标题>" --output-dir "<临时目录>/agent-workspace"` |
+| `validate-agent-workspace` | 校验 Agent 工作区产物 | `uv run python main.py validate-agent-workspace --game "<标题>" --workspace "<临时目录>/agent-workspace" --json` |
+| `cleanup-agent-workspace` | 清理 Agent 工作区产物 | `uv run python main.py cleanup-agent-workspace --workspace "<临时目录>/agent-workspace"` |
 | `export-plugins-json` | 导出插件配置 | `uv run python main.py export-plugins-json --game "<标题>" --output "<临时目录>/plugins.json"` |
+| `validate-plugin-rules` | 校验插件规则字符串 | `uv run python main.py validate-plugin-rules --game "<标题>" --rules '<规则 JSON 字符串>' --json` |
 | `import-plugin-rules` | 导入插件规则 | `uv run python main.py import-plugin-rules --game "<标题>" --input "<临时目录>/plugin-rules.json"` |
 | `export-event-commands-json` | 导出事件指令参数 | `uv run python main.py export-event-commands-json --game "<标题>" --output "<临时目录>/ec.json" --code 357 355` |
+| `validate-event-command-rules` | 校验事件指令规则字符串 | `uv run python main.py validate-event-command-rules --game "<标题>" --rules '<规则 JSON 字符串>' --json` |
 | `import-event-command-rules` | 导入事件指令规则 | `uv run python main.py import-event-command-rules --game "<标题>" --input "<临时目录>/ec-rules.json"` |
 | `export-name-context` | 导出名字上下文 | `uv run python main.py export-name-context --game "<标题>" --output-dir "<临时目录>/names"` |
 | `import-name-context` | 导入术语表 | `uv run python main.py import-name-context --game "<标题>" --input "<临时目录>/names/name_registry.json"` |
 | `write-name-context` | 单独写回名字框和地图名 | `uv run python main.py write-name-context --game "<标题>"` |
 | `translate` | 正文翻译 | `uv run python main.py translate --game "<标题>"` |
+| `translation-status` | 查看最新翻译运行状态 | `uv run python main.py translation-status --game "<标题>" --json` |
+| `export-pending-translations` | 导出少量待人工补译条目 | `uv run python main.py export-pending-translations --game "<标题>" --limit 5 --output "<临时目录>/pending.json" --json` |
+| `import-manual-translations` | 导入人工补译结果 | `uv run python main.py import-manual-translations --game "<标题>" --input "<临时目录>/pending.json" --json` |
 | `quality-report` | 生成翻译质量报告 | `uv run python main.py quality-report --game "<标题>" --output "<临时目录>/quality-report.json"` |
 | `write-back` | 回写游戏文件 | `uv run python main.py write-back --game "<标题>"` |
 | `run-all` | 翻译 + 回写一步完成 | `uv run python main.py run-all --game "<标题>"` |
@@ -611,7 +640,7 @@ residual_escape_sequence_pattern = "\\\\[nrt]"  # 残留检查前剥离的转义
 
 ### Q: 翻译结果出现乱码或日文残留？
 
-检查 `custom_placeholder_rules.json` 是否覆盖了游戏的所有自定义控制符。遗漏的控制符会被当作普通日文送进模型。另外检查 `setting.toml` 中 `text_rules` 的日语残留检测正则是否匹配当前游戏。
+检查当前游戏数据库中的占位符规则或本次 CLI `--placeholder-rules` 是否覆盖了游戏的所有自定义控制符。遗漏的控制符会被当作普通日文送进模型。另外检查 `setting.toml` 中 `text_rules` 的日语残留检测正则是否匹配当前游戏。
 
 ### Q: 翻译中途断了怎么办？
 
@@ -626,7 +655,7 @@ residual_escape_sequence_pattern = "\\\\[nrt]"  # 残留检查前剥离的转义
 两种方式：
 
 1. 每次执行时用 CLI 参数覆盖模型名，并用环境变量覆盖模型地址或密钥
-2. 修改 `setting.toml` 后再执行
+2. 用 CLI 参数覆盖本次运行配置，或修改本机 `setting.toml` 后再执行
 
 ### Q: 只想翻译不写回文件？
 

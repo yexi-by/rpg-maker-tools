@@ -11,13 +11,18 @@ import argparse
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import TracebackType
-from typing import Self, cast
+from typing import NoReturn, Self, cast, override
 
+import aiofiles
 from rich.progress import Progress, TaskID
 from rich.table import Table
 
 from app.agent_toolkit import AgentReport, AgentToolkitService
-from app.application.handler import TextTranslationSummary, TranslationHandler
+from app.application.handler import (
+    TextTranslationSummary,
+    TranslationHandler,
+    TranslationRunLimits,
+)
 from app.config import SettingOverrides
 from app.observability import console, get_progress, logger
 from app.persistence import GameRegistry
@@ -25,6 +30,19 @@ from app.persistence import GameRegistry
 
 class CliBusinessError(Exception):
     """表示命令行任务遇到了已知业务失败。"""
+
+
+class CliArgumentError(Exception):
+    """表示命令行参数解析失败。"""
+
+
+class CliArgumentParser(argparse.ArgumentParser):
+    """把 argparse 默认退出改成可被 JSON 输出层接管的异常。"""
+
+    @override
+    def error(self, message: str) -> NoReturn:
+        """抛出参数错误，避免 argparse 直接写 stderr 并退出。"""
+        raise CliArgumentError(message)
 
 
 class HandlerSession:
@@ -110,45 +128,97 @@ class CliProgressReporter:
         logger.debug(f"[tag.phase]任务状态[/tag.phase] {status}")
 
 
+class NoopProgressReporter:
+    """Agent 模式使用的无输出进度回调。"""
+
+    def __enter__(self) -> Self:
+        """进入无输出进度上下文。"""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        """退出无输出进度上下文。"""
+
+    def progress_callbacks(self) -> tuple[Callable[[int, int], None], Callable[[int], None]]:
+        """返回无输出基础进度回调。"""
+        return (self.set_progress, self.advance_progress)
+
+    def status_callbacks(
+        self,
+    ) -> tuple[Callable[[int, int], None], Callable[[int], None], Callable[[str], None]]:
+        """返回无输出状态进度回调。"""
+        return (self.set_progress, self.advance_progress, self.set_status)
+
+    def set_progress(self, current: int, total: int) -> None:
+        """忽略绝对进度。"""
+        _ = (current, total)
+
+    def advance_progress(self, count: int) -> None:
+        """忽略推进进度。"""
+        _ = count
+
+    def set_status(self, status: str) -> None:
+        """把状态写入 DEBUG 文件日志，不输出进度条。"""
+        logger.debug(f"[tag.phase]任务状态[/tag.phase] {status}")
+
+
+def build_progress_reporter(description: str, args: argparse.Namespace) -> CliProgressReporter | NoopProgressReporter:
+    """根据运行模式创建进度回调适配器。"""
+    if read_bool_arg(args, "agent_mode"):
+        return NoopProgressReporter()
+    return CliProgressReporter(description)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """构建项目主命令行解析器。"""
-    parser = argparse.ArgumentParser(description="RPG Maker 翻译工具命令行入口")
+    parser = CliArgumentParser(description="RPG Maker 翻译工具命令行入口")
     _ = parser.add_argument(
         "--debug",
         action="store_true",
         help="在终端显示 DEBUG 级别日志，默认仅写入文件日志",
     )
-    subparsers = parser.add_subparsers(dest="command", metavar="<命令>", required=True)
+    _ = parser.add_argument(
+        "--agent-mode",
+        action="store_true",
+        help="使用适合外部 Agent 读取的简洁日志，不输出 Rich 进度条和 ANSI 样式",
+    )
+    subparsers = parser.add_subparsers(dest="command", metavar="<命令>", required=True, parser_class=CliArgumentParser)
 
-    _ = subparsers.add_parser("list", help="列出当前已注册游戏")
+    list_parser = subparsers.add_parser("list", help="列出当前已注册游戏")
+    _ = list_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
     doctor_parser = subparsers.add_parser("doctor", help="检查项目配置、模型连接和目标游戏状态")
-    _ = doctor_parser.add_argument("--game", help="目标游戏标题；不传时只检查项目级状态")
+    add_optional_target_arguments(doctor_parser, required=False)
     _ = doctor_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
     _ = doctor_parser.add_argument("--no-check-llm", action="store_true", help="跳过模型连通性检查")
 
     add_game_parser = subparsers.add_parser("add-game", help="注册新的 RPG Maker 游戏目录")
     _ = add_game_parser.add_argument("--path", required=True, help="RPG Maker 游戏根目录")
+    _ = add_game_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
     export_plugins_parser = subparsers.add_parser(
         "export-plugins-json",
         help="把当前游戏的 js/plugins.js 转成纯 JSON 文件",
     )
-    _ = export_plugins_parser.add_argument("--game", required=True, help="目标游戏标题")
+    add_optional_target_arguments(export_plugins_parser)
     _ = export_plugins_parser.add_argument("--output", required=True, help="导出的 plugins JSON 文件")
 
     import_plugin_parser = subparsers.add_parser(
         "import-plugin-rules",
         help="把外部插件规则 JSON 导入游戏数据库",
     )
-    _ = import_plugin_parser.add_argument("--game", required=True, help="目标游戏标题")
+    add_optional_target_arguments(import_plugin_parser)
     _ = import_plugin_parser.add_argument("--input", required=True, help="外部插件规则 JSON 文件")
 
     export_event_commands_parser = subparsers.add_parser(
         "export-event-commands-json",
         help="把 data 事件指令参数导出为 JSON 文件",
     )
-    _ = export_event_commands_parser.add_argument("--game", required=True, help="目标游戏标题")
+    add_optional_target_arguments(export_event_commands_parser)
     _ = export_event_commands_parser.add_argument("--output", required=True, help="导出的事件指令 JSON 文件")
     _ = export_event_commands_parser.add_argument(
         "--code",
@@ -164,46 +234,87 @@ def build_parser() -> argparse.ArgumentParser:
         "import-event-command-rules",
         help="把外部事件指令规则 JSON 导入游戏数据库",
     )
-    _ = import_event_command_parser.add_argument("--game", required=True, help="目标游戏标题")
+    add_optional_target_arguments(import_event_command_parser)
     _ = import_event_command_parser.add_argument("--input", required=True, help="外部事件指令规则 JSON 文件")
 
     scan_placeholder_parser = subparsers.add_parser(
         "scan-placeholder-candidates",
         help="扫描疑似自定义控制符候选",
     )
-    _ = scan_placeholder_parser.add_argument("--game", required=True, help="目标游戏标题")
+    add_optional_target_arguments(scan_placeholder_parser)
     _ = scan_placeholder_parser.add_argument("--output", help="写出 JSON 报告文件")
     _ = scan_placeholder_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
     _ = scan_placeholder_parser.add_argument(
         "--placeholder-rules",
-        help="本次扫描使用的自定义占位符规则 JSON 字符串；传入后不会读取项目根目录默认规则",
+        help="本次扫描使用的自定义占位符规则 JSON 字符串；传入后不会读取当前游戏数据库规则",
+    )
+
+    validate_placeholder_parser = subparsers.add_parser(
+        "validate-placeholder-rules",
+        help="校验自定义占位符规则，并预览样本文本的占位符替换与还原",
+    )
+    add_optional_target_arguments(validate_placeholder_parser, required=False)
+    _ = validate_placeholder_parser.add_argument("--output", help="写出 JSON 报告文件")
+    _ = validate_placeholder_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+    validate_placeholder_source_group = validate_placeholder_parser.add_mutually_exclusive_group()
+    _ = validate_placeholder_source_group.add_argument(
+        "--placeholder-rules",
+        help="本次校验使用的自定义占位符规则 JSON 字符串；传入后不会读取当前游戏数据库规则",
+    )
+    _ = validate_placeholder_source_group.add_argument(
+        "--input",
+        help="本次校验使用的自定义占位符规则 JSON 文件；传入后不会读取当前游戏数据库规则",
+    )
+    _ = validate_placeholder_parser.add_argument(
+        "--sample",
+        action="append",
+        default=[],
+        help="用于预览替换和还原效果的原文片段，可重复传入",
     )
 
     quality_report_parser = subparsers.add_parser(
         "quality-report",
         help="生成当前游戏翻译质量报告",
     )
-    _ = quality_report_parser.add_argument("--game", required=True, help="目标游戏标题")
+    add_optional_target_arguments(quality_report_parser)
     _ = quality_report_parser.add_argument("--output", help="写出 JSON 报告文件")
     _ = quality_report_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
+    export_pending_parser = subparsers.add_parser(
+        "export-pending-translations",
+        help="导出尚未成功入库的少量正文条目，供 Agent 人工补译",
+    )
+    add_optional_target_arguments(export_pending_parser)
+    _ = export_pending_parser.add_argument("--output", required=True, help="人工补译 JSON 输出文件")
+    _ = export_pending_parser.add_argument("--limit", type=int, help="最多导出的待补译条目数")
+    _ = export_pending_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+
+    import_manual_parser = subparsers.add_parser(
+        "import-manual-translations",
+        help="导入 Agent 人工补齐的正文译文并写入当前游戏数据库",
+    )
+    add_optional_target_arguments(import_manual_parser)
+    _ = import_manual_parser.add_argument("--input", required=True, help="已填写的人工补译 JSON 文件")
+    _ = import_manual_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+
     translate_parser = subparsers.add_parser("translate", help="翻译指定游戏的正文")
-    _ = translate_parser.add_argument("--game", required=True, help="目标游戏标题")
+    add_optional_target_arguments(translate_parser)
     _ = translate_parser.add_argument(
         "--placeholder-rules",
-        help="本次翻译使用的自定义占位符规则 JSON 字符串；传入后不会读取项目根目录默认规则",
+        help="本次翻译使用的自定义占位符规则 JSON 字符串；传入后不会读取当前游戏数据库规则",
     )
+    add_translation_limit_arguments(translate_parser)
     add_setting_override_arguments(translate_parser)
 
     write_back_parser = subparsers.add_parser("write-back", help="把译文回写到游戏目录")
-    _ = write_back_parser.add_argument("--game", required=True, help="目标游戏标题")
+    add_optional_target_arguments(write_back_parser)
     add_setting_override_arguments(write_back_parser)
 
     export_name_parser = subparsers.add_parser(
         "export-name-context",
         help="导出 101 名字框和地图显示名上下文 JSON，供外部 Agent 填写译名",
     )
-    _ = export_name_parser.add_argument("--game", required=True, help="目标游戏标题")
+    add_optional_target_arguments(export_name_parser)
     _ = export_name_parser.add_argument(
         "--output-dir",
         required=True,
@@ -214,25 +325,112 @@ def build_parser() -> argparse.ArgumentParser:
         "import-name-context",
         help="把外部 Agent 填写后的术语表大 JSON 导入游戏数据库",
     )
-    _ = import_name_parser.add_argument("--game", required=True, help="目标游戏标题")
+    add_optional_target_arguments(import_name_parser)
     _ = import_name_parser.add_argument("--input", required=True, help="已填写的大 JSON 路径")
 
     write_name_parser = subparsers.add_parser(
         "write-name-context",
         help="根据数据库中的术语表写回 101 名字框和 MapXXX.displayName",
     )
-    _ = write_name_parser.add_argument("--game", required=True, help="目标游戏标题")
+    add_optional_target_arguments(write_name_parser)
     add_setting_override_arguments(write_name_parser)
 
     run_all_parser = subparsers.add_parser("run-all", help="按固定顺序执行正文翻译和回写")
-    _ = run_all_parser.add_argument("--game", required=True, help="目标游戏标题")
+    add_optional_target_arguments(run_all_parser)
     _ = run_all_parser.add_argument(
         "--placeholder-rules",
-        help="本次翻译使用的自定义占位符规则 JSON 字符串；传入后不会读取项目根目录默认规则",
+        help="本次翻译使用的自定义占位符规则 JSON 字符串；传入后不会读取当前游戏数据库规则",
     )
+    add_translation_limit_arguments(run_all_parser)
     _ = run_all_parser.add_argument("--skip-write-back", action="store_true", help="跳过最终回写阶段")
     add_setting_override_arguments(run_all_parser)
+
+    build_placeholder_parser = subparsers.add_parser(
+        "build-placeholder-rules",
+        help="根据当前游戏候选控制符生成可编辑占位符规则草稿",
+    )
+    add_optional_target_arguments(build_placeholder_parser)
+    _ = build_placeholder_parser.add_argument("--output", required=True, help="写出的规则草稿 JSON 文件")
+    _ = build_placeholder_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+
+    import_placeholder_parser = subparsers.add_parser(
+        "import-placeholder-rules",
+        help="把当前游戏专用占位符规则写入数据库",
+    )
+    add_optional_target_arguments(import_placeholder_parser)
+    import_placeholder_source_group = import_placeholder_parser.add_mutually_exclusive_group(required=True)
+    _ = import_placeholder_source_group.add_argument("--rules", help="占位符规则 JSON 字符串")
+    _ = import_placeholder_source_group.add_argument("--input", help="占位符规则 JSON 文件")
+
+    validate_plugin_parser = subparsers.add_parser(
+        "validate-plugin-rules",
+        help="校验插件文本规则 JSON 字符串",
+    )
+    add_optional_target_arguments(validate_plugin_parser)
+    _ = validate_plugin_parser.add_argument("--rules", required=True, help="插件规则 JSON 字符串")
+    _ = validate_plugin_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+
+    validate_event_parser = subparsers.add_parser(
+        "validate-event-command-rules",
+        help="校验事件指令文本规则 JSON 字符串",
+    )
+    add_optional_target_arguments(validate_event_parser)
+    _ = validate_event_parser.add_argument("--rules", required=True, help="事件指令规则 JSON 字符串")
+    _ = validate_event_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+
+    prepare_workspace_parser = subparsers.add_parser(
+        "prepare-agent-workspace",
+        help="一次性导出 Agent 分析所需的临时工作区",
+    )
+    add_optional_target_arguments(prepare_workspace_parser)
+    _ = prepare_workspace_parser.add_argument("--output-dir", required=True, help="临时工作区输出目录")
+    _ = prepare_workspace_parser.add_argument(
+        "--code",
+        action="extend",
+        nargs="+",
+        type=int,
+        dest="codes",
+        metavar="CODE",
+        help="需要导出的事件指令编码数组；传入后覆盖配置文件默认编码数组",
+    )
+    _ = prepare_workspace_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+
+    validate_workspace_parser = subparsers.add_parser(
+        "validate-agent-workspace",
+        help="校验 Agent 临时工作区产物是否可导入",
+    )
+    add_optional_target_arguments(validate_workspace_parser)
+    _ = validate_workspace_parser.add_argument("--workspace", required=True, help="Agent 临时工作区目录")
+    _ = validate_workspace_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+
+    cleanup_workspace_parser = subparsers.add_parser(
+        "cleanup-agent-workspace",
+        help="按 manifest 清理 Agent 临时工作区产物",
+    )
+    _ = cleanup_workspace_parser.add_argument("--workspace", required=True, help="Agent 临时工作区目录")
+    _ = cleanup_workspace_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+
+    status_parser = subparsers.add_parser("translation-status", help="查看最新正文翻译运行状态")
+    add_optional_target_arguments(status_parser)
+    _ = status_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
     return parser
+
+
+def add_optional_target_arguments(parser: argparse.ArgumentParser, *, required: bool = True) -> None:
+    """给目标游戏命令增加标题或路径二选一参数。"""
+    group = parser.add_mutually_exclusive_group(required=required)
+    _ = group.add_argument("--game", help="目标游戏标题")
+    _ = group.add_argument("--game-path", help="已注册目标游戏根目录")
+
+
+def add_translation_limit_arguments(parser: argparse.ArgumentParser) -> None:
+    """给翻译命令增加单次运行控制参数。"""
+    group = parser.add_argument_group("运行控制")
+    _ = group.add_argument("--max-items", type=int, help="本轮最多处理的待翻译条目数")
+    _ = group.add_argument("--max-batches", type=int, help="本轮最多处理的模型批次数")
+    _ = group.add_argument("--time-limit-seconds", type=int, help="本轮翻译最长运行秒数")
+    _ = group.add_argument("--stop-on-error-rate", type=float, help="译文质量错误率达到该值时停止本轮")
+    _ = group.add_argument("--stop-on-rate-limit-count", type=int, help="模型限流故障达到该次数时停止本轮")
 
 
 def add_setting_override_arguments(parser: argparse.ArgumentParser) -> None:
@@ -301,7 +499,7 @@ async def dispatch_command(args: argparse.Namespace) -> int:
     command = read_str_arg(args, "command")
 
     if command == "list":
-        return await run_list_command()
+        return await run_list_command(args)
     if command == "doctor":
         return await run_doctor_command(args)
     if command == "add-game":
@@ -316,8 +514,30 @@ async def dispatch_command(args: argparse.Namespace) -> int:
         return await run_import_event_command_rules_command(args)
     if command == "scan-placeholder-candidates":
         return await run_scan_placeholder_candidates_command(args)
+    if command == "validate-placeholder-rules":
+        return await run_validate_placeholder_rules_command(args)
+    if command == "build-placeholder-rules":
+        return await run_build_placeholder_rules_command(args)
+    if command == "import-placeholder-rules":
+        return await run_import_placeholder_rules_command(args)
+    if command == "validate-plugin-rules":
+        return await run_validate_plugin_rules_command(args)
+    if command == "validate-event-command-rules":
+        return await run_validate_event_command_rules_command(args)
+    if command == "prepare-agent-workspace":
+        return await run_prepare_agent_workspace_command(args)
+    if command == "validate-agent-workspace":
+        return await run_validate_agent_workspace_command(args)
+    if command == "cleanup-agent-workspace":
+        return await run_cleanup_agent_workspace_command(args)
     if command == "quality-report":
         return await run_quality_report_command(args)
+    if command == "export-pending-translations":
+        return await run_export_pending_translations_command(args)
+    if command == "import-manual-translations":
+        return await run_import_manual_translations_command(args)
+    if command == "translation-status":
+        return await run_translation_status_command(args)
     if command == "translate":
         return await run_translate_command(args)
     if command == "write-back":
@@ -334,10 +554,28 @@ async def dispatch_command(args: argparse.Namespace) -> int:
     raise CliBusinessError(f"未知命令：{command}")
 
 
-async def run_list_command() -> int:
+async def run_list_command(args: argparse.Namespace) -> int:
     """执行 `list` 命令。"""
     registry = GameRegistry()
     items = await registry.list_games()
+    if read_bool_arg(args, "json_output"):
+        report = AgentReport.from_parts(
+            errors=[],
+            warnings=[],
+            summary={"game_count": len(items)},
+            details={
+                "games": [
+                    {
+                        "game_title": item.game_title,
+                        "game_path": str(item.game_path),
+                        "db_path": str(item.db_path),
+                    }
+                    for item in items
+                ]
+            },
+        )
+        print(report.to_json_text())
+        return 0
     if not items:
         logger.info("[tag.skip]当前还没有注册任何游戏[/tag.skip]")
         return 0
@@ -357,13 +595,22 @@ async def run_add_game_command(args: argparse.Namespace) -> int:
     game_path = Path(read_str_arg(args, "path"))
     async with HandlerSession() as handler:
         game_title = await handler.add_game(game_path)
+        if read_bool_arg(args, "json_output"):
+            report = AgentReport.from_parts(
+                errors=[],
+                warnings=[],
+                summary={"game_title": game_title},
+                details={"next_game_argument": game_title},
+            )
+            print(report.to_json_text())
+            return 0
         logger.success(f"[tag.success]游戏注册完成[/tag.success] 标题 [tag.count]{game_title}[/tag.count]")
     return 0
 
 
 async def run_import_plugin_rules_command(args: argparse.Namespace) -> int:
     """执行 `import-plugin-rules` 命令。"""
-    game_title = read_str_arg(args, "game")
+    game_title = await resolve_target_game_title(args)
     input_path = read_required_path_arg(args, "input")
     async with HandlerSession() as handler:
         _ = await handler.import_plugin_rules(game_title=game_title, input_path=input_path)
@@ -372,7 +619,7 @@ async def run_import_plugin_rules_command(args: argparse.Namespace) -> int:
 
 async def run_doctor_command(args: argparse.Namespace) -> int:
     """执行 `doctor` 命令。"""
-    game_title = read_optional_str_arg(args, "game")
+    game_title = await resolve_optional_target_game_title(args)
     check_llm = not read_bool_arg(args, "no_check_llm")
     service = AgentToolkitService()
     report = await service.doctor(game_title=game_title, check_llm=check_llm)
@@ -382,7 +629,7 @@ async def run_doctor_command(args: argparse.Namespace) -> int:
 
 async def run_export_plugins_json_command(args: argparse.Namespace) -> int:
     """执行 `export-plugins-json` 命令。"""
-    game_title = read_str_arg(args, "game")
+    game_title = await resolve_target_game_title(args)
     output_path = read_required_path_arg(args, "output")
     async with HandlerSession() as handler:
         _ = await handler.export_plugins_json(game_title=game_title, output_path=output_path)
@@ -391,7 +638,7 @@ async def run_export_plugins_json_command(args: argparse.Namespace) -> int:
 
 async def run_export_event_commands_json_command(args: argparse.Namespace) -> int:
     """执行 `export-event-commands-json` 命令。"""
-    game_title = read_str_arg(args, "game")
+    game_title = await resolve_target_game_title(args)
     output_path = read_required_path_arg(args, "output")
     command_codes = read_int_set_arg(args, "codes")
     async with HandlerSession() as handler:
@@ -405,7 +652,7 @@ async def run_export_event_commands_json_command(args: argparse.Namespace) -> in
 
 async def run_import_event_command_rules_command(args: argparse.Namespace) -> int:
     """执行 `import-event-command-rules` 命令。"""
-    game_title = read_str_arg(args, "game")
+    game_title = await resolve_target_game_title(args)
     input_path = read_required_path_arg(args, "input")
     async with HandlerSession() as handler:
         _ = await handler.import_event_command_rules(game_title=game_title, input_path=input_path)
@@ -414,7 +661,7 @@ async def run_import_event_command_rules_command(args: argparse.Namespace) -> in
 
 async def run_scan_placeholder_candidates_command(args: argparse.Namespace) -> int:
     """执行 `scan-placeholder-candidates` 命令。"""
-    game_title = read_str_arg(args, "game")
+    game_title = await resolve_target_game_title(args)
     placeholder_rules_text = read_optional_str_arg(args, "placeholder_rules")
     service = AgentToolkitService()
     report = await service.scan_placeholder_candidates(
@@ -425,18 +672,140 @@ async def run_scan_placeholder_candidates_command(args: argparse.Namespace) -> i
     return 1 if report.status == "error" else 0
 
 
+async def run_validate_placeholder_rules_command(args: argparse.Namespace) -> int:
+    """执行 `validate-placeholder-rules` 命令。"""
+    game_title = await resolve_optional_target_game_title(args)
+    placeholder_rules_text = await read_optional_text_source_arg(args, "placeholder_rules", "input")
+    sample_texts = read_optional_str_list_arg(args, "sample") or []
+    service = AgentToolkitService()
+    report = await service.validate_placeholder_rules(
+        game_title=game_title,
+        custom_placeholder_rules_text=placeholder_rules_text,
+        sample_texts=sample_texts,
+    )
+    write_report_outputs(report=report, args=args, title="自定义占位符规则校验报告")
+    return 1 if report.status == "error" else 0
+
+
+async def run_build_placeholder_rules_command(args: argparse.Namespace) -> int:
+    """执行 `build-placeholder-rules` 命令。"""
+    game_title = await resolve_target_game_title(args)
+    output_path = read_required_path_arg(args, "output")
+    service = AgentToolkitService()
+    report = await service.build_placeholder_rules(game_title=game_title, output_path=output_path)
+    write_report_outputs(report=report, args=args, title="占位符规则草稿报告")
+    return 1 if report.status == "error" else 0
+
+
+async def run_import_placeholder_rules_command(args: argparse.Namespace) -> int:
+    """执行 `import-placeholder-rules` 命令。"""
+    game_title = await resolve_target_game_title(args)
+    rules_text = await read_required_text_source_arg(args, "rules", "input")
+    async with HandlerSession() as handler:
+        _ = await handler.import_placeholder_rules(game_title=game_title, rules_text=rules_text)
+    return 0
+
+
+async def run_validate_plugin_rules_command(args: argparse.Namespace) -> int:
+    """执行 `validate-plugin-rules` 命令。"""
+    game_title = await resolve_target_game_title(args)
+    rules_text = read_str_arg(args, "rules")
+    service = AgentToolkitService()
+    report = await service.validate_plugin_rules(game_title=game_title, rules_text=rules_text)
+    write_report_outputs(report=report, args=args, title="插件规则校验报告")
+    return 1 if report.status == "error" else 0
+
+
+async def run_validate_event_command_rules_command(args: argparse.Namespace) -> int:
+    """执行 `validate-event-command-rules` 命令。"""
+    game_title = await resolve_target_game_title(args)
+    rules_text = read_str_arg(args, "rules")
+    service = AgentToolkitService()
+    report = await service.validate_event_command_rules(game_title=game_title, rules_text=rules_text)
+    write_report_outputs(report=report, args=args, title="事件指令规则校验报告")
+    return 1 if report.status == "error" else 0
+
+
+async def run_prepare_agent_workspace_command(args: argparse.Namespace) -> int:
+    """执行 `prepare-agent-workspace` 命令。"""
+    game_title = await resolve_target_game_title(args)
+    output_dir = read_required_path_arg(args, "output_dir")
+    command_codes = read_int_set_arg(args, "codes")
+    service = AgentToolkitService()
+    report = await service.prepare_agent_workspace(
+        game_title=game_title,
+        output_dir=output_dir,
+        command_codes=command_codes,
+    )
+    write_report_outputs(report=report, args=args, title="Agent 工作区准备报告")
+    return 1 if report.status == "error" else 0
+
+
+async def run_validate_agent_workspace_command(args: argparse.Namespace) -> int:
+    """执行 `validate-agent-workspace` 命令。"""
+    game_title = await resolve_target_game_title(args)
+    workspace = read_required_path_arg(args, "workspace")
+    service = AgentToolkitService()
+    report = await service.validate_agent_workspace(game_title=game_title, workspace=workspace)
+    write_report_outputs(report=report, args=args, title="Agent 工作区校验报告")
+    return 1 if report.status == "error" else 0
+
+
+async def run_cleanup_agent_workspace_command(args: argparse.Namespace) -> int:
+    """执行 `cleanup-agent-workspace` 命令。"""
+    workspace = read_required_path_arg(args, "workspace")
+    service = AgentToolkitService()
+    report = await service.cleanup_agent_workspace(workspace=workspace)
+    write_report_outputs(report=report, args=args, title="Agent 工作区清理报告")
+    return 1 if report.status == "error" else 0
+
+
 async def run_quality_report_command(args: argparse.Namespace) -> int:
     """执行 `quality-report` 命令。"""
-    game_title = read_str_arg(args, "game")
+    game_title = await resolve_target_game_title(args)
     service = AgentToolkitService()
     report = await service.quality_report(game_title=game_title)
     write_report_outputs(report=report, args=args, title="翻译质量报告")
     return 1 if report.status == "error" else 0
 
 
+async def run_export_pending_translations_command(args: argparse.Namespace) -> int:
+    """执行 `export-pending-translations` 命令。"""
+    game_title = await resolve_target_game_title(args)
+    output_path = read_required_path_arg(args, "output")
+    limit = read_optional_int_arg(args, "limit")
+    service = AgentToolkitService()
+    report = await service.export_pending_translations(
+        game_title=game_title,
+        output_path=output_path,
+        limit=limit,
+    )
+    write_report_outputs(report=report, args=args, title="人工补译导出报告")
+    return 1 if report.status == "error" else 0
+
+
+async def run_import_manual_translations_command(args: argparse.Namespace) -> int:
+    """执行 `import-manual-translations` 命令。"""
+    game_title = await resolve_target_game_title(args)
+    input_path = read_required_path_arg(args, "input")
+    service = AgentToolkitService()
+    report = await service.import_manual_translations(game_title=game_title, input_path=input_path)
+    write_report_outputs(report=report, args=args, title="人工补译导入报告")
+    return 1 if report.status == "error" else 0
+
+
+async def run_translation_status_command(args: argparse.Namespace) -> int:
+    """执行 `translation-status` 命令。"""
+    game_title = await resolve_target_game_title(args)
+    service = AgentToolkitService()
+    report = await service.translation_status(game_title=game_title)
+    write_report_outputs(report=report, args=args, title="正文翻译状态")
+    return 1 if report.status == "error" else 0
+
+
 async def run_translate_command(args: argparse.Namespace) -> int:
     """执行 `translate` 命令。"""
-    game_title = read_str_arg(args, "game")
+    game_title = await resolve_target_game_title(args)
     placeholder_rules_text = read_optional_str_arg(args, "placeholder_rules")
     setting_overrides = build_setting_overrides(args)
     async with HandlerSession() as handler:
@@ -445,6 +814,8 @@ async def run_translate_command(args: argparse.Namespace) -> int:
             game_title=game_title,
             setting_overrides=setting_overrides,
             placeholder_rules_text=placeholder_rules_text,
+            run_limits=build_translation_run_limits(args),
+            args=args,
         )
     ensure_text_translation_success(summary)
     return 0
@@ -452,20 +823,21 @@ async def run_translate_command(args: argparse.Namespace) -> int:
 
 async def run_write_back_command(args: argparse.Namespace) -> int:
     """执行 `write-back` 命令。"""
-    game_title = read_str_arg(args, "game")
+    game_title = await resolve_target_game_title(args)
     setting_overrides = build_setting_overrides(args)
     async with HandlerSession() as handler:
         await write_back_for_handler(
             handler=handler,
             game_title=game_title,
             setting_overrides=setting_overrides,
+            args=args,
         )
     return 0
 
 
 async def run_export_name_context_command(args: argparse.Namespace) -> int:
     """执行 `export-name-context` 命令。"""
-    game_title = read_str_arg(args, "game")
+    game_title = await resolve_target_game_title(args)
     output_dir = read_required_path_arg(args, "output_dir")
     async with HandlerSession() as handler:
         summary = await handler.export_name_context(game_title=game_title, output_dir=output_dir)
@@ -475,7 +847,7 @@ async def run_export_name_context_command(args: argparse.Namespace) -> int:
 
 async def run_import_name_context_command(args: argparse.Namespace) -> int:
     """执行 `import-name-context` 命令。"""
-    game_title = read_str_arg(args, "game")
+    game_title = await resolve_target_game_title(args)
     input_path = read_required_path_arg(args, "input")
     async with HandlerSession() as handler:
         _ = await handler.import_name_context(game_title=game_title, input_path=input_path)
@@ -484,10 +856,10 @@ async def run_import_name_context_command(args: argparse.Namespace) -> int:
 
 async def run_write_name_context_command(args: argparse.Namespace) -> int:
     """执行 `write-name-context` 命令。"""
-    game_title = read_str_arg(args, "game")
+    game_title = await resolve_target_game_title(args)
     setting_overrides = build_setting_overrides(args)
     async with HandlerSession() as handler:
-        with CliProgressReporter("标准名写回") as progress:
+        with build_progress_reporter("标准名写回", args) as progress:
             _ = await handler.write_name_context(
                 game_title=game_title,
                 callbacks=progress.progress_callbacks(),
@@ -498,7 +870,7 @@ async def run_write_name_context_command(args: argparse.Namespace) -> int:
 
 async def run_all_command(args: argparse.Namespace) -> int:
     """执行 `run-all` 命令。"""
-    game_title = read_str_arg(args, "game")
+    game_title = await resolve_target_game_title(args)
     placeholder_rules_text = read_optional_str_arg(args, "placeholder_rules")
     setting_overrides = build_setting_overrides(args)
     skip_write_back = read_bool_arg(args, "skip_write_back")
@@ -510,6 +882,8 @@ async def run_all_command(args: argparse.Namespace) -> int:
             game_title=game_title,
             setting_overrides=setting_overrides,
             placeholder_rules_text=placeholder_rules_text,
+            run_limits=build_translation_run_limits(args),
+            args=args,
         )
         ensure_text_translation_success(text_summary)
 
@@ -521,6 +895,7 @@ async def run_all_command(args: argparse.Namespace) -> int:
             handler=handler,
             game_title=game_title,
             setting_overrides=setting_overrides,
+            args=args,
         )
         logger.success(f"[tag.success]run-all 完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count]")
     return 0
@@ -532,13 +907,16 @@ async def translate_text_for_handler(
     game_title: str,
     setting_overrides: SettingOverrides,
     placeholder_rules_text: str | None,
+    run_limits: TranslationRunLimits,
+    args: argparse.Namespace,
 ) -> TextTranslationSummary:
     """使用已创建的编排器翻译正文。"""
-    with CliProgressReporter("正文翻译") as progress:
+    with build_progress_reporter("正文翻译", args) as progress:
         return await handler.translate_text(
             game_title=game_title,
             setting_overrides=setting_overrides,
             custom_placeholder_rules_text=placeholder_rules_text,
+            run_limits=run_limits,
             callbacks=progress.status_callbacks(),
         )
 
@@ -548,14 +926,25 @@ async def write_back_for_handler(
     handler: TranslationHandler,
     game_title: str,
     setting_overrides: SettingOverrides,
+    args: argparse.Namespace,
 ) -> None:
     """使用已创建的编排器回写译文。"""
-    with CliProgressReporter("回写数据") as progress:
+    await ensure_write_back_gate(game_title)
+    with build_progress_reporter("回写数据", args) as progress:
         await handler.write_back(
             game_title=game_title,
             callbacks=progress.progress_callbacks(),
             setting_overrides=setting_overrides,
         )
+
+
+async def ensure_write_back_gate(game_title: str) -> None:
+    """回写前执行质量门禁，避免把部分失败结果写入游戏。"""
+    report = await AgentToolkitService().quality_report(game_title=game_title)
+    if report.status != "error":
+        return
+    messages = "；".join(error.message for error in report.errors)
+    raise CliBusinessError(f"回写门禁未通过：{messages}")
 
 
 def ensure_text_translation_success(summary: TextTranslationSummary) -> None:
@@ -564,6 +953,44 @@ def ensure_text_translation_success(summary: TextTranslationSummary) -> None:
         raise CliBusinessError(f"正文翻译被阻断：{summary.blocked_reason}")
     if summary.has_errors:
         raise CliBusinessError(f"正文翻译产生错误条目，已停止后续流程：成功 {summary.success_count} 条，失败 {summary.error_count} 条")
+
+
+async def resolve_target_game_title(args: argparse.Namespace) -> str:
+    """从 `--game` 或 `--game-path` 解析当前命令目标游戏标题。"""
+    game_title = read_optional_str_arg(args, "game")
+    if game_title is not None:
+        return game_title
+    game_path = read_optional_path_arg(args, "game_path")
+    if game_path is not None:
+        return await GameRegistry().resolve_registered_title_by_path(game_path)
+    raise CliBusinessError("命令必须提供 --game 或 --game-path")
+
+
+async def resolve_optional_target_game_title(args: argparse.Namespace) -> str | None:
+    """解析可选目标游戏标题。"""
+    game_title = read_optional_str_arg(args, "game")
+    if game_title is not None:
+        return game_title
+    game_path = read_optional_path_arg(args, "game_path")
+    if game_path is not None:
+        return await GameRegistry().resolve_registered_title_by_path(game_path)
+    return None
+
+
+def build_translation_run_limits(args: argparse.Namespace) -> TranslationRunLimits:
+    """从 CLI 参数构建单次翻译运行限制。"""
+    max_items = read_optional_positive_int_arg(args, "max_items")
+    max_batches = read_optional_positive_int_arg(args, "max_batches")
+    time_limit_seconds = read_optional_positive_int_arg(args, "time_limit_seconds")
+    stop_on_error_rate = read_optional_rate_arg(args, "stop_on_error_rate")
+    stop_on_rate_limit_count = read_optional_positive_int_arg(args, "stop_on_rate_limit_count")
+    return TranslationRunLimits(
+        max_items=max_items,
+        max_batches=max_batches,
+        time_limit_seconds=time_limit_seconds,
+        stop_on_error_rate=stop_on_error_rate,
+        stop_on_rate_limit_count=stop_on_rate_limit_count,
+    )
 
 
 def write_report_outputs(*, report: AgentReport, args: argparse.Namespace, title: str) -> None:
@@ -680,6 +1107,44 @@ def read_str_arg(args: argparse.Namespace, name: str) -> str:
     return raw_value.strip()
 
 
+async def read_optional_text_source_arg(
+    args: argparse.Namespace,
+    text_arg_name: str,
+    input_arg_name: str,
+) -> str | None:
+    """从命令行 JSON 字符串或 JSON 文件读取可选文本。"""
+    text_value = read_optional_str_arg(args, text_arg_name)
+    input_path = read_optional_path_arg(args, input_arg_name)
+    if text_value is not None:
+        return text_value
+    if input_path is None:
+        return None
+    return await read_text_file(input_path)
+
+
+async def read_required_text_source_arg(
+    args: argparse.Namespace,
+    text_arg_name: str,
+    input_arg_name: str,
+) -> str:
+    """从命令行 JSON 字符串或 JSON 文件读取必填文本。"""
+    text_value = await read_optional_text_source_arg(args, text_arg_name, input_arg_name)
+    if text_value is None:
+        raise CliBusinessError(f"命令参数必须提供 {text_arg_name} 或 {input_arg_name}")
+    if not text_value.strip():
+        raise CliBusinessError(f"命令参数 {text_arg_name} 或 {input_arg_name} 内容为空")
+    return text_value
+
+
+async def read_text_file(path: Path) -> str:
+    """以 UTF-8 读取命令行输入文件。"""
+    try:
+        async with aiofiles.open(path, "r", encoding="utf-8-sig") as file:
+            return await file.read()
+    except OSError as error:
+        raise CliBusinessError(f"读取输入文件失败：{path}") from error
+
+
 def read_optional_str_arg(args: argparse.Namespace, name: str) -> str | None:
     """从命名空间读取可选字符串参数。"""
     raw_value = read_namespace_value(args, name)
@@ -708,6 +1173,16 @@ def read_optional_int_arg(args: argparse.Namespace, name: str) -> int | None:
     return raw_value
 
 
+def read_optional_positive_int_arg(args: argparse.Namespace, name: str) -> int | None:
+    """从命名空间读取可选正整数参数。"""
+    value = read_optional_int_arg(args, name)
+    if value is None:
+        return None
+    if value <= 0:
+        raise CliBusinessError(f"命令参数必须是正整数：{name}")
+    return value
+
+
 def read_optional_float_arg(args: argparse.Namespace, name: str) -> float | None:
     """从命名空间读取可选浮点数参数。"""
     raw_value = read_namespace_value(args, name)
@@ -716,6 +1191,16 @@ def read_optional_float_arg(args: argparse.Namespace, name: str) -> float | None
     if isinstance(raw_value, bool) or not isinstance(raw_value, float):
         raise CliBusinessError(f"命令参数不是数字：{name}")
     return raw_value
+
+
+def read_optional_rate_arg(args: argparse.Namespace, name: str) -> float | None:
+    """读取 0 到 1 之间的比例参数。"""
+    value = read_optional_float_arg(args, name)
+    if value is None:
+        return None
+    if value <= 0 or value > 1:
+        raise CliBusinessError(f"命令参数必须大于 0 且小于等于 1：{name}")
+    return value
 
 
 def read_optional_rpm_arg(args: argparse.Namespace, name: str) -> tuple[int | None, bool]:
@@ -835,10 +1320,20 @@ def read_required_path_arg(args: argparse.Namespace, name: str) -> Path:
     return path
 
 
+SENSITIVE_OR_VERBOSE_ARGUMENTS = {
+    "placeholder_rules",
+    "rules",
+    "system_prompt",
+}
+
+
 def format_namespace(args: argparse.Namespace) -> str:
     """把命令参数格式化为适合日志记录的摘要。"""
     namespace = cast(dict[str, object], vars(args))
-    return ", ".join(f"{key}={value}" for key, value in sorted(namespace.items()))
+    return ", ".join(
+        f"{key}={format_log_argument_value(key=key, value=value)}"
+        for key, value in sorted(namespace.items())
+    )
 
 
 def read_namespace_value(args: argparse.Namespace, name: str) -> object:
@@ -851,10 +1346,38 @@ def format_argv(argv: Sequence[str]) -> str:
     """格式化原始命令行参数。"""
     if not argv:
         return "<空>"
-    return " ".join(argv)
+    redacted_items: list[str] = []
+    skip_next = False
+    for item in argv:
+        if skip_next:
+            redacted_items.append("<已省略>")
+            skip_next = False
+            continue
+        if item.startswith("--"):
+            option_body = item.removeprefix("--")
+            if "=" in option_body:
+                option_name, _option_value = option_body.split("=", 1)
+                if option_name.replace("-", "_") in SENSITIVE_OR_VERBOSE_ARGUMENTS:
+                    redacted_items.append(f"--{option_name}=<已省略>")
+                    continue
+            option_name = option_body.replace("-", "_")
+            if option_name in SENSITIVE_OR_VERBOSE_ARGUMENTS:
+                redacted_items.append(item)
+                skip_next = True
+                continue
+        redacted_items.append(item)
+    return " ".join(redacted_items)
+
+
+def format_log_argument_value(*, key: str, value: object) -> object:
+    """隐藏不适合写入运行首行日志的大段参数。"""
+    if key in SENSITIVE_OR_VERBOSE_ARGUMENTS and value is not None:
+        return "<已省略>"
+    return value
 
 
 __all__: list[str] = [
+    "CliArgumentError",
     "CliBusinessError",
     "build_parser",
     "dispatch_command",

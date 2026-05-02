@@ -14,9 +14,11 @@ from app.rmmz.schema import ErrorType, TranslationErrorItem, TranslationItem
 from app.rmmz.text_rules import TextRules
 from app.translation.line_wrap import align_long_text_lines
 
+ERR_PARSE_FAILED: ErrorType = "模型返回不可解析"
 ERR_MISSING_KEY: ErrorType = "AI漏翻"
 ERR_PLACEHOLDER_MISMATCH: ErrorType = "控制符不匹配"
 ERR_JAPANESE_RESIDUAL: ErrorType = "日文残留"
+ERR_ARRAY_LINE_COUNT: ErrorType = "选项行数不匹配"
 
 
 class TranslationResponse(RootModel[dict[str, str]]):
@@ -48,7 +50,7 @@ async def verify_translation_batch(
                     role=item.role,
                     original_lines=list(item.original_lines),
                     translation_lines=[],
-                    error_type=ERR_MISSING_KEY,
+                    error_type=ERR_PARSE_FAILED,
                     error_detail=["模型返回无法解析为 JSON 对象", f"详细错误: {error}"],
                     model_response=ai_result,
                 )
@@ -91,7 +93,7 @@ async def verify_translation_batch(
                         role=item.role,
                         original_lines=list(item.original_lines),
                         translation_lines=list(translation_lines),
-                        error_type=ERR_PLACEHOLDER_MISMATCH,
+                        error_type=ERR_ARRAY_LINE_COUNT,
                         error_detail=[f"选项行数不匹配: 期望 {len(item.original_lines)} 行, 实际 {len(translation_lines)} 行"],
                         model_response=ai_result,
                     )

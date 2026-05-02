@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 
 from app.config import Setting
 from app.rmmz.schema import TranslationErrorItem, TranslationItem
+from app.llm import LLMRequestFailure
 from app.llm.handler import LLMHandler
 from app.rmmz.text_rules import TextRules
 
@@ -74,6 +75,13 @@ class TextTranslation:
         if self.runner_error is not None:
             raise self.runner_error
 
+    async def stop(self) -> None:
+        """取消后台翻译任务，用于超时或用户中断时保存已有结果。"""
+        if self._runner_task is None or self._runner_task.done():
+            return
+        _ = self._runner_task.cancel()
+        _ = await asyncio.gather(self._runner_task, return_exceptions=True)
+
     async def _run_translation(
         self,
         *,
@@ -103,35 +111,38 @@ class TextTranslation:
             token_bucket = asyncio.Queue(maxsize=1)
 
         try:
-            async with asyncio.TaskGroup() as task_group:
-                if token_bucket is not None and rpm is not None:
-                    _ = task_group.create_task(
-                        self._create_token_bucket(
-                            token_bucket=token_bucket,
-                            rpm=rpm,
-                            stop_event=stop_event,
+            try:
+                async with asyncio.TaskGroup() as task_group:
+                    if token_bucket is not None and rpm is not None:
+                        _ = task_group.create_task(
+                            self._create_token_bucket(
+                                token_bucket=token_bucket,
+                                rpm=rpm,
+                                stop_event=stop_event,
+                            )
                         )
-                    )
 
-                for _ in range(worker_count):
-                    _ = task_group.create_task(
-                        self._worker(
-                            task_queue=task_queue,
-                            right_queue=right_queue,
-                            error_queue=error_queue,
-                            llm_handler=llm_handler,
-                            model=text_llm_setting.model,
-                            retry_count=text_task_setting.retry_count,
-                            retry_delay=text_task_setting.retry_delay,
-                            token_bucket=token_bucket,
+                    for _ in range(worker_count):
+                        _ = task_group.create_task(
+                            self._worker(
+                                task_queue=task_queue,
+                                right_queue=right_queue,
+                                error_queue=error_queue,
+                                llm_handler=llm_handler,
+                                model=text_llm_setting.model,
+                                retry_count=text_task_setting.retry_count,
+                                retry_delay=text_task_setting.retry_delay,
+                                token_bucket=token_bucket,
+                            )
                         )
-                    )
 
-                _ = task_group.create_task(
-                    self._wait_task_queue_done(task_queue=task_queue, stop_event=stop_event)
-                )
-        except Exception as error:
-            self.runner_error = error
+                    _ = task_group.create_task(
+                        self._wait_task_queue_done(task_queue=task_queue, stop_event=stop_event)
+                    )
+            except* LLMRequestFailure as group:
+                self.runner_error = group.exceptions[0]
+            except* Exception as group:
+                self.runner_error = group.exceptions[0]
         finally:
             stop_event.set()
             await right_queue.put(None)

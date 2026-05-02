@@ -13,6 +13,7 @@ from .importer import (
     PluginRuleImportFile,
     build_plugin_rule_records_from_import,
     load_plugin_rule_import_file,
+    parse_plugin_rule_import_text,
 )
 
 __all__: list[str] = [
@@ -25,5 +26,6 @@ __all__: list[str] = [
     "expand_rule_to_leaf_paths",
     "jsonpath_to_location_path",
     "load_plugin_rule_import_file",
+    "parse_plugin_rule_import_text",
     "resolve_plugin_leaves",
 ]

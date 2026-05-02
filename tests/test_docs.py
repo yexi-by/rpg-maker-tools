@@ -9,6 +9,9 @@ def test_agent_prompt_fenced_code_blocks_are_balanced() -> None:
     """Agent 提示词文档的 fenced code block 必须成对闭合。"""
     for relative_path in [
         "skills/rpg-maker-translation/SKILL.md",
+        "skills/rpg-maker-translation/references/workflow.md",
+        "skills/rpg-maker-translation/references/rules-and-workspace.md",
+        "skills/rpg-maker-translation/references/failure-writeback.md",
         "docs/agent-user-guide.md",
         "docs/name-context-agent-prompt.md",
         "docs/plugin-rules-agent-prompt.md",
@@ -32,15 +35,28 @@ def test_readme_matches_runtime_configuration_defaults() -> None:
 
 def test_translation_skill_covers_blocking_paths() -> None:
     """项目 Skill 必须覆盖外部 Agent 执行时的阻断路径。"""
-    text = (ROOT / "skills/rpg-maker-translation/SKILL.md").read_text(encoding="utf-8")
+    skill_root = ROOT / "skills/rpg-maker-translation"
+    text = "\n".join(
+        [
+            (skill_root / "SKILL.md").read_text(encoding="utf-8"),
+            (skill_root / "references/workflow.md").read_text(encoding="utf-8"),
+            (skill_root / "references/rules-and-workspace.md").read_text(encoding="utf-8"),
+            (skill_root / "references/failure-writeback.md").read_text(encoding="utf-8"),
+        ]
+    )
 
     required_phrases = [
         "State RT0：项目未知",
         "State RT2：游戏候选未确认",
         "State RT3：模型未配置或不可用",
         "State RT4：自定义控制符未确认",
-        "State RT7：翻译反复失败",
-        "State RT8：写回门禁",
+        "State RT7：二次翻译与增量翻译",
+        "State RT8：翻译反复失败",
+        "State RT9：写回门禁",
+        "不把二次翻译当成全新游戏无脑重跑",
+        "已有译文缓存会被复用",
+        "二次写回会直接替换当前激活文件",
+        "data_origin",
         "data JSON 被加密或不可解析",
         "当前 Agent 无命令执行能力",
         "event-command-rules.json",
@@ -55,12 +71,28 @@ def test_translation_skill_covers_blocking_paths() -> None:
         "即使数据库计数仍为 0",
         "plugins.json` 是空数组",
         "所有编码数组都为空",
+        "如果当前 Agent 平台支持子代理",
+        "当前 Agent 仍负责统筹",
+        "不允许让多个子代理同时修改同一个 JSON 文件",
+        "等待所有子代理完成",
         "把没有看懂结构的情况当成“游戏没有对应内容”",
         "删除 `<外部临时目录>` 下的 `name-context`",
+        "export-pending-translations",
+        "import-manual-translations",
         "反馈模板",
     ]
     for phrase in required_phrases:
         assert phrase in text
+
+
+def test_translation_skill_uses_progressive_disclosure() -> None:
+    """Skill 本体保持精简，详细流程通过 references 渐进式披露。"""
+    text = (ROOT / "skills/rpg-maker-translation/SKILL.md").read_text(encoding="utf-8")
+
+    assert len(text) < 6000
+    assert "references/workflow.md" in text
+    assert "references/rules-and-workspace.md" in text
+    assert "references/failure-writeback.md" in text
 
 
 def test_agent_user_docs_do_not_replace_skill() -> None:

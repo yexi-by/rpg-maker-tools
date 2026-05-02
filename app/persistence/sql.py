@@ -7,6 +7,10 @@ EVENT_COMMAND_TEXT_RULE_GROUPS_TABLE_NAME = "event_command_text_rule_groups"
 EVENT_COMMAND_TEXT_RULE_FILTERS_TABLE_NAME = "event_command_text_rule_filters"
 EVENT_COMMAND_TEXT_RULE_PATHS_TABLE_NAME = "event_command_text_rule_paths"
 NAME_CONTEXT_TERMS_TABLE_NAME = "name_context_terms"
+PLACEHOLDER_RULES_TABLE_NAME = "placeholder_rules"
+TRANSLATION_RUNS_TABLE_NAME = "translation_runs"
+LLM_FAILURES_TABLE_NAME = "llm_failures"
+TRANSLATION_QUALITY_ERRORS_TABLE_NAME = "translation_quality_errors"
 METADATA_KEY = "current_game"
 
 CREATE_TRANSLATION_TABLE = f"""
@@ -22,17 +26,66 @@ CREATE_TRANSLATION_TABLE = f"""
 ;
 """
 
-CREATE_ERROR_TABLE = """
+CREATE_PLACEHOLDER_RULES_TABLE = f"""
 --sql
-    CREATE TABLE IF NOT EXISTS [{table_name}] (
-        location_path     TEXT PRIMARY KEY,
-        item_type         TEXT NOT NULL,
-        role              TEXT,
-        original_lines    TEXT NOT NULL,
+    CREATE TABLE IF NOT EXISTS [{PLACEHOLDER_RULES_TABLE_NAME}] (
+        pattern_text         TEXT PRIMARY KEY,
+        placeholder_template TEXT NOT NULL
+    )
+;
+"""
+
+CREATE_TRANSLATION_RUNS_TABLE = f"""
+--sql
+    CREATE TABLE IF NOT EXISTS [{TRANSLATION_RUNS_TABLE_NAME}] (
+        run_id            TEXT PRIMARY KEY,
+        status            TEXT NOT NULL,
+        total_extracted   INTEGER NOT NULL,
+        pending_count     INTEGER NOT NULL,
+        deduplicated_count INTEGER NOT NULL,
+        batch_count       INTEGER NOT NULL,
+        success_count     INTEGER NOT NULL,
+        quality_error_count INTEGER NOT NULL,
+        llm_failure_count INTEGER NOT NULL,
+        started_at        TEXT NOT NULL,
+        updated_at        TEXT NOT NULL,
+        finished_at       TEXT,
+        stop_reason       TEXT NOT NULL,
+        last_error        TEXT NOT NULL
+    )
+;
+"""
+
+CREATE_LLM_FAILURES_TABLE = f"""
+--sql
+    CREATE TABLE IF NOT EXISTS [{LLM_FAILURES_TABLE_NAME}] (
+        failure_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id          TEXT NOT NULL,
+        category        TEXT NOT NULL,
+        error_type      TEXT NOT NULL,
+        error_message   TEXT NOT NULL,
+        retryable       INTEGER NOT NULL,
+        attempt_count   INTEGER NOT NULL,
+        created_at      TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES [{TRANSLATION_RUNS_TABLE_NAME}](run_id) ON DELETE CASCADE
+    )
+;
+"""
+
+CREATE_TRANSLATION_QUALITY_ERRORS_TABLE = f"""
+--sql
+    CREATE TABLE IF NOT EXISTS [{TRANSLATION_QUALITY_ERRORS_TABLE_NAME}] (
+        run_id           TEXT NOT NULL,
+        location_path    TEXT NOT NULL,
+        item_type        TEXT NOT NULL,
+        role             TEXT,
+        original_lines   TEXT NOT NULL,
         translation_lines TEXT NOT NULL,
-        error_type        TEXT NOT NULL,
-        error_detail      TEXT NOT NULL,
-        model_response    TEXT NOT NULL
+        error_type       TEXT NOT NULL,
+        error_detail     TEXT NOT NULL,
+        model_response   TEXT NOT NULL,
+        PRIMARY KEY (run_id, location_path),
+        FOREIGN KEY (run_id) REFERENCES [{TRANSLATION_RUNS_TABLE_NAME}](run_id) ON DELETE CASCADE
     )
 ;
 """
@@ -110,14 +163,6 @@ INSERT_TRANSLATION = f"""
 ;
 """
 
-INSERT_ERROR = """
---sql
-    INSERT OR REPLACE INTO [{table_name}]
-    (location_path, item_type, role, original_lines, translation_lines, error_type, error_detail, model_response)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-;
-"""
-
 UPSERT_METADATA = f"""
 --sql
     INSERT OR REPLACE INTO [{METADATA_TABLE_NAME}]
@@ -166,9 +211,50 @@ INSERT_NAME_CONTEXT_TERM = f"""
 ;
 """
 
-SELECT_ALL = """
+INSERT_PLACEHOLDER_RULE = f"""
 --sql
-    SELECT * FROM [{table_name}]
+    INSERT OR REPLACE INTO [{PLACEHOLDER_RULES_TABLE_NAME}]
+    (pattern_text, placeholder_template)
+    VALUES (?, ?)
+;
+"""
+
+UPSERT_TRANSLATION_RUN = f"""
+--sql
+    INSERT OR REPLACE INTO [{TRANSLATION_RUNS_TABLE_NAME}]
+    (
+        run_id,
+        status,
+        total_extracted,
+        pending_count,
+        deduplicated_count,
+        batch_count,
+        success_count,
+        quality_error_count,
+        llm_failure_count,
+        started_at,
+        updated_at,
+        finished_at,
+        stop_reason,
+        last_error
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+;
+"""
+
+INSERT_LLM_FAILURE = f"""
+--sql
+    INSERT INTO [{LLM_FAILURES_TABLE_NAME}]
+    (run_id, category, error_type, error_message, retryable, attempt_count, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+;
+"""
+
+INSERT_TRANSLATION_QUALITY_ERROR = f"""
+--sql
+    INSERT OR REPLACE INTO [{TRANSLATION_QUALITY_ERRORS_TABLE_NAME}]
+    (run_id, location_path, item_type, role, original_lines, translation_lines, error_type, error_detail, model_response)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ;
 """
 
@@ -184,15 +270,6 @@ SELECT_TRANSLATED_ITEMS = f"""
     SELECT location_path, item_type, role, original_lines, source_line_paths, translation_lines
     FROM [{TRANSLATION_TABLE_NAME}]
     ORDER BY location_path
-;
-"""
-
-SELECT_TABLE_NAMES_BY_PREFIX = """
---sql
-    SELECT name
-    FROM sqlite_master
-    WHERE type = 'table' AND name LIKE ?
-    ORDER BY name
 ;
 """
 
@@ -245,6 +322,50 @@ SELECT_NAME_CONTEXT_TERMS = f"""
 ;
 """
 
+SELECT_PLACEHOLDER_RULES = f"""
+--sql
+    SELECT pattern_text, placeholder_template
+    FROM [{PLACEHOLDER_RULES_TABLE_NAME}]
+    ORDER BY pattern_text
+;
+"""
+
+SELECT_LATEST_TRANSLATION_RUN = f"""
+--sql
+    SELECT *
+    FROM [{TRANSLATION_RUNS_TABLE_NAME}]
+    ORDER BY started_at DESC, run_id DESC
+    LIMIT 1
+;
+"""
+
+SELECT_TRANSLATION_RUN = f"""
+--sql
+    SELECT *
+    FROM [{TRANSLATION_RUNS_TABLE_NAME}]
+    WHERE run_id = ?
+    LIMIT 1
+;
+"""
+
+SELECT_LLM_FAILURES_BY_RUN = f"""
+--sql
+    SELECT *
+    FROM [{LLM_FAILURES_TABLE_NAME}]
+    WHERE run_id = ?
+    ORDER BY failure_id
+;
+"""
+
+SELECT_TRANSLATION_QUALITY_ERRORS_BY_RUN = f"""
+--sql
+    SELECT *
+    FROM [{TRANSLATION_QUALITY_ERRORS_TABLE_NAME}]
+    WHERE run_id = ?
+    ORDER BY location_path
+;
+"""
+
 DELETE_ALL_PLUGIN_TEXT_RULES = f"""
 --sql
     DELETE FROM [{PLUGIN_TEXT_RULES_TABLE_NAME}]
@@ -275,6 +396,12 @@ DELETE_ALL_NAME_CONTEXT_TERMS = f"""
 ;
 """
 
+DELETE_ALL_PLACEHOLDER_RULES = f"""
+--sql
+    DELETE FROM [{PLACEHOLDER_RULES_TABLE_NAME}]
+;
+"""
+
 DELETE_TRANSLATION_ITEMS_BY_PREFIX = f"""
 --sql
     DELETE FROM [{TRANSLATION_TABLE_NAME}]
@@ -289,12 +416,6 @@ DELETE_TRANSLATION_ITEM_BY_PATH = f"""
 ;
 """
 
-DROP_TABLE = """
---sql
-    DROP TABLE IF EXISTS [{table_name}]
-;
-"""
-
 CHECK_CONNECTION_READABLE = """
 --sql
     SELECT 1
@@ -303,14 +424,18 @@ CHECK_CONNECTION_READABLE = """
 
 __all__: list[str] = [
     "CHECK_CONNECTION_READABLE",
-    "CREATE_ERROR_TABLE",
     "CREATE_EVENT_COMMAND_TEXT_RULE_FILTERS_TABLE",
     "CREATE_EVENT_COMMAND_TEXT_RULE_GROUPS_TABLE",
     "CREATE_EVENT_COMMAND_TEXT_RULE_PATHS_TABLE",
+    "CREATE_LLM_FAILURES_TABLE",
     "CREATE_METADATA_TABLE",
     "CREATE_NAME_CONTEXT_TERMS_TABLE",
+    "CREATE_PLACEHOLDER_RULES_TABLE",
     "CREATE_PLUGIN_TEXT_RULES_TABLE",
+    "CREATE_TRANSLATION_QUALITY_ERRORS_TABLE",
+    "CREATE_TRANSLATION_RUNS_TABLE",
     "CREATE_TRANSLATION_TABLE",
+    "DELETE_ALL_PLACEHOLDER_RULES",
     "DELETE_ALL_EVENT_COMMAND_TEXT_RULE_FILTERS",
     "DELETE_ALL_EVENT_COMMAND_TEXT_RULE_GROUPS",
     "DELETE_ALL_EVENT_COMMAND_TEXT_RULE_PATHS",
@@ -318,31 +443,40 @@ __all__: list[str] = [
     "DELETE_ALL_PLUGIN_TEXT_RULES",
     "DELETE_TRANSLATION_ITEM_BY_PATH",
     "DELETE_TRANSLATION_ITEMS_BY_PREFIX",
-    "DROP_TABLE",
     "EVENT_COMMAND_TEXT_RULE_FILTERS_TABLE_NAME",
     "EVENT_COMMAND_TEXT_RULE_GROUPS_TABLE_NAME",
     "EVENT_COMMAND_TEXT_RULE_PATHS_TABLE_NAME",
-    "INSERT_ERROR",
     "INSERT_EVENT_COMMAND_TEXT_RULE_FILTER",
     "INSERT_EVENT_COMMAND_TEXT_RULE_GROUP",
     "INSERT_EVENT_COMMAND_TEXT_RULE_PATH",
+    "INSERT_LLM_FAILURE",
     "INSERT_NAME_CONTEXT_TERM",
+    "INSERT_PLACEHOLDER_RULE",
     "INSERT_PLUGIN_TEXT_RULE",
+    "INSERT_TRANSLATION_QUALITY_ERROR",
+    "LLM_FAILURES_TABLE_NAME",
     "INSERT_TRANSLATION",
     "METADATA_KEY",
     "METADATA_TABLE_NAME",
     "NAME_CONTEXT_TERMS_TABLE_NAME",
+    "PLACEHOLDER_RULES_TABLE_NAME",
     "PLUGIN_TEXT_RULES_TABLE_NAME",
-    "SELECT_ALL",
     "SELECT_EVENT_COMMAND_TEXT_RULE_FILTERS",
     "SELECT_EVENT_COMMAND_TEXT_RULE_GROUPS",
     "SELECT_EVENT_COMMAND_TEXT_RULE_PATHS",
     "SELECT_METADATA",
     "SELECT_NAME_CONTEXT_TERMS",
+    "SELECT_LATEST_TRANSLATION_RUN",
+    "SELECT_LLM_FAILURES_BY_RUN",
+    "SELECT_PLACEHOLDER_RULES",
     "SELECT_PLUGIN_TEXT_RULES",
-    "SELECT_TABLE_NAMES_BY_PREFIX",
+    "SELECT_TRANSLATION_QUALITY_ERRORS_BY_RUN",
+    "SELECT_TRANSLATION_RUN",
     "SELECT_TRANSLATED_ITEMS",
     "SELECT_TRANSLATION_PATHS",
+    "TRANSLATION_QUALITY_ERRORS_TABLE_NAME",
+    "TRANSLATION_RUNS_TABLE_NAME",
     "TRANSLATION_TABLE_NAME",
     "UPSERT_METADATA",
+    "UPSERT_TRANSLATION_RUN",
 ]

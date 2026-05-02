@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import logging
+import re
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, override
 
@@ -38,6 +40,7 @@ FILE_LOG_FORMAT = (
     "<level>{message}</level>"
 )
 CONSOLE_LOG_FORMAT = "{message}"
+RICH_TAG_PATTERN = re.compile(r"\[/?[A-Za-z0-9_.# =:/-]+\]")
 
 # --- 文件日志配置 ---
 ENABLE_FILE_LOG = True
@@ -142,6 +145,14 @@ def build_console_sink_format(_record: Record) -> str:
     return CONSOLE_LOG_FORMAT
 
 
+def agent_console_sink(message: object) -> None:
+    """用无 ANSI 单行文本输出 Agent 模式日志。"""
+    text = str(message).rstrip()
+    text = RICH_TAG_PATTERN.sub("", text)
+    _ = sys.stderr.write(f"{text}\n")
+    _ = sys.stderr.flush()
+
+
 def build_file_sink_format(record: Record) -> str:
     """
     为 Loguru sink 构造格式字符串。
@@ -165,6 +176,7 @@ def setup_logger(
     level: str = LOG_LEVEL,
     *,
     use_console: bool = True,
+    agent_mode: bool = False,
     file_path: str | Path = LOG_FILE_PATH,
     enqueue_file_log: bool = True,
 ) -> None:
@@ -176,12 +188,21 @@ def setup_logger(
     Args:
         level: 控制台 sink 的最低日志级别。
         use_console: 是否启用 Rich 控制台输出。
+        agent_mode: 是否使用无 ANSI 单行日志。
         file_path: 文件日志路径，测试可传入临时路径避免污染真实日志。
         enqueue_file_log: 是否启用异步文件写入队列。
     """
     _ = logger.remove()
 
-    if use_console:
+    if use_console and agent_mode:
+        _ = logger.add(
+            agent_console_sink,
+            level=level,
+            format="{level} {message}",
+            filter=should_show_in_console,
+            catch=True,
+        )
+    elif use_console:
         _ = logger.add(
             ProjectRichHandler(
                 console=console,

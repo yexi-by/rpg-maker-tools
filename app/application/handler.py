@@ -6,8 +6,9 @@
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Self
+from typing import Self
 
 from app.application.file_writer import reset_writable_copies, write_game_files
 from app.application.font_replacement import apply_font_replacement
@@ -23,9 +24,7 @@ from app.application.summaries import (
 )
 from app.config import (
     SettingOverrides,
-    load_custom_placeholder_rules,
     load_custom_placeholder_rules_text,
-    resolve_custom_placeholder_rules_path,
 )
 from app.config.schemas import Setting
 from app.event_command_text import (
@@ -44,7 +43,8 @@ from app.name_context import (
     export_name_context_artifacts,
     load_name_context_registry,
 )
-from app.persistence import DEFAULT_ERROR_TABLE_PREFIX, GameRegistry, TargetGameSession
+from app.persistence import GameRegistry, TargetGameSession
+from app.persistence.repository import current_timestamp_text
 from app.plugin_text import (
     PluginTextExtraction,
     build_plugin_hash,
@@ -57,13 +57,17 @@ from app.rmmz.commands import iter_all_commands
 from app.rmmz.schema import (
     GameData,
     EventCommandTextRuleRecord,
+    LlmFailureRecord,
+    PlaceholderRuleRecord,
     PLUGINS_FILE_NAME,
     PluginTextRuleRecord,
     TranslationData,
     TranslationErrorItem,
     TranslationItem,
+    TranslationRunRecord,
 )
-from app.llm import LLMHandler
+from app.rmmz.control_codes import CustomPlaceholderRule
+from app.llm import LLMHandler, LLMRequestFailure
 from app.rmmz.text_rules import TextRules
 from app.translation import TextTranslation, TranslationBatch, TranslationCache, iter_translation_context_batches
 from app.rmmz.loader import load_game_data, read_game_title, resolve_game_directory
@@ -73,10 +77,46 @@ from app.plugin_text.write_back import write_plugin_text
 from app.utils.config_loader_utils import load_setting
 
 
+@dataclass(frozen=True, slots=True)
+class TranslationRunLimits:
+    """正文翻译单次运行控制参数。"""
+
+    max_items: int | None = None
+    max_batches: int | None = None
+    time_limit_seconds: int | None = None
+    stop_on_error_rate: float | None = None
+    stop_on_rate_limit_count: int | None = None
+
+
+class TranslationRunInterrupted(Exception):
+    """正文翻译运行被模型故障或控制条件中断。"""
+
+    def __init__(
+        self,
+        *,
+        reason: str,
+        success_count: int,
+        quality_error_count: int,
+        llm_failure: LLMRequestFailure | None = None,
+    ) -> None:
+        """保存中断原因和已落库数量。"""
+        super().__init__(reason)
+        self.reason: str = reason
+        self.success_count: int = success_count
+        self.quality_error_count: int = quality_error_count
+        self.llm_failure: LLMRequestFailure | None = llm_failure
+
+
+@dataclass(slots=True)
+class TranslationProgressState:
+    """正文翻译运行期间共享的落库计数。"""
+
+    success_count: int = 0
+    quality_error_count: int = 0
+
+
 class TranslationHandler:
     """核心 CLI 翻译业务总编排器。"""
-
-    ERROR_TABLE_PREFIX: ClassVar[str] = DEFAULT_ERROR_TABLE_PREFIX
 
     def __init__(
         self,
@@ -111,22 +151,27 @@ class TranslationHandler:
         self,
         setting: Setting,
         custom_placeholder_rules_text: str | None = None,
+        placeholder_rule_records: list[PlaceholderRuleRecord] | None = None,
     ) -> TextRules:
         """加载文本过滤规则和自定义占位符规则。"""
-        if custom_placeholder_rules_text is None:
-            rules_path = resolve_custom_placeholder_rules_path()
-            custom_rules = load_custom_placeholder_rules()
-            source_label = "默认文件"
-        else:
-            rules_path = None
+        if custom_placeholder_rules_text is not None:
             custom_rules = load_custom_placeholder_rules_text(custom_placeholder_rules_text)
             source_label = "CLI 参数"
+        elif placeholder_rule_records is not None:
+            custom_rules = tuple(
+                CustomPlaceholderRule.create(
+                    pattern_text=record.pattern_text,
+                    placeholder_template=record.placeholder_template,
+                )
+                for record in placeholder_rule_records
+            )
+            source_label = "当前游戏数据库"
+        else:
+            custom_rules = ()
+            source_label = "空规则"
 
         if custom_rules:
-            if rules_path is None:
-                logger.info(f"[tag.phase]已加载自定义占位符规则[/tag.phase] 来源 {source_label} 数量 [tag.count]{len(custom_rules)}[/tag.count] 条")
-            else:
-                logger.info(f"[tag.phase]已加载自定义占位符规则[/tag.phase] 来源 {source_label} 文件 [tag.path]{rules_path}[/tag.path] 数量 [tag.count]{len(custom_rules)}[/tag.count] 条")
+            logger.info(f"[tag.phase]已加载自定义占位符规则[/tag.phase] 来源 {source_label} 数量 [tag.count]{len(custom_rules)}[/tag.count] 条")
         elif custom_placeholder_rules_text is not None:
             logger.info("[tag.skip]CLI 指定的自定义占位符规则为空对象[/tag.skip]")
         return TextRules.from_setting(
@@ -139,6 +184,10 @@ class TranslationHandler:
         game_data = await load_game_data(session.game_path)
         session.set_game_data(game_data)
         return session.require_game_data()
+
+    async def resolve_game_title_by_path(self, game_path: str | Path) -> str:
+        """根据已注册游戏目录解析可用于 CLI 的游戏标题。"""
+        return await self.game_registry.resolve_registered_title_by_path(game_path)
 
     async def add_game(self, game_path: str | Path) -> str:
         """注册一个新的游戏。"""
@@ -261,11 +310,31 @@ class TranslationHandler:
             deleted_translation_items=deleted_translation_items,
         )
 
+    async def import_placeholder_rules(
+        self,
+        game_title: str,
+        rules_text: str,
+    ) -> int:
+        """把当前游戏专用自定义占位符规则写入数据库。"""
+        custom_rules = load_custom_placeholder_rules_text(rules_text)
+        rule_records = [
+            PlaceholderRuleRecord(
+                pattern_text=rule.pattern_text,
+                placeholder_template=rule.placeholder_template,
+            )
+            for rule in custom_rules
+        ]
+        async with await self.game_registry.open_game(game_title) as session:
+            await session.replace_placeholder_rules(rule_records)
+        logger.success(f"[tag.success]自定义占位符规则导入完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 规则 [tag.count]{len(rule_records)}[/tag.count] 条")
+        return len(rule_records)
+
     async def translate_text(
         self,
         game_title: str,
         setting_overrides: SettingOverrides | None,
         custom_placeholder_rules_text: str | None,
+        run_limits: TranslationRunLimits | None,
         callbacks: tuple[
             Callable[[int, int], None],
             Callable[[int], None],
@@ -275,16 +344,21 @@ class TranslationHandler:
         """翻译指定游戏的正文。"""
         setting = self._load_runtime_setting(setting_overrides)
         translation_cache = TranslationCache()
-        text_rules = self._load_text_rules(
-            setting=setting,
-            custom_placeholder_rules_text=custom_placeholder_rules_text,
-        )
         async with await self.game_registry.open_game(game_title) as session:
+            placeholder_rule_records: list[PlaceholderRuleRecord] | None = None
+            if custom_placeholder_rules_text is None:
+                placeholder_rule_records = await session.read_placeholder_rules()
+            text_rules = self._load_text_rules(
+                setting=setting,
+                custom_placeholder_rules_text=custom_placeholder_rules_text,
+                placeholder_rule_records=placeholder_rule_records,
+            )
             return await self._translate_text_in_session(
                 session=session,
                 setting=setting,
                 text_rules=text_rules,
                 translation_cache=translation_cache,
+                run_limits=run_limits or TranslationRunLimits(),
                 callbacks=callbacks,
             )
 
@@ -295,6 +369,7 @@ class TranslationHandler:
         setting: Setting,
         text_rules: TextRules,
         translation_cache: TranslationCache,
+        run_limits: TranslationRunLimits,
         callbacks: tuple[
             Callable[[int, int], None],
             Callable[[int], None],
@@ -338,18 +413,37 @@ class TranslationHandler:
             translation_data_map=translation_data_map,
             translated_paths=translated_paths,
         )
+        pending_translation_data_map = self._limit_translation_data(
+            translation_data_map=pending_translation_data_map,
+            max_items=run_limits.max_items,
+        )
         pending_count = self._count_translation_items(pending_translation_data_map)
         set_progress(0, pending_count)
 
         if total_extracted_items == 0:
             blocked_reason = "没有提取到任何可翻译正文"
             logger.warning(f"[tag.warning]{blocked_reason}[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count]")
-            return TextTranslationSummary(0, 0, 0, 0, 0, 0, blocked_reason)
+            return TextTranslationSummary(
+                total_extracted_items=0,
+                pending_count=0,
+                deduplicated_count=0,
+                batch_count=0,
+                success_count=0,
+                error_count=0,
+                blocked_reason=blocked_reason,
+            )
 
         if pending_count == 0:
             logger.info(f"[tag.skip]正文译文已全部存在，跳过翻译[/tag.skip] 游戏 [tag.count]{game_title}[/tag.count]")
             set_progress(total_extracted_items, total_extracted_items)
-            return TextTranslationSummary(total_extracted_items, 0, 0, 0, 0, 0)
+            return TextTranslationSummary(
+                total_extracted_items=total_extracted_items,
+                pending_count=0,
+                deduplicated_count=0,
+                batch_count=0,
+                success_count=0,
+                error_count=0,
+            )
 
         deduplicated_translation_data_map = self._deduplicate_translation_data(
             translation_data_map=pending_translation_data_map,
@@ -362,36 +456,86 @@ class TranslationHandler:
             text_rules=text_rules,
             name_prompt_index=name_prompt_index,
         )
+        if run_limits.max_batches is not None:
+            batches = batches[: run_limits.max_batches]
+        deduplicated_count = sum(len(batch.items) for batch in batches)
         if not batches:
             blocked_reason = "正文去重后没有可送入模型的批次"
             logger.warning(f"[tag.warning]{blocked_reason}[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count]")
             return TextTranslationSummary(
-                total_extracted_items,
-                pending_count,
-                deduplicated_count,
-                0,
-                0,
-                0,
-                blocked_reason,
+                total_extracted_items=total_extracted_items,
+                pending_count=pending_count,
+                deduplicated_count=deduplicated_count,
+                batch_count=0,
+                success_count=0,
+                error_count=0,
+                blocked_reason=blocked_reason,
             )
 
-        old_error_tables = await session.read_error_table_names()
-        deleted_error_tables = await session.delete_error_tables(old_error_tables)
-        if deleted_error_tables:
-            logger.info(f"[tag.phase]已清理错误表[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] 数量 [tag.count]{deleted_error_tables}[/tag.count]")
-
-        error_table_name = await session.start_error_table()
+        run_record = await session.start_translation_run(
+            total_extracted=total_extracted_items,
+            pending_count=pending_count,
+            deduplicated_count=deduplicated_count,
+            batch_count=len(batches),
+        )
         set_status(f"待翻译 {pending_count} 条，去重后 {deduplicated_count} 条，批次 {len(batches)} 个")
         logger.info(f"[tag.phase]正文翻译开始[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] 提取 [tag.count]{total_extracted_items}[/tag.count] 条，待翻译 [tag.count]{pending_count}[/tag.count] 条，去重后 [tag.count]{deduplicated_count}[/tag.count] 条，批次 [tag.count]{len(batches)}[/tag.count] 个")
         text_translation = TextTranslation(setting=setting, text_rules=text_rules)
-        success_count, error_count = await self._run_text_translation_batches(
-            text_translation=text_translation,
-            session=session,
-            batches=batches,
-            error_table_name=error_table_name,
-            advance_progress=advance_progress,
-            translation_cache=translation_cache,
-        )
+        try:
+            success_count, error_count = await self._run_text_translation_batches(
+                text_translation=text_translation,
+                session=session,
+                batches=batches,
+                run_record=run_record,
+                advance_progress=advance_progress,
+                translation_cache=translation_cache,
+                time_limit_seconds=run_limits.time_limit_seconds,
+                stop_on_error_rate=run_limits.stop_on_error_rate,
+            )
+            finished_run = run_record.model_copy(
+                update={
+                    "status": "completed" if error_count == 0 else "blocked",
+                    "success_count": success_count,
+                    "quality_error_count": error_count,
+                    "finished_at": current_timestamp_text(),
+                    "stop_reason": "" if error_count == 0 else "存在最终译文质量错误",
+                    "last_error": "" if error_count == 0 else "quality_errors",
+                }
+            )
+            await session.write_translation_run(finished_run)
+        except TranslationRunInterrupted as error:
+            llm_failure_count = 0
+            if error.llm_failure is not None:
+                await session.write_llm_failure(
+                    self._build_llm_failure_record(
+                        run_id=run_record.run_id,
+                        failure=error.llm_failure,
+                    )
+                )
+                llm_failure_count = 1
+            interrupted_run = run_record.model_copy(
+                update={
+                    "status": "blocked",
+                    "success_count": error.success_count,
+                    "quality_error_count": error.quality_error_count,
+                    "llm_failure_count": llm_failure_count,
+                    "finished_at": current_timestamp_text(),
+                    "stop_reason": error.reason,
+                    "last_error": str(error),
+                }
+            )
+            await session.write_translation_run(interrupted_run)
+            return TextTranslationSummary(
+                total_extracted_items=total_extracted_items,
+                pending_count=pending_count,
+                deduplicated_count=deduplicated_count,
+                batch_count=len(batches),
+                success_count=error.success_count,
+                error_count=error.quality_error_count,
+                llm_failure_count=llm_failure_count,
+                run_id=run_record.run_id,
+                blocked_reason=error.reason,
+            )
         return TextTranslationSummary(
             total_extracted_items=total_extracted_items,
             pending_count=pending_count,
@@ -399,6 +543,7 @@ class TranslationHandler:
             batch_count=len(batches),
             success_count=success_count,
             error_count=error_count,
+            run_id=run_record.run_id,
         )
 
     async def write_back(
@@ -412,7 +557,10 @@ class TranslationHandler:
             set_progress, advance_progress = callbacks
             game_data = await self._load_session_game_data(session)
             setting = self._load_setting(setting_overrides=setting_overrides)
-            text_rules = self._load_text_rules(setting=setting)
+            text_rules = self._load_text_rules(
+                setting=setting,
+                placeholder_rule_records=await session.read_placeholder_rules(),
+            )
             translated_items = await session.read_translated_items()
             translated_items = await self._filter_writable_translation_items(
                 session=session,
@@ -499,7 +647,10 @@ class TranslationHandler:
             set_progress, advance_progress = callbacks
             game_data = await self._load_session_game_data(session)
             setting = self._load_setting(setting_overrides=setting_overrides)
-            text_rules = self._load_text_rules(setting=setting)
+            text_rules = self._load_text_rules(
+                setting=setting,
+                placeholder_rule_records=await session.read_placeholder_rules(),
+            )
             translated_items = await session.read_translated_items()
             translated_items = await self._filter_writable_translation_items(
                 session=session,
@@ -742,6 +893,32 @@ class TranslationHandler:
         return deduplicated_translation_data_map
 
     @staticmethod
+    def _limit_translation_data(
+        *,
+        translation_data_map: dict[str, TranslationData],
+        max_items: int | None,
+    ) -> dict[str, TranslationData]:
+        """按本轮上限截取待翻译条目，便于 Agent 分批运行。"""
+        if max_items is None:
+            return translation_data_map
+        if max_items <= 0:
+            raise ValueError("max_items 必须是正整数")
+
+        remaining_count = max_items
+        limited_data_map: dict[str, TranslationData] = {}
+        for file_name, translation_data in translation_data_map.items():
+            if remaining_count <= 0:
+                break
+            selected_items = translation_data.translation_items[:remaining_count]
+            if selected_items:
+                limited_data_map[file_name] = TranslationData(
+                    display_name=translation_data.display_name,
+                    translation_items=selected_items,
+                )
+                remaining_count -= len(selected_items)
+        return limited_data_map
+
+    @staticmethod
     def _count_translation_items(translation_data_map: dict[str, TranslationData]) -> int:
         """统计翻译数据中的条目数量。"""
         return sum(len(data.translation_items) for data in translation_data_map.values())
@@ -798,18 +975,23 @@ class TranslationHandler:
         text_translation: TextTranslation,
         session: TargetGameSession,
         batches: list[TranslationBatch],
-        error_table_name: str,
+        run_record: TranslationRunRecord,
         advance_progress: Callable[[int], None],
         translation_cache: TranslationCache,
+        time_limit_seconds: int | None,
+        stop_on_error_rate: float | None,
     ) -> tuple[int, int]:
         """启动正文翻译并并发消费成功/失败队列。"""
         game_title = session.game_title
         text_translation.start_translation(llm_handler=self.llm_handler, batches=batches)
         db_write_lock = asyncio.Lock()
+        progress_state = TranslationProgressState()
         success_task = asyncio.create_task(
             self._consume_right_items(
                 session=session,
                 text_translation=text_translation,
+                run_record=run_record,
+                progress_state=progress_state,
                 db_write_lock=db_write_lock,
                 advance_progress=advance_progress,
                 translation_cache=translation_cache,
@@ -819,20 +1001,53 @@ class TranslationHandler:
             self._consume_error_items(
                 session=session,
                 text_translation=text_translation,
-                error_table_name=error_table_name,
+                run_record=run_record,
+                progress_state=progress_state,
                 db_write_lock=db_write_lock,
                 advance_progress=advance_progress,
                 translation_cache=translation_cache,
+                stop_on_error_rate=stop_on_error_rate,
             )
         )
+        results: tuple[int | BaseException, int | BaseException]
         try:
-            success_count, error_count = await asyncio.gather(success_task, error_task)
+            gather_task = asyncio.gather(success_task, error_task, return_exceptions=True)
+            if time_limit_seconds is None:
+                results = await gather_task
+            else:
+                results = await asyncio.wait_for(gather_task, timeout=time_limit_seconds)
+        except asyncio.TimeoutError as error:
+            raise TranslationRunInterrupted(
+                reason=f"达到本轮翻译时间上限: {time_limit_seconds} 秒",
+                success_count=progress_state.success_count,
+                quality_error_count=progress_state.quality_error_count,
+            ) from error
         finally:
             for task in (success_task, error_task):
                 if not task.done():
                     _ = task.cancel()
+            await text_translation.stop()
             _ = await asyncio.gather(success_task, error_task, return_exceptions=True)
 
+        runner_error: Exception | None = None
+        for result in results:
+            if isinstance(result, Exception):
+                runner_error = result
+                break
+        if runner_error is not None:
+            if isinstance(runner_error, TranslationRunInterrupted):
+                raise runner_error
+            if isinstance(runner_error, LLMRequestFailure):
+                raise TranslationRunInterrupted(
+                    reason=f"模型请求失败: {runner_error.info.message}",
+                    success_count=progress_state.success_count,
+                    quality_error_count=progress_state.quality_error_count,
+                    llm_failure=runner_error,
+                ) from runner_error
+            raise runner_error
+
+        success_count = progress_state.success_count
+        error_count = progress_state.quality_error_count
         logger.success(f"[tag.success]正文翻译结束[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 成功 [tag.count]{success_count}[/tag.count] 条，失败 [tag.count]{error_count}[/tag.count] 条")
         return success_count, error_count
 
@@ -841,6 +1056,8 @@ class TranslationHandler:
         *,
         session: TargetGameSession,
         text_translation: TextTranslation,
+        run_record: TranslationRunRecord,
+        progress_state: TranslationProgressState,
         db_write_lock: asyncio.Lock,
         advance_progress: Callable[[int], None],
         translation_cache: TranslationCache,
@@ -852,7 +1069,11 @@ class TranslationHandler:
             expanded_items = self._expand_cached_translation_items(items, translation_cache)
             async with db_write_lock:
                 await session.write_translation_items(expanded_items)
-            success_count += len(expanded_items)
+                success_count += len(expanded_items)
+                progress_state.success_count += len(expanded_items)
+                await session.write_translation_run(
+                    run_record.model_copy(update={"success_count": progress_state.success_count})
+                )
             advance_progress(len(expanded_items))
             logger.success(f"[tag.success]已写入正文翻译结果[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] [tag.count]{len(expanded_items)}[/tag.count] 条")
         return success_count
@@ -862,24 +1083,43 @@ class TranslationHandler:
         *,
         session: TargetGameSession,
         text_translation: TextTranslation,
-        error_table_name: str,
+        run_record: TranslationRunRecord,
+        progress_state: TranslationProgressState,
         db_write_lock: asyncio.Lock,
         advance_progress: Callable[[int], None],
         translation_cache: TranslationCache,
+        stop_on_error_rate: float | None,
     ) -> int:
-        """消费正文翻译错误队列并写入错误表。"""
+        """消费正文翻译质量错误队列并写入固定质量错误表。"""
         game_title = session.game_title
         error_count = 0
         async for error_items in text_translation.iter_error_items():
             expanded_error_items = self._expand_cached_error_items(error_items, translation_cache)
             async with db_write_lock:
-                await session.write_error_items(
-                    error_table_name,
+                await session.write_translation_quality_errors(
+                    run_record.run_id,
                     expanded_error_items,
                 )
-            error_count += len(expanded_error_items)
+                error_count += len(expanded_error_items)
+                progress_state.quality_error_count += len(expanded_error_items)
+                await session.write_translation_run(
+                    run_record.model_copy(
+                        update={
+                            "success_count": progress_state.success_count,
+                            "quality_error_count": progress_state.quality_error_count,
+                        }
+                    )
+                )
             advance_progress(len(expanded_error_items))
-            logger.error(f"[tag.failure]已写入错误记录[/tag.failure] 游戏 [tag.count]{game_title}[/tag.count] [tag.count]{len(expanded_error_items)}[/tag.count] 条")
+            logger.error(f"[tag.failure]已写入译文质量错误[/tag.failure] 游戏 [tag.count]{game_title}[/tag.count] [tag.count]{len(expanded_error_items)}[/tag.count] 条")
+            if stop_on_error_rate is not None:
+                processed_count = progress_state.success_count + progress_state.quality_error_count
+                if processed_count > 0 and progress_state.quality_error_count / processed_count >= stop_on_error_rate:
+                    raise TranslationRunInterrupted(
+                        reason=f"译文质量错误率达到停止阈值: {stop_on_error_rate}",
+                        success_count=progress_state.success_count,
+                        quality_error_count=progress_state.quality_error_count,
+                    )
         return error_count
 
     @staticmethod
@@ -925,6 +1165,23 @@ class TranslationHandler:
                 duplicate_item.translation_lines = list(item.translation_lines)
                 expanded_items.append(duplicate_item)
         return expanded_items
+
+    @staticmethod
+    def _build_llm_failure_record(
+        *,
+        run_id: str,
+        failure: LLMRequestFailure,
+    ) -> LlmFailureRecord:
+        """把模型请求异常转换成数据库运行级故障记录。"""
+        return LlmFailureRecord(
+            run_id=run_id,
+            category=failure.info.category,
+            error_type=failure.info.error_type,
+            error_message=failure.info.message,
+            retryable=failure.info.retryable,
+            attempt_count=failure.attempt_count,
+            created_at=current_timestamp_text(),
+        )
 
     @staticmethod
     def _format_exception_summary(error: Exception) -> str:

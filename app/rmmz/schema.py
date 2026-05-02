@@ -16,7 +16,17 @@ from app.rmmz.text_rules import ControlSequenceSpan, JsonValue, TextRules, get_d
 
 
 type ItemType = Literal["long_text", "array", "short_text"]
-type ErrorType = Literal["AI漏翻", "控制符不匹配", "日文残留"]
+type ErrorType = Literal["模型返回不可解析", "AI漏翻", "控制符不匹配", "日文残留", "选项行数不匹配"]
+type TranslationRunStatus = Literal["running", "completed", "blocked", "cancelled", "failed", "stopped"]
+type LlmFailureCategory = Literal[
+    "rate_limit",
+    "timeout",
+    "connection",
+    "server",
+    "conflict",
+    "fatal",
+    "unknown",
+]
 
 
 class Code(IntEnum):
@@ -158,6 +168,44 @@ class TranslationErrorItem(BaseModel):
     model_response: str = ""
 
 
+class PlaceholderRuleRecord(BaseModel):
+    """当前游戏导入的自定义占位符规则。"""
+
+    pattern_text: str
+    placeholder_template: str
+
+
+class TranslationRunRecord(BaseModel):
+    """正文翻译运行状态快照。"""
+
+    run_id: str
+    status: TranslationRunStatus
+    total_extracted: int = 0
+    pending_count: int = 0
+    deduplicated_count: int = 0
+    batch_count: int = 0
+    success_count: int = 0
+    quality_error_count: int = 0
+    llm_failure_count: int = 0
+    started_at: str
+    updated_at: str
+    finished_at: str | None = None
+    stop_reason: str = ""
+    last_error: str = ""
+
+
+class LlmFailureRecord(BaseModel):
+    """正文翻译运行级模型故障记录。"""
+
+    run_id: str
+    category: LlmFailureCategory
+    error_type: str
+    error_message: str
+    retryable: bool
+    attempt_count: int
+    created_at: str
+
+
 class TranslationData(BaseModel):
     """单个文件维度的翻译数据集合。"""
 
@@ -260,12 +308,17 @@ __all__: list[str] = [
     "MAP_INFOS_FILE_NAME",
     "MAP_PATTERN",
     "PluginTextRuleRecord",
+    "PlaceholderRuleRecord",
     "PLUGINS_FILE_NAME",
     "PLUGINS_JS_PATTERN",
     "PLUGINS_ORIGIN_FILE_NAME",
     "SYSTEM_FILE_NAME",
     "TROOPS_FILE_NAME",
+    "LlmFailureCategory",
+    "LlmFailureRecord",
     "TranslationData",
     "TranslationErrorItem",
     "TranslationItem",
+    "TranslationRunRecord",
+    "TranslationRunStatus",
 ]

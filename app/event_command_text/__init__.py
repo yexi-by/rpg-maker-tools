@@ -12,6 +12,7 @@ from .importer import (
     command_matches_filters,
     event_command_rule_key,
     load_event_command_rule_import_file,
+    parse_event_command_rule_import_text,
 )
 
 __all__: list[str] = [
@@ -23,5 +24,6 @@ __all__: list[str] = [
     "event_command_rule_key",
     "export_event_commands_json_file",
     "load_event_command_rule_import_file",
+    "parse_event_command_rule_import_text",
     "resolve_event_command_codes",
 ]

@@ -55,6 +55,8 @@ class TextTranslationSummary:
     batch_count: int
     success_count: int
     error_count: int
+    llm_failure_count: int = 0
+    run_id: str = ""
     blocked_reason: str | None = None
 
     @property

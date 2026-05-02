@@ -7,7 +7,13 @@ import httpx
 import pytest
 from openai import APIConnectionError, APIStatusError
 
-from app.llm import ChatMessage, EmptyLLMResponseError, LLMHandler, is_recoverable_llm_error
+from app.llm import (
+    ChatMessage,
+    EmptyLLMResponseError,
+    LLMHandler,
+    LLMRequestFailure,
+    is_recoverable_llm_error,
+)
 from app.observability import setup_logger
 from app.translation.retry import request_with_recoverable_retry
 
@@ -85,7 +91,7 @@ async def test_fatal_llm_error_stops_without_retry(tmp_path: Path) -> None:
     setup_logger(use_console=False, file_path=tmp_path / "fatal.log", enqueue_file_log=False)
     handler = FakeLLMHandler(failures=[EmptyLLMResponseError("空响应")])
 
-    with pytest.raises(EmptyLLMResponseError):
+    with pytest.raises(LLMRequestFailure) as caught_error:
         _ = await request_with_recoverable_retry(
             llm_handler=handler,
             model="fake-model",
@@ -96,3 +102,5 @@ async def test_fatal_llm_error_stops_without_retry(tmp_path: Path) -> None:
         )
 
     assert handler.call_count == 1
+    assert caught_error.value.info.retryable is False
+    assert caught_error.value.attempt_count == 1

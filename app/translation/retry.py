@@ -2,7 +2,14 @@
 
 import asyncio
 
-from app.llm import ChatMessage, LLMHandler, format_llm_error, is_recoverable_llm_error
+from app.llm import (
+    ChatMessage,
+    LLMHandler,
+    LLMRequestFailure,
+    classify_llm_error,
+    format_llm_error,
+    is_recoverable_llm_error,
+)
 from app.observability import logger
 
 
@@ -43,19 +50,18 @@ async def request_with_recoverable_retry(
                 temperature=temperature,
             )
         except Exception as error:
+            info = classify_llm_error(error)
             if not is_recoverable_llm_error(error):
                 logger.error(
                     f"[tag.failure]LLM 不可恢复错误，已停止流程[/tag.failure] 任务 [tag.count]{task_label}[/tag.count] 原因：{format_llm_error(error)}"
                 )
-                raise
+                raise LLMRequestFailure(info=info, attempt_count=attempt_index) from error
 
             if attempt_index >= max_attempts:
                 logger.error(
                     f"[tag.failure]LLM 可恢复错误重试耗尽[/tag.failure] 任务 [tag.count]{task_label}[/tag.count] 尝试 [tag.count]{attempt_index}[/tag.count] 次 原因：{format_llm_error(error)}"
                 )
-                raise RuntimeError(
-                    f"LLM 请求重试耗尽: {task_label}: {format_llm_error(error)}"
-                ) from error
+                raise LLMRequestFailure(info=info, attempt_count=attempt_index) from error
 
             delay_seconds = retry_delay * attempt_index
             logger.warning(

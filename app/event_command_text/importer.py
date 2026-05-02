@@ -53,6 +53,11 @@ async def load_event_command_rule_import_file(input_path: Path) -> EventCommandR
         raise FileNotFoundError(f"事件指令规则导入文件不存在: {resolved_path}")
     async with aiofiles.open(resolved_path, "r", encoding="utf-8") as file:
         raw_text = await file.read()
+    return parse_event_command_rule_import_text(raw_text)
+
+
+def parse_event_command_rule_import_text(raw_text: str) -> EventCommandRuleImportFile:
+    """解析外部事件指令规则 JSON 文本。"""
     decoded_raw = cast(object, json.loads(raw_text))
     decoded = coerce_json_value(decoded_raw)
     return _EVENT_COMMAND_RULE_IMPORT_ADAPTER.validate_python(decoded)
@@ -189,4 +194,5 @@ __all__: list[str] = [
     "command_matches_filters",
     "event_command_rule_key",
     "load_event_command_rule_import_file",
+    "parse_event_command_rule_import_text",
 ]

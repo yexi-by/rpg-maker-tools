@@ -23,6 +23,11 @@ async def load_plugin_rule_import_file(input_path: Path) -> PluginRuleImportFile
         raise FileNotFoundError(f"插件规则导入文件不存在: {resolved_path}")
     async with aiofiles.open(resolved_path, "r", encoding="utf-8") as file:
         raw_text = await file.read()
+    return parse_plugin_rule_import_text(raw_text)
+
+
+def parse_plugin_rule_import_text(raw_text: str) -> PluginRuleImportFile:
+    """解析外部插件规则 JSON 文本。"""
     decoded_raw = cast(object, json.loads(raw_text))
     decoded = coerce_json_value(decoded_raw)
     return _PLUGIN_RULE_IMPORT_ADAPTER.validate_python(decoded)
@@ -114,4 +119,5 @@ __all__: list[str] = [
     "PluginRuleImportFile",
     "build_plugin_rule_records_from_import",
     "load_plugin_rule_import_file",
+    "parse_plugin_rule_import_text",
 ]
