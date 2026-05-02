@@ -24,6 +24,15 @@ class ControlSequenceSpan:
 
 
 @dataclass(frozen=True, slots=True)
+class RawControlSequenceCandidate:
+    """尚未被标准或自定义规则覆盖的反斜杠控制符候选。"""
+
+    start_index: int
+    end_index: int
+    original: str
+
+
+@dataclass(frozen=True, slots=True)
 class CustomPlaceholderRule:
     """外部 JSON 提供的自定义正则占位符规则。"""
 
@@ -138,6 +147,11 @@ ALL_PLACEHOLDER_PATTERN: re.Pattern[str] = re.compile(
     f"(?:{STANDARD_PLACEHOLDER_PATTERN.pattern})|(?:{CUSTOM_PLACEHOLDER_PATTERN.pattern})",
     re.IGNORECASE,
 )
+RAW_CONTROL_SEQUENCE_CANDIDATE_PATTERN: re.Pattern[str] = re.compile(
+    r"\\[A-Za-z]+\d*\[[A-Za-z0-9_./:-]{1,32}[^\]\w\s\[\]\\]"
+    + r"|\\[A-Za-z]+\d*(?:\[[^\]\r\n]{0,64}\])?"
+    + r"|\\[{}\\$.\|!><^]"
+)
 
 
 def iter_standard_control_spans(text: str) -> list[ControlSequenceSpan]:
@@ -148,6 +162,20 @@ def iter_standard_control_spans(text: str) -> list[ControlSequenceSpan]:
     spans.extend(_iter_symbol_standard_control_spans(text))
     spans.extend(_iter_terms_percent_spans(text))
     return spans
+
+
+def iter_raw_control_sequence_candidates(text: str) -> list[RawControlSequenceCandidate]:
+    """扫描所有形似 RPG Maker 控制符的原始反斜杠片段。"""
+    candidates: list[RawControlSequenceCandidate] = []
+    for match in RAW_CONTROL_SEQUENCE_CANDIDATE_PATTERN.finditer(text):
+        candidates.append(
+            RawControlSequenceCandidate(
+                start_index=match.start(),
+                end_index=match.end(),
+                original=match.group(0),
+            )
+        )
+    return candidates
 
 
 def select_non_overlapping_spans(
@@ -274,9 +302,11 @@ __all__: list[str] = [
     "ControlSequenceSpan",
     "CustomPlaceholderRule",
     "INDEXED_STANDARD_CODES",
+    "RawControlSequenceCandidate",
     "STANDARD_PLACEHOLDER_PATTERN",
     "SYMBOL_STANDARD_PLACEHOLDERS",
     "format_placeholder_template",
+    "iter_raw_control_sequence_candidates",
     "iter_standard_control_spans",
     "select_non_overlapping_spans",
 ]

@@ -44,6 +44,7 @@ from app.name_context import (
     export_name_context_artifacts,
     load_name_context_registry,
 )
+from app.japanese_residual import JapaneseResidualRuleSet
 from app.persistence import GameRegistry, TargetGameSession
 from app.persistence.repository import current_timestamp_text
 from app.plugin_text import (
@@ -481,7 +482,14 @@ class TranslationHandler:
         )
         set_status(f"待翻译 {pending_count} 条，去重后 {deduplicated_count} 条，批次 {len(batches)} 个")
         logger.info(f"[tag.phase]正文翻译开始[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] 提取 [tag.count]{total_extracted_items}[/tag.count] 条，待翻译 [tag.count]{pending_count}[/tag.count] 条，去重后 [tag.count]{deduplicated_count}[/tag.count] 条，批次 [tag.count]{len(batches)}[/tag.count] 个")
-        text_translation = TextTranslation(setting=setting, text_rules=text_rules)
+        japanese_residual_rule_set = JapaneseResidualRuleSet.from_records(
+            await session.read_japanese_residual_rules()
+        )
+        text_translation = TextTranslation(
+            setting=setting,
+            text_rules=text_rules,
+            japanese_residual_rule_set=japanese_residual_rule_set,
+        )
         try:
             success_count, error_count = await self._run_text_translation_batches(
                 text_translation=text_translation,

@@ -8,6 +8,7 @@ import asyncio
 from collections.abc import AsyncIterator
 
 from app.config import Setting
+from app.japanese_residual import JapaneseResidualRuleSet
 from app.rmmz.schema import TranslationErrorItem, TranslationItem
 from app.llm import LLMRequestFailure
 from app.llm.handler import LLMHandler
@@ -21,10 +22,16 @@ from .verify import verify_translation_batch
 class TextTranslation:
     """正文翻译异步调度服务。"""
 
-    def __init__(self, setting: Setting, text_rules: TextRules) -> None:
+    def __init__(
+        self,
+        setting: Setting,
+        text_rules: TextRules,
+        japanese_residual_rule_set: JapaneseResidualRuleSet | None = None,
+    ) -> None:
         """初始化正文翻译调度服务。"""
         self.setting: Setting = setting
         self.text_rules: TextRules = text_rules
+        self.japanese_residual_rule_set: JapaneseResidualRuleSet | None = japanese_residual_rule_set
         self.right_queue: asyncio.Queue[list[TranslationItem] | None] | None = None
         self.error_queue: asyncio.Queue[list[TranslationErrorItem] | None] | None = None
         self._runner_task: asyncio.Task[None] | None = None
@@ -184,6 +191,7 @@ class TextTranslation:
                     right_queue=right_queue,
                     error_queue=error_queue,
                     text_rules=self.text_rules,
+                    japanese_residual_rule_set=self.japanese_residual_rule_set,
                 )
             finally:
                 task_queue.task_done()

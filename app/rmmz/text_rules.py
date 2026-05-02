@@ -16,7 +16,9 @@ from app.rmmz.control_codes import (
     ALL_PLACEHOLDER_PATTERN,
     ControlSequenceSpan,
     CustomPlaceholderRule,
+    RawControlSequenceCandidate,
     format_placeholder_template,
+    iter_raw_control_sequence_candidates,
     iter_standard_control_spans,
     select_non_overlapping_spans,
 )
@@ -133,6 +135,27 @@ class TextRules:
             placeholders.update(self.placeholder_token_pattern.findall(line))
         return placeholders
 
+    def collect_unprotected_control_sequences(self, lines: list[str]) -> dict[str, int]:
+        """统计未被标准或自定义规则覆盖的疑似控制符片段。"""
+        counts: dict[str, int] = {}
+        for line in lines:
+            for candidate in self.iter_unprotected_control_sequence_candidates(line):
+                counts[candidate.original] = counts.get(candidate.original, 0) + 1
+        return counts
+
+    def iter_unprotected_control_sequence_candidates(
+        self,
+        text: str,
+    ) -> list[RawControlSequenceCandidate]:
+        """找出一行文本中仍裸露的反斜杠控制符候选。"""
+        protected_spans = self.iter_control_sequence_spans(text)
+        candidates: list[RawControlSequenceCandidate] = []
+        for candidate in iter_raw_control_sequence_candidates(text):
+            if _overlaps_any_control_span(candidate, protected_spans):
+                continue
+            candidates.append(candidate)
+        return candidates
+
     def _iter_custom_placeholder_spans(self, text: str) -> list[ControlSequenceSpan]:
         """扫描外部 JSON 中定义的自定义占位符规则。"""
         spans: list[ControlSequenceSpan] = []
@@ -186,6 +209,17 @@ _DEFAULT_TEXT_RULES = TextRules.from_setting(TextRulesSetting())
 def get_default_text_rules() -> TextRules:
     """返回配置缺省值构建的文本规则。"""
     return _DEFAULT_TEXT_RULES
+
+
+def _overlaps_any_control_span(
+    candidate: RawControlSequenceCandidate,
+    spans: list[ControlSequenceSpan],
+) -> bool:
+    """判断原始候选是否已经由占位符规则覆盖。"""
+    for span in spans:
+        if candidate.start_index < span.end_index and candidate.end_index > span.start_index:
+            return True
+    return False
 
 
 __all__: list[str] = [

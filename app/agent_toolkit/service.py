@@ -24,6 +24,12 @@ from app.agent_toolkit.reports import AgentIssue, AgentReport, issue
 from app.application.file_writer import reset_writable_copies
 from app.config import load_custom_placeholder_rules_text
 from app.config.environment import load_environment_overrides
+from app.japanese_residual import (
+    JapaneseResidualRuleSet,
+    build_japanese_residual_rule_records_from_import,
+    check_japanese_residual_for_item,
+    parse_japanese_residual_rule_import_text,
+)
 from app.llm import ChatMessage, LLMHandler
 from app.persistence import GameRegistry, TargetGameSession, ensure_db_directory
 from app.plugin_text import (
@@ -37,6 +43,7 @@ from app.rmmz import DataTextExtraction
 from app.rmmz.control_codes import CustomPlaceholderRule
 from app.rmmz.schema import (
     GameData,
+    JapaneseResidualRuleRecord,
     LlmFailureRecord,
     PLUGINS_FILE_NAME,
     PluginTextRuleRecord,
@@ -227,6 +234,8 @@ class AgentToolkitService:
                             custom_placeholder_rules=custom_rules,
                         )
                         sample_texts = _collect_placeholder_preview_samples(game_data, preview_rules)
+                        if not sample_texts:
+                            sample_texts = _collect_unprotected_control_warning_samples(game_data, preview_rules)
             elif custom_placeholder_rules_text is None:
                 custom_rules = ()
             else:
@@ -273,6 +282,11 @@ class AgentToolkitService:
                 template=rule.placeholder_template,
                 index=1,
             )
+            _append_placeholder_rule_safety_issues(
+                rule=rule,
+                errors=errors,
+                warnings=warnings,
+            )
             rule_details.append(
                 {
                     "pattern": rule.pattern_text,
@@ -292,6 +306,7 @@ class AgentToolkitService:
                         f"样本文本预览失败: {type(error).__name__}: {error}",
                     )
                 )
+        warnings.extend(_build_unprotected_control_warnings(sample_texts, text_rules))
 
         if not custom_rules:
             warnings.append(issue("placeholder_rules_empty", "当前没有自定义占位符规则"))
@@ -307,6 +322,116 @@ class AgentToolkitService:
             details={
                 "rules": rule_details,
                 "samples": sample_details,
+            },
+        )
+
+    async def export_quality_fix_template(
+        self,
+        *,
+        game_title: str,
+        output_path: Path,
+    ) -> AgentReport:
+        """从质量报告问题生成可人工修复的补译 JSON 骨架。"""
+        setting = load_setting(self.setting_path)
+        async with await self.game_registry.open_game(game_title) as session:
+            custom_rules = await self._resolve_custom_rules(
+                session=session,
+                custom_placeholder_rules_text=None,
+            )
+            text_rules = TextRules.from_setting(
+                setting.text_rules,
+                custom_placeholder_rules=custom_rules,
+            )
+            game_data = await self._load_game_data(session)
+            translation_data_map = await self._extract_active_translation_data_map(
+                session=session,
+                game_data=game_data,
+                text_rules=text_rules,
+            )
+            active_items = {
+                item.location_path: item
+                for translation_data in translation_data_map.values()
+                for item in translation_data.translation_items
+            }
+            active_paths = set(active_items)
+            translated_items = await session.read_translated_items()
+            translated_by_path = {item.location_path: item for item in translated_items}
+            translated_paths = set(translated_by_path)
+            latest_run = await session.read_latest_translation_run()
+            if latest_run is None:
+                quality_error_items: list[TranslationErrorItem] = []
+            else:
+                quality_error_items = await session.read_translation_quality_errors(latest_run.run_id)
+            japanese_residual_rule_set = JapaneseResidualRuleSet.from_records(
+                await session.read_japanese_residual_rules()
+            )
+
+        pending_paths = active_paths - translated_paths
+        quality_error_items = [
+            item
+            for item in quality_error_items
+            if item.location_path in pending_paths
+        ]
+        residual_details = _collect_residual_items(
+            translated_items,
+            text_rules,
+            japanese_residual_rule_set,
+        )
+        placeholder_details = _collect_placeholder_risk_items(translated_items, text_rules)
+        overwide_details = _collect_overwide_line_items(translated_items, text_rules)
+        problem_paths = _collect_quality_fix_problem_paths(
+            quality_error_items=quality_error_items,
+            residual_details=residual_details,
+            placeholder_details=placeholder_details,
+            overwide_details=overwide_details,
+            active_paths=active_paths,
+        )
+        quality_errors_by_path = {
+            item.location_path: item
+            for item in quality_error_items
+        }
+        categories_by_path = _build_quality_fix_categories_by_path(
+            quality_error_items=quality_error_items,
+            residual_details=residual_details,
+            placeholder_details=placeholder_details,
+            overwide_details=overwide_details,
+            active_paths=active_paths,
+        )
+        payload: JsonObject = {}
+        for location_path in problem_paths:
+            active_item = active_items[location_path]
+            translation_lines = _resolve_quality_fix_translation_lines(
+                location_path=location_path,
+                quality_errors_by_path=quality_errors_by_path,
+                translated_by_path=translated_by_path,
+            )
+            payload[location_path] = _build_manual_translation_template_entry(
+                item=active_item,
+                text_rules=text_rules,
+                translation_lines=translation_lines,
+            )
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        async with aiofiles.open(output_path, "w", encoding="utf-8") as file:
+            _ = await file.write(f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n")
+
+        warnings: list[AgentIssue] = []
+        if not problem_paths:
+            warnings.append(issue("quality_fix_empty", "当前没有可导出的质量修复条目"))
+        return AgentReport.from_parts(
+            errors=[],
+            warnings=warnings,
+            summary={
+                "exported_count": len(problem_paths),
+                "output": str(output_path),
+                "quality_error_count": len(quality_error_items),
+                "japanese_residual_count": _count_active_quality_details(residual_details, active_paths),
+                "placeholder_risk_count": _count_active_quality_details(placeholder_details, active_paths),
+                "overwide_line_count": _count_active_quality_details(overwide_details, active_paths),
+            },
+            details={
+                "location_paths": _string_lines_to_json_array(problem_paths),
+                "problem_categories_by_path": categories_by_path,
             },
         )
 
@@ -330,6 +455,7 @@ class AgentToolkitService:
                 game_data=game_data,
             )
             event_rules = await session.read_event_command_text_rules()
+            japanese_residual_rules = await session.read_japanese_residual_rules()
             name_registry = await session.read_name_context_registry()
             latest_run = await session.read_latest_translation_run()
             translation_data_map = DataTextExtraction(game_data, text_rules).extract_all_text()
@@ -350,6 +476,11 @@ class AgentToolkitService:
             translated_paths = {item.location_path for item in translated_items}
             pending_paths = active_paths - translated_paths
             stale_paths = translated_paths - active_paths
+            stale_japanese_residual_rule_paths = {
+                rule.location_path
+                for rule in japanese_residual_rules
+                if rule.location_path not in active_paths
+            }
             if latest_run is None:
                 quality_error_items: list[TranslationErrorItem] = []
                 llm_failures: list[LlmFailureRecord] = []
@@ -363,10 +494,19 @@ class AgentToolkitService:
             for item in quality_error_items
             if item.location_path in pending_paths
         ]
-        residual_count = _count_residual_items(translated_items, text_rules)
+        japanese_residual_rule_set = JapaneseResidualRuleSet.from_records(japanese_residual_rules)
+        residual_items = _collect_residual_items(
+            translated_items,
+            text_rules,
+            japanese_residual_rule_set,
+        )
+        residual_count = len(residual_items)
         placeholder_risk_items = _collect_placeholder_risk_items(translated_items, text_rules)
         overwide_line_items = _collect_overwide_line_items(translated_items, text_rules)
         error_type_counts = Counter(item.error_type for item in quality_error_items)
+        quality_error_details: JsonArray = []
+        for item in quality_error_items:
+            quality_error_details.append(_build_translation_error_quality_detail(item))
         model_response_count = sum(
             1
             for item in quality_error_items
@@ -401,6 +541,8 @@ class AgentToolkitService:
             warnings.append(issue("stale_cache", f"发现 {len(stale_paths)} 条不在当前提取范围内的缓存译文"))
         if stale_plugin_rule_count:
             warnings.append(issue("stale_plugin_rules", f"发现 {stale_plugin_rule_count} 个过期插件规则，已从本轮质量统计中排除"))
+        if stale_japanese_residual_rule_paths:
+            warnings.append(issue("stale_japanese_residual_rules", f"发现 {len(stale_japanese_residual_rule_paths)} 条不在当前提取范围内的日文残留例外规则"))
 
         return AgentReport.from_parts(
             errors=errors,
@@ -413,6 +555,8 @@ class AgentToolkitService:
                 "plugin_rule_count": sum(len(rule.path_templates) for rule in plugin_rules),
                 "stale_plugin_rule_count": stale_plugin_rule_count,
                 "event_command_rule_count": sum(len(rule.path_templates) for rule in event_rules),
+                "japanese_residual_rule_count": len(japanese_residual_rules),
+                "stale_japanese_residual_rule_count": len(stale_japanese_residual_rule_paths),
                 "name_context_total_count": total_name_count,
                 "name_context_filled_count": filled_name_count,
                 "latest_run_id": latest_run.run_id if latest_run is not None else "",
@@ -429,6 +573,8 @@ class AgentToolkitService:
             details={
                 "error_type_counts": dict(error_type_counts),
                 "llm_failure_counts": dict(llm_failure_counts),
+                "quality_error_items": quality_error_details,
+                "japanese_residual_items": residual_items,
                 "placeholder_risk_items": placeholder_risk_items,
                 "overwide_line_items": overwide_line_items,
             },
@@ -530,14 +676,11 @@ class AgentToolkitService:
 
         payload: JsonObject = {}
         for item in pending_items:
-            item.build_placeholders(text_rules)
-            payload[item.location_path] = {
-                "item_type": item.item_type,
-                "role": item.role,
-                "original_lines": list(item.original_lines),
-                "text_for_model_lines": list(item.original_lines_with_placeholders),
-                "translation_lines": [],
-            }
+            payload[item.location_path] = _build_manual_translation_template_entry(
+                item=item,
+                text_rules=text_rules,
+                translation_lines=[],
+            )
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         async with aiofiles.open(output_path, "w", encoding="utf-8") as file:
@@ -585,6 +728,9 @@ class AgentToolkitService:
                 game_data=game_data,
                 text_rules=text_rules,
             )
+            japanese_residual_rule_set = JapaneseResidualRuleSet.from_records(
+                await session.read_japanese_residual_rules()
+            )
             active_items = {
                 item.location_path: item
                 for translation_data in translation_data_map.values()
@@ -609,6 +755,7 @@ class AgentToolkitService:
                         item=item,
                         translation_lines=translation_lines,
                         text_rules=text_rules,
+                        japanese_residual_rule_set=japanese_residual_rule_set,
                     )
                     valid_items.append(cloned_item)
                 except Exception as error:
@@ -656,18 +803,164 @@ class AgentToolkitService:
             game_data = await self._load_game_data(session)
         candidates = scan_placeholder_candidates(game_data, empty_rules)
         draft_rules = _build_custom_placeholder_rule_draft(candidates)
+        warnings = _build_unprotected_control_warnings(
+            _collect_unprotected_control_warning_samples(game_data, empty_rules),
+            empty_rules,
+        )
+        if not draft_rules:
+            warnings.append(issue("placeholder_draft_empty", "没有发现需要生成草稿的自定义控制符候选"))
         output_path.parent.mkdir(parents=True, exist_ok=True)
         async with aiofiles.open(output_path, "w", encoding="utf-8") as file:
             _ = await file.write(f"{json.dumps(draft_rules, ensure_ascii=False, indent=2)}\n")
         return AgentReport.from_parts(
             errors=[],
-            warnings=[] if draft_rules else [issue("placeholder_draft_empty", "没有发现需要生成草稿的自定义控制符候选")],
+            warnings=warnings,
             summary={
                 "candidate_count": len(candidates),
                 "draft_rule_count": len(draft_rules),
                 "output": str(output_path),
             },
             details={"rules": {key: value for key, value in draft_rules.items()}},
+        )
+
+    async def validate_japanese_residual_rules(self, *, game_title: str, rules_text: str) -> AgentReport:
+        """校验日文残留例外规则 JSON 文本并报告命中情况。"""
+        errors: list[AgentIssue] = []
+        warnings: list[AgentIssue] = []
+        details: JsonObject = {"rules": []}
+        try:
+            records = await self._build_japanese_residual_rule_records(
+                game_title=game_title,
+                rules_text=rules_text,
+            )
+            details["rules"] = [
+                {
+                    "location_path": record.location_path,
+                    "allowed_terms": list(record.allowed_terms),
+                    "reason": record.reason,
+                }
+                for record in records
+            ]
+            if not records:
+                warnings.append(issue("japanese_residual_rules_empty", "日文残留例外规则为空"))
+        except Exception as error:
+            errors.append(issue("japanese_residual_rules_invalid", f"日文残留例外规则不可导入: {type(error).__name__}: {error}"))
+            records = []
+        return AgentReport.from_parts(
+            errors=errors,
+            warnings=warnings,
+            summary={
+                "rule_count": len(records),
+                "term_count": sum(len(record.allowed_terms) for record in records),
+            },
+            details=details,
+        )
+
+    async def import_japanese_residual_rules(self, *, game_title: str, rules_text: str) -> AgentReport:
+        """校验并导入当前游戏的日文残留例外规则。"""
+        try:
+            records = await self._build_japanese_residual_rule_records(
+                game_title=game_title,
+                rules_text=rules_text,
+            )
+            async with await self.game_registry.open_game(game_title) as session:
+                await session.replace_japanese_residual_rules(records)
+        except Exception as error:
+            return AgentReport.from_parts(
+                errors=[issue("japanese_residual_rules_invalid", f"日文残留例外规则不可导入: {type(error).__name__}: {error}")],
+                warnings=[],
+                summary={"rule_count": 0, "term_count": 0},
+                details={},
+            )
+        return AgentReport.from_parts(
+            errors=[],
+            warnings=[] if records else [issue("japanese_residual_rules_empty", "已导入空日文残留例外规则")],
+            summary={
+                "rule_count": len(records),
+                "term_count": sum(len(record.allowed_terms) for record in records),
+            },
+            details={
+                "rules": [
+                    {
+                        "location_path": record.location_path,
+                        "allowed_terms": list(record.allowed_terms),
+                        "reason": record.reason,
+                    }
+                    for record in records
+                ]
+            },
+        )
+
+    async def reset_translations(self, *, game_title: str, input_path: Path) -> AgentReport:
+        """按显式定位路径清除已入库译文，使条目回到 pending 状态。"""
+        try:
+            location_paths = await _read_reset_translation_location_paths(input_path)
+        except Exception as error:
+            return AgentReport.from_parts(
+                errors=[issue("reset_translation_file", f"重置译文文件不可用: {type(error).__name__}: {error}")],
+                warnings=[],
+                summary={
+                    "input": str(input_path),
+                    "requested_count": 0,
+                    "reset_count": 0,
+                },
+                details={},
+            )
+
+        setting = load_setting(self.setting_path)
+        async with await self.game_registry.open_game(game_title) as session:
+            custom_rules = await self._resolve_custom_rules(
+                session=session,
+                custom_placeholder_rules_text=None,
+            )
+            text_rules = TextRules.from_setting(setting.text_rules, custom_placeholder_rules=custom_rules)
+            game_data = await self._load_game_data(session)
+            translation_data_map = await self._extract_active_translation_data_map(
+                session=session,
+                game_data=game_data,
+                text_rules=text_rules,
+            )
+            active_paths = {
+                item.location_path
+                for translation_data in translation_data_map.values()
+                for item in translation_data.translation_items
+            }
+            invalid_paths = sorted(set(location_paths) - active_paths)
+            if invalid_paths:
+                return AgentReport.from_parts(
+                    errors=[
+                        issue(
+                            "reset_translation_location",
+                            f"存在 {len(invalid_paths)} 个定位路径不在当前可提取文本范围内",
+                        )
+                    ],
+                    warnings=[],
+                    summary={
+                        "input": str(input_path),
+                        "requested_count": len(location_paths),
+                        "reset_count": 0,
+                    },
+                    details={
+                        "invalid_location_paths": _string_lines_to_json_array(invalid_paths),
+                    },
+                )
+            reset_count = await session.delete_translation_items_by_paths(location_paths)
+
+        warnings: list[AgentIssue] = []
+        already_pending_count = len(location_paths) - reset_count
+        if already_pending_count:
+            warnings.append(issue("reset_translation_already_pending", f"{already_pending_count} 个定位路径当前没有已入库译文"))
+        return AgentReport.from_parts(
+            errors=[],
+            warnings=warnings,
+            summary={
+                "input": str(input_path),
+                "requested_count": len(location_paths),
+                "reset_count": reset_count,
+            },
+            details={
+                "location_paths": _string_lines_to_json_array(location_paths),
+            },
         )
 
     async def validate_plugin_rules(self, *, game_title: str, rules_text: str) -> AgentReport:
@@ -1095,6 +1388,39 @@ class AgentToolkitService:
         )
         return translation_data_map
 
+    async def _build_japanese_residual_rule_records(
+        self,
+        *,
+        game_title: str,
+        rules_text: str,
+    ) -> list[JapaneseResidualRuleRecord]:
+        """解析并按当前游戏提取结果校验日文残留例外规则。"""
+        import_file = parse_japanese_residual_rule_import_text(rules_text)
+        setting = load_setting(self.setting_path)
+        async with await self.game_registry.open_game(game_title) as session:
+            custom_rules = await self._resolve_custom_rules(
+                session=session,
+                custom_placeholder_rules_text=None,
+            )
+            text_rules = TextRules.from_setting(setting.text_rules, custom_placeholder_rules=custom_rules)
+            game_data = await self._load_game_data(session)
+            translation_data_map = await self._extract_active_translation_data_map(
+                session=session,
+                game_data=game_data,
+                text_rules=text_rules,
+            )
+            active_items = [
+                item
+                for translation_data in translation_data_map.values()
+                for item in translation_data.translation_items
+            ]
+            translated_items = await session.read_translated_items()
+        return build_japanese_residual_rule_records_from_import(
+            import_file=import_file,
+            active_items=active_items,
+            translated_items=translated_items,
+        )
+
     async def _read_fresh_plugin_text_rules(
         self,
         *,
@@ -1145,6 +1471,238 @@ def _append_check(details: JsonObject, name: str, status: str) -> None:
         details["checks"] = checks
     check_item: JsonObject = {"name": name, "status": status}
     checks.append(check_item)
+
+
+COMMON_ESCAPE_SAMPLES: dict[str, str] = {
+    "\\n": "裸 \\n 换行标记",
+    "\\r": "裸 \\r 回车标记",
+    "\\t": "裸 \\t 制表标记",
+}
+PLAIN_TEXT_RULE_SAMPLES: tuple[str, ...] = (
+    "普通中文文本",
+    "日本語本文",
+    "plain visible text",
+)
+SUSPICIOUS_CONTROL_BOUNDARY_CHARS: frozenset[str] = frozenset("」』】）〕〉》")
+
+
+def _append_placeholder_rule_safety_issues(
+    *,
+    rule: CustomPlaceholderRule,
+    errors: list[AgentIssue],
+    warnings: list[AgentIssue],
+) -> None:
+    """检查自定义占位符规则是否误匹配常见正文或裸转义文本。"""
+    for sample_text, label in COMMON_ESCAPE_SAMPLES.items():
+        if rule.pattern.fullmatch(sample_text) is None and rule.pattern.search(sample_text) is None:
+            continue
+        errors.append(
+            issue(
+                "placeholder_rule_matches_common_escape",
+                f"规则 {rule.pattern_text} 会匹配{label}，容易把合法文本误判为占位符",
+            )
+        )
+    for sample_text in PLAIN_TEXT_RULE_SAMPLES:
+        if rule.pattern.search(sample_text) is None:
+            continue
+        warnings.append(
+            issue(
+                "placeholder_rule_matches_plain_text",
+                f"规则 {rule.pattern_text} 会匹配普通正文样例 `{sample_text}`，请确认没有过宽吞掉玩家可见文本",
+            )
+        )
+        return
+
+
+def _build_unprotected_control_warnings(
+    sample_texts: Sequence[str],
+    text_rules: TextRules,
+) -> list[AgentIssue]:
+    """根据样本文本提示非 ASCII 括号或未闭合控制片段风险。"""
+    suspicious_candidates: list[str] = []
+    for sample_text in sample_texts:
+        for candidate in text_rules.iter_unprotected_control_sequence_candidates(sample_text):
+            if not _is_suspicious_unprotected_control(candidate.original):
+                continue
+            if candidate.original in suspicious_candidates:
+                continue
+            suspicious_candidates.append(candidate.original)
+            if len(suspicious_candidates) >= 5:
+                break
+        if len(suspicious_candidates) >= 5:
+            break
+
+    if not suspicious_candidates:
+        return []
+
+    formatted_candidates = "；".join(
+        f"{candidate} ({_format_code_points(candidate)})"
+        for candidate in suspicious_candidates
+    )
+    return [
+        issue(
+            "unprotected_control_unicode_boundary",
+            f"发现疑似非 ASCII 括号或未闭合控制片段，请核验 Unicode code point 后使用精确规则，禁止猜成 ASCII ]：{formatted_candidates}",
+        )
+    ]
+
+
+def _is_suspicious_unprotected_control(candidate: str) -> bool:
+    """判断裸露控制符是否包含容易被终端乱码掩盖的边界字符。"""
+    if "[" in candidate and "]" not in candidate:
+        return True
+    return any(char in SUSPICIOUS_CONTROL_BOUNDARY_CHARS for char in candidate)
+
+
+def _format_code_points(text: str) -> str:
+    """把短文本格式化为 Unicode code point 列表。"""
+    return " ".join(f"U+{ord(char):04X}" for char in text)
+
+
+async def _read_reset_translation_location_paths(input_path: Path) -> list[str]:
+    """读取 reset-translations 的最小 JSON 输入结构。"""
+    async with aiofiles.open(input_path, "r", encoding="utf-8-sig") as file:
+        raw_payload = cast(object, json.loads(await file.read()))
+    payload = ensure_json_object(coerce_json_value(raw_payload), "reset-translations")
+    raw_paths = payload.get("location_paths")
+    if raw_paths is None:
+        raise TypeError("reset-translations.location_paths 必须是字符串数组")
+    location_paths = ensure_json_string_list(raw_paths, "reset-translations.location_paths")
+    if not location_paths:
+        raise ValueError("location_paths 不能为空")
+    duplicate_paths = sorted(
+        path
+        for path, count in Counter(location_paths).items()
+        if count > 1
+    )
+    if duplicate_paths:
+        joined_paths = "、".join(duplicate_paths)
+        raise ValueError(f"location_paths 不得重复: {joined_paths}")
+    return location_paths
+
+
+def _build_manual_translation_template_entry(
+    *,
+    item: TranslationItem,
+    text_rules: TextRules,
+    translation_lines: list[str],
+) -> JsonObject:
+    """把当前提取条目转换成人工补译 JSON 条目。"""
+    cloned_item = item.model_copy(deep=True)
+    cloned_item.build_placeholders(text_rules)
+    return {
+        "item_type": cloned_item.item_type,
+        "role": cloned_item.role,
+        "original_lines": _string_lines_to_json_array(cloned_item.original_lines),
+        "text_for_model_lines": _string_lines_to_json_array(cloned_item.original_lines_with_placeholders),
+        "translation_lines": _string_lines_to_json_array(translation_lines),
+    }
+
+
+def _collect_quality_fix_problem_paths(
+    *,
+    quality_error_items: list[TranslationErrorItem],
+    residual_details: JsonArray,
+    placeholder_details: JsonArray,
+    overwide_details: JsonArray,
+    active_paths: set[str],
+) -> list[str]:
+    """按质量报告优先级收集需要导出的唯一定位路径。"""
+    location_paths: list[str] = []
+    for item in quality_error_items:
+        _append_unique_active_path(location_paths, item.location_path, active_paths)
+    for details in (residual_details, placeholder_details, overwide_details):
+        for location_path in _location_paths_from_quality_details(details):
+            _append_unique_active_path(location_paths, location_path, active_paths)
+    return location_paths
+
+
+def _build_quality_fix_categories_by_path(
+    *,
+    quality_error_items: list[TranslationErrorItem],
+    residual_details: JsonArray,
+    placeholder_details: JsonArray,
+    overwide_details: JsonArray,
+    active_paths: set[str],
+) -> JsonObject:
+    """建立质量修复条目到问题类型的映射，方便 Agent 分工处理。"""
+    categories: dict[str, list[str]] = {}
+    for item in quality_error_items:
+        if item.location_path in active_paths:
+            categories.setdefault(item.location_path, []).append("quality_error")
+    _append_quality_detail_categories(categories, residual_details, active_paths, "japanese_residual")
+    _append_quality_detail_categories(categories, placeholder_details, active_paths, "placeholder_risk")
+    _append_quality_detail_categories(categories, overwide_details, active_paths, "overwide_line")
+    return {
+        location_path: _string_lines_to_json_array(path_categories)
+        for location_path, path_categories in categories.items()
+    }
+
+
+def _append_quality_detail_categories(
+    categories: dict[str, list[str]],
+    details: JsonArray,
+    active_paths: set[str],
+    category: str,
+) -> None:
+    """把一组质量明细的问题类型追加到映射中。"""
+    for location_path in _location_paths_from_quality_details(details):
+        if location_path not in active_paths:
+            continue
+        path_categories = categories.setdefault(location_path, [])
+        if category not in path_categories:
+            path_categories.append(category)
+
+
+def _append_unique_active_path(
+    location_paths: list[str],
+    location_path: str,
+    active_paths: set[str],
+) -> None:
+    """只把当前有效且未出现过的定位路径加入列表。"""
+    if location_path not in active_paths:
+        return
+    if location_path in location_paths:
+        return
+    location_paths.append(location_path)
+
+
+def _location_paths_from_quality_details(details: JsonArray) -> list[str]:
+    """从质量明细数组提取定位路径。"""
+    location_paths: list[str] = []
+    for raw_detail in details:
+        if not isinstance(raw_detail, dict):
+            continue
+        raw_location_path = raw_detail.get("location_path")
+        if not isinstance(raw_location_path, str):
+            continue
+        location_paths.append(raw_location_path)
+    return location_paths
+
+
+def _resolve_quality_fix_translation_lines(
+    *,
+    location_path: str,
+    quality_errors_by_path: dict[str, TranslationErrorItem],
+    translated_by_path: dict[str, TranslationItem],
+) -> list[str]:
+    """决定质量修复模板中应预填的译文行。"""
+    quality_error = quality_errors_by_path.get(location_path)
+    if quality_error is not None:
+        return list(quality_error.translation_lines)
+    translated_item = translated_by_path.get(location_path)
+    if translated_item is None:
+        return []
+    return list(translated_item.translation_lines)
+
+
+def _count_active_quality_details(details: JsonArray, active_paths: set[str]) -> int:
+    """统计属于当前提取范围的质量明细数量。"""
+    return sum(
+        1
+        for location_path in _location_paths_from_quality_details(details)
+        if location_path in active_paths
+    )
 
 
 def _preview_placeholder_sample(text_rules: TextRules, sample_text: str) -> JsonObject:
@@ -1263,6 +1821,21 @@ def _collect_placeholder_preview_samples(game_data: GameData, text_rules: TextRu
     return samples
 
 
+def _collect_unprotected_control_warning_samples(game_data: GameData, text_rules: TextRules) -> list[str]:
+    """收集疑似存在裸露控制符边界风险的样本文本。"""
+    samples: list[str] = []
+    translation_data_map = DataTextExtraction(game_data, text_rules).extract_all_text()
+    for translation_data in translation_data_map.values():
+        for item in translation_data.translation_items:
+            for text in item.original_lines:
+                if not text_rules.iter_unprotected_control_sequence_candidates(text):
+                    continue
+                samples.append(text)
+                if len(samples) >= 10:
+                    return samples
+    return samples
+
+
 def _validate_name_registry(
     speaker_names: dict[str, str],
     map_display_names: dict[str, str],
@@ -1345,15 +1918,29 @@ def _is_path_inside(path: Path, parent: Path) -> bool:
         return False
 
 
-def _count_residual_items(items: list[TranslationItem], text_rules: TextRules) -> int:
-    """统计存在日文残留风险的译文条目。"""
-    count = 0
+def _collect_residual_items(
+    items: list[TranslationItem],
+    text_rules: TextRules,
+    japanese_residual_rule_set: JapaneseResidualRuleSet,
+) -> JsonArray:
+    """收集仍存在日文残留风险的译文条目明细。"""
+    details: JsonArray = []
     for item in items:
         try:
-            text_rules.check_japanese_residual(item.translation_lines)
-        except ValueError:
-            count += 1
-    return count
+            check_japanese_residual_for_item(
+                item=item,
+                text_rules=text_rules,
+                rule_set=japanese_residual_rule_set,
+            )
+        except ValueError as error:
+            detail = _build_translation_item_quality_detail(item)
+            detail["reason"] = str(error)
+            allowed_terms = japanese_residual_rule_set.allowed_terms_for_path(item.location_path)
+            if allowed_terms:
+                detail["allowed_terms"] = _string_lines_to_json_array(allowed_terms)
+                detail["exception_reason"] = japanese_residual_rule_set.reason_for_path(item.location_path)
+            details.append(detail)
+    return details
 
 
 def _collect_placeholder_risk_items(items: list[TranslationItem], text_rules: TextRules) -> JsonArray:
@@ -1394,6 +1981,7 @@ def _prepare_manual_translation_item(
     item: TranslationItem,
     translation_lines: list[str],
     text_rules: TextRules,
+    japanese_residual_rule_set: JapaneseResidualRuleSet | None = None,
 ) -> TranslationItem:
     """把人工译文校验成可写入主译文缓存的条目。"""
     if not translation_lines or not any(line.strip() for line in translation_lines):
@@ -1419,8 +2007,12 @@ def _prepare_manual_translation_item(
         for line in normalized_translation_lines
     ]
     cloned_item.verify_placeholders(text_rules)
-    text_rules.check_japanese_residual(normalized_translation_lines)
     cloned_item.translation_lines = list(normalized_translation_lines)
+    check_japanese_residual_for_item(
+        item=cloned_item,
+        text_rules=text_rules,
+        rule_set=japanese_residual_rule_set,
+    )
     return cloned_item
 
 
@@ -1470,6 +2062,20 @@ def _build_translation_item_quality_detail(item: TranslationItem) -> JsonObject:
         "role": item.role,
         "original_lines": _string_lines_to_json_array(item.original_lines),
         "translation_lines": _string_lines_to_json_array(item.translation_lines),
+    }
+
+
+def _build_translation_error_quality_detail(item: TranslationErrorItem) -> JsonObject:
+    """把译文质量错误转换为质量报告中可定位、可修复的明细。"""
+    return {
+        "location_path": item.location_path,
+        "item_type": item.item_type,
+        "role": item.role,
+        "original_lines": _string_lines_to_json_array(item.original_lines),
+        "translation_lines": _string_lines_to_json_array(item.translation_lines),
+        "error_type": item.error_type,
+        "error_detail": _string_lines_to_json_array(item.error_detail),
+        "model_response": item.model_response,
     }
 
 

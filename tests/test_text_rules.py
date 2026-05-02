@@ -129,6 +129,46 @@ def test_text_rules_can_apply_custom_placeholder_json_rules() -> None:
     assert rules.is_line_width_counted_char("@")
 
 
+def test_unprotected_control_sequences_must_stay_exact() -> None:
+    """未被规则覆盖的畸形控制符也必须在译文中原样保留。"""
+    rules = get_default_text_rules()
+    item = TranslationItem(
+        location_path="CommonEvents.json/99/293",
+        item_type="long_text",
+        original_lines=[r"\F3[66」「ふーん……？」"],
+    )
+
+    item.build_placeholders(rules)
+    assert item.original_lines_with_placeholders == [r"\F3[66」「ふーん……？」"]
+
+    item.translation_lines_with_placeholders = [r"\F3[66」「唔——嗯……？」"]
+    item.verify_placeholders(rules)
+
+    item.translation_lines_with_placeholders = [r"\F3[60」「唔——嗯……？」"]
+    with pytest.raises(ValueError, match="疑似控制符不一致"):
+        item.verify_placeholders(rules)
+
+    item.translation_lines_with_placeholders = [r"\F3[66]「唔——嗯……？」"]
+    with pytest.raises(ValueError, match="疑似控制符不一致"):
+        item.verify_placeholders(rules)
+
+
+def test_unprotected_control_sequences_report_added_escape() -> None:
+    """译文新增未覆盖反斜杠片段时必须显式失败。"""
+    rules = get_default_text_rules()
+    item = TranslationItem(
+        location_path="CommonEvents.json/1/0",
+        item_type="long_text",
+        original_lines=["こんにちは"],
+    )
+
+    item.build_placeholders(rules)
+    item.translation_lines_with_placeholders = [r"你好\n下一行"]
+
+    with pytest.raises(ValueError, match=r"\\n"):
+        item.verify_placeholders(rules)
+
+
 def test_custom_placeholder_rules_load_from_json_file(tmp_path: Path) -> None:
     """自定义占位符规则 JSON 使用正则字符串作为键、占位符模板作为值。"""
     rules_path = tmp_path / "custom_placeholder_rules.json"

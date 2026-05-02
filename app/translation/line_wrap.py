@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from app.observability import logger
 from app.rmmz.text_rules import TextRules
 
+WRAPPING_CONTINUATION_INDENT = "　"
+
 
 @dataclass(frozen=True, slots=True)
 class ProtectedSpan:
@@ -40,19 +42,42 @@ def split_overwide_lines(
     location_path: str | None,
     text_rules: TextRules,
 ) -> list[str]:
-    """按配置宽度切开过长非空行，空行保持原位。"""
+    """按配置宽度切开过长非空行，并整理跨行包裹标点的续行缩进。"""
     split_lines: list[str] = []
+    active_wrapping_pair: tuple[str, str] | None = None
     for line in lines:
         if not line:
             split_lines.append(line)
             continue
+
+        current_wrapping_pair = active_wrapping_pair
+        opening_pair = _find_opening_wrapping_pair(line=line, text_rules=text_rules)
+        if current_wrapping_pair is None:
+            current_wrapping_pair = opening_pair
+
+        first_line_prefix = WRAPPING_CONTINUATION_INDENT if active_wrapping_pair is not None else ""
+        wrapped_tail_prefix = WRAPPING_CONTINUATION_INDENT if current_wrapping_pair is not None else ""
         split_lines.extend(
             _split_single_overwide_line(
                 line=line,
                 location_path=location_path,
                 text_rules=text_rules,
+                first_line_prefix=first_line_prefix,
+                wrapped_tail_prefix=wrapped_tail_prefix,
             )
         )
+
+        if current_wrapping_pair is None:
+            active_wrapping_pair = None
+            continue
+        if _closes_wrapping_pair(
+            line=line,
+            wrapping_pair=current_wrapping_pair,
+            text_rules=text_rules,
+        ):
+            active_wrapping_pair = None
+        else:
+            active_wrapping_pair = current_wrapping_pair
     return split_lines
 
 
@@ -73,11 +98,13 @@ def _split_single_overwide_line(
     line: str,
     location_path: str | None,
     text_rules: TextRules,
+    first_line_prefix: str = "",
+    wrapped_tail_prefix: str = "",
 ) -> list[str]:
     """切开单个超宽文本行。"""
     line_width_limit = text_rules.setting.long_text_line_width_limit
     result: list[str] = []
-    pending_line = line
+    pending_line = _prepend_continuation_prefix(line=line, prefix=first_line_prefix)
     while count_line_width_chars(pending_line, text_rules) > line_width_limit:
         split_position = _find_preferred_split_position(pending_line, text_rules)
         if split_position is None:
@@ -104,10 +131,48 @@ def _split_single_overwide_line(
             break
 
         result.append(head)
-        pending_line = tail
+        pending_line = _prepend_continuation_prefix(line=tail, prefix=wrapped_tail_prefix)
 
     result.append(pending_line)
     return result
+
+
+def _find_opening_wrapping_pair(*, line: str, text_rules: TextRules) -> tuple[str, str] | None:
+    """返回当前行开头命中的包裹标点配置。"""
+    stripped_line = _build_wrapping_check_line(line=line, text_rules=text_rules)
+    for left, right in text_rules.setting.strip_wrapping_punctuation_pairs:
+        if stripped_line.startswith(left):
+            return left, right
+    return None
+
+
+def _closes_wrapping_pair(
+    *,
+    line: str,
+    wrapping_pair: tuple[str, str],
+    text_rules: TextRules,
+) -> bool:
+    """判断当前逻辑行是否结束了跨行包裹标点块。"""
+    _, right = wrapping_pair
+    stripped_line = _build_wrapping_check_line(line=line, text_rules=text_rules)
+    return stripped_line.endswith(right)
+
+
+def _build_wrapping_check_line(*, line: str, text_rules: TextRules) -> str:
+    """去掉控制符后生成包裹标点状态判定用文本。"""
+    return text_rules.strip_rm_control_sequences(line).strip()
+
+
+def _prepend_continuation_prefix(*, line: str, prefix: str) -> str:
+    """给包裹标点续行补视觉缩进，避免重复添加已有空白。"""
+    if not prefix or not line:
+        return line
+    if line.startswith(prefix):
+        return line
+    first_char = line[0]
+    if first_char.isspace():
+        return line
+    return f"{prefix}{line}"
 
 
 def _find_preferred_split_position(text: str, text_rules: TextRules) -> int | None:

@@ -304,6 +304,14 @@ def build_parser() -> argparse.ArgumentParser:
     _ = export_untranslated_parser.add_argument("--output", required=True, help="全部未翻译正文 JSON 输出文件")
     _ = export_untranslated_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
+    export_quality_fix_parser = subparsers.add_parser(
+        "export-quality-fix-template",
+        help="根据 quality-report 的问题明细导出人工修复 JSON 骨架",
+    )
+    add_optional_target_arguments(export_quality_fix_parser)
+    _ = export_quality_fix_parser.add_argument("--output", required=True, help="质量问题修复 JSON 输出文件")
+    _ = export_quality_fix_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+
     import_manual_parser = subparsers.add_parser(
         "import-manual-translations",
         help="导入 Agent 人工补齐的正文译文，校验并按行宽规范化 long_text 后写入当前游戏数据库",
@@ -311,6 +319,34 @@ def build_parser() -> argparse.ArgumentParser:
     add_optional_target_arguments(import_manual_parser)
     _ = import_manual_parser.add_argument("--input", required=True, help="已填写的人工补译 JSON 文件")
     _ = import_manual_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+
+    reset_translations_parser = subparsers.add_parser(
+        "reset-translations",
+        help="按 location_paths 清除已入库译文，让指定条目回到 pending 状态",
+    )
+    add_optional_target_arguments(reset_translations_parser)
+    _ = reset_translations_parser.add_argument("--input", required=True, help='包含 {"location_paths": [...]} 的重置 JSON 文件')
+    _ = reset_translations_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+
+    validate_japanese_residual_parser = subparsers.add_parser(
+        "validate-japanese-residual-rules",
+        help="校验允许保留日文片段的例外规则 JSON",
+    )
+    add_optional_target_arguments(validate_japanese_residual_parser)
+    validate_japanese_residual_source_group = validate_japanese_residual_parser.add_mutually_exclusive_group(required=True)
+    _ = validate_japanese_residual_source_group.add_argument("--rules", help="日文残留例外规则 JSON 字符串")
+    _ = validate_japanese_residual_source_group.add_argument("--input", help="日文残留例外规则 JSON 文件")
+    _ = validate_japanese_residual_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+
+    import_japanese_residual_parser = subparsers.add_parser(
+        "import-japanese-residual-rules",
+        help="导入允许保留日文片段的例外规则 JSON",
+    )
+    add_optional_target_arguments(import_japanese_residual_parser)
+    import_japanese_residual_source_group = import_japanese_residual_parser.add_mutually_exclusive_group(required=True)
+    _ = import_japanese_residual_source_group.add_argument("--rules", help="日文残留例外规则 JSON 字符串")
+    _ = import_japanese_residual_source_group.add_argument("--input", help="日文残留例外规则 JSON 文件")
+    _ = import_japanese_residual_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
     translate_parser = subparsers.add_parser("translate", help="翻译指定游戏的正文")
     add_optional_target_arguments(translate_parser)
@@ -557,8 +593,16 @@ async def dispatch_command(args: argparse.Namespace) -> int:
         return await run_export_pending_translations_command(args)
     if command == "export-untranslated-translations":
         return await run_export_untranslated_translations_command(args)
+    if command == "export-quality-fix-template":
+        return await run_export_quality_fix_template_command(args)
     if command == "import-manual-translations":
         return await run_import_manual_translations_command(args)
+    if command == "reset-translations":
+        return await run_reset_translations_command(args)
+    if command == "validate-japanese-residual-rules":
+        return await run_validate_japanese_residual_rules_command(args)
+    if command == "import-japanese-residual-rules":
+        return await run_import_japanese_residual_rules_command(args)
     if command == "translation-status":
         return await run_translation_status_command(args)
     if command == "translate":
@@ -821,6 +865,19 @@ async def run_export_untranslated_translations_command(args: argparse.Namespace)
     return 1 if report.status == "error" else 0
 
 
+async def run_export_quality_fix_template_command(args: argparse.Namespace) -> int:
+    """执行 `export-quality-fix-template` 命令。"""
+    game_title = await resolve_target_game_title(args)
+    output_path = read_required_path_arg(args, "output")
+    service = AgentToolkitService()
+    report = await service.export_quality_fix_template(
+        game_title=game_title,
+        output_path=output_path,
+    )
+    write_report_outputs(report=report, args=args, title="质量修复模板导出报告", write_output_file=False)
+    return 1 if report.status == "error" else 0
+
+
 async def run_import_manual_translations_command(args: argparse.Namespace) -> int:
     """执行 `import-manual-translations` 命令。"""
     game_title = await resolve_target_game_title(args)
@@ -828,6 +885,36 @@ async def run_import_manual_translations_command(args: argparse.Namespace) -> in
     service = AgentToolkitService()
     report = await service.import_manual_translations(game_title=game_title, input_path=input_path)
     write_report_outputs(report=report, args=args, title="人工补译导入报告")
+    return 1 if report.status == "error" else 0
+
+
+async def run_reset_translations_command(args: argparse.Namespace) -> int:
+    """执行 `reset-translations` 命令。"""
+    game_title = await resolve_target_game_title(args)
+    input_path = read_required_path_arg(args, "input")
+    service = AgentToolkitService()
+    report = await service.reset_translations(game_title=game_title, input_path=input_path)
+    write_report_outputs(report=report, args=args, title="译文重置报告")
+    return 1 if report.status == "error" else 0
+
+
+async def run_validate_japanese_residual_rules_command(args: argparse.Namespace) -> int:
+    """执行 `validate-japanese-residual-rules` 命令。"""
+    game_title = await resolve_target_game_title(args)
+    rules_text = await read_required_text_source_arg(args, "rules", "input")
+    service = AgentToolkitService()
+    report = await service.validate_japanese_residual_rules(game_title=game_title, rules_text=rules_text)
+    write_report_outputs(report=report, args=args, title="日文残留例外规则校验报告")
+    return 1 if report.status == "error" else 0
+
+
+async def run_import_japanese_residual_rules_command(args: argparse.Namespace) -> int:
+    """执行 `import-japanese-residual-rules` 命令。"""
+    game_title = await resolve_target_game_title(args)
+    rules_text = await read_required_text_source_arg(args, "rules", "input")
+    service = AgentToolkitService()
+    report = await service.import_japanese_residual_rules(game_title=game_title, rules_text=rules_text)
+    write_report_outputs(report=report, args=args, title="日文残留例外规则导入报告")
     return 1 if report.status == "error" else 0
 
 

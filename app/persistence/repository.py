@@ -17,6 +17,7 @@ from app.rmmz.schema import (
     EventCommandTextRuleRecord,
     ErrorType,
     GameData,
+    JapaneseResidualRuleRecord,
     LlmFailureCategory,
     LlmFailureRecord,
     PlaceholderRuleRecord,
@@ -41,6 +42,7 @@ from .sql import (
     CREATE_EVENT_COMMAND_TEXT_RULE_FILTERS_TABLE,
     CREATE_EVENT_COMMAND_TEXT_RULE_GROUPS_TABLE,
     CREATE_EVENT_COMMAND_TEXT_RULE_PATHS_TABLE,
+    CREATE_JAPANESE_RESIDUAL_RULES_TABLE,
     CREATE_LLM_FAILURES_TABLE,
     CREATE_METADATA_TABLE,
     CREATE_NAME_CONTEXT_TERMS_TABLE,
@@ -52,6 +54,7 @@ from .sql import (
     DELETE_ALL_EVENT_COMMAND_TEXT_RULE_FILTERS,
     DELETE_ALL_EVENT_COMMAND_TEXT_RULE_GROUPS,
     DELETE_ALL_EVENT_COMMAND_TEXT_RULE_PATHS,
+    DELETE_ALL_JAPANESE_RESIDUAL_RULES,
     DELETE_ALL_NAME_CONTEXT_TERMS,
     DELETE_ALL_PLACEHOLDER_RULES,
     DELETE_ALL_PLUGIN_TEXT_RULES,
@@ -60,6 +63,7 @@ from .sql import (
     INSERT_EVENT_COMMAND_TEXT_RULE_FILTER,
     INSERT_EVENT_COMMAND_TEXT_RULE_GROUP,
     INSERT_EVENT_COMMAND_TEXT_RULE_PATH,
+    INSERT_JAPANESE_RESIDUAL_RULE,
     INSERT_LLM_FAILURE,
     INSERT_NAME_CONTEXT_TERM,
     INSERT_PLACEHOLDER_RULE,
@@ -68,6 +72,7 @@ from .sql import (
     INSERT_TRANSLATION,
     METADATA_KEY,
     SELECT_LATEST_TRANSLATION_RUN,
+    SELECT_JAPANESE_RESIDUAL_RULES,
     SELECT_LLM_FAILURES_BY_RUN,
     SELECT_EVENT_COMMAND_TEXT_RULE_FILTERS,
     SELECT_EVENT_COMMAND_TEXT_RULE_GROUPS,
@@ -132,6 +137,7 @@ async def create_static_tables(connection: aiosqlite.Connection) -> None:
     _ = await connection.execute(CREATE_EVENT_COMMAND_TEXT_RULE_PATHS_TABLE)
     _ = await connection.execute(CREATE_NAME_CONTEXT_TERMS_TABLE)
     _ = await connection.execute(CREATE_PLACEHOLDER_RULES_TABLE)
+    _ = await connection.execute(CREATE_JAPANESE_RESIDUAL_RULES_TABLE)
     _ = await connection.execute(CREATE_TRANSLATION_RUNS_TABLE)
     _ = await connection.execute(CREATE_LLM_FAILURES_TABLE)
     _ = await connection.execute(CREATE_TRANSLATION_QUALITY_ERRORS_TABLE)
@@ -549,6 +555,39 @@ class TargetGameSession:
             for row in rows
         ]
 
+    async def replace_japanese_residual_rules(
+        self,
+        rules: list[JapaneseResidualRuleRecord],
+    ) -> None:
+        """用当前游戏专用规则替换日文残留例外规则。"""
+        _ = await self.connection.execute(DELETE_ALL_JAPANESE_RESIDUAL_RULES)
+        for rule in rules:
+            _ = await self.connection.execute(
+                INSERT_JAPANESE_RESIDUAL_RULE,
+                (
+                    rule.location_path,
+                    json.dumps(rule.allowed_terms, ensure_ascii=False),
+                    rule.reason,
+                ),
+            )
+        await self.connection.commit()
+
+    async def read_japanese_residual_rules(self) -> list[JapaneseResidualRuleRecord]:
+        """读取当前游戏专用日文残留例外规则。"""
+        async with self.connection.execute(SELECT_JAPANESE_RESIDUAL_RULES) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            JapaneseResidualRuleRecord(
+                location_path=row_str(row, "location_path", self.db_path),
+                allowed_terms=decode_string_list(
+                    row_str(row, "allowed_terms", self.db_path),
+                    "allowed_terms",
+                ),
+                reason=row_str(row, "reason", self.db_path),
+            )
+            for row in rows
+        ]
+
     async def start_translation_run(
         self,
         *,
@@ -750,6 +789,22 @@ class TargetGameSession:
         )
         await self.connection.commit()
         return len(stale_paths)
+
+    async def delete_translation_items_by_paths(
+        self,
+        location_paths: Sequence[str],
+    ) -> int:
+        """按精确定位路径批量删除主翻译表记录。"""
+        deleted_rows = 0
+        for location_path in location_paths:
+            cursor = await self.connection.execute(
+                DELETE_TRANSLATION_ITEM_BY_PATH,
+                (location_path,),
+            )
+            if cursor.rowcount > 0:
+                deleted_rows += cursor.rowcount
+        await self.connection.commit()
+        return deleted_rows
 
     async def close(self) -> None:
         """关闭当前游戏数据库连接。"""

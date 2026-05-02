@@ -9,7 +9,7 @@ import pytest
 from app.agent_toolkit import AgentToolkitService
 from app.llm import LLMHandler
 from app.persistence import GameRegistry
-from app.rmmz.json_types import coerce_json_value, ensure_json_array, ensure_json_object
+from app.rmmz.json_types import JsonObject, coerce_json_value, ensure_json_array, ensure_json_object
 from app.rmmz.schema import PluginTextRuleRecord, TranslationErrorItem, TranslationItem
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +21,11 @@ def load_json_object(path: Path) -> dict[str, object]:
     raw_value = cast(object, json.loads(path.read_text(encoding="utf-8")))
     json_object = ensure_json_object(coerce_json_value(raw_value), str(path))
     return {key: value for key, value in json_object.items()}
+
+
+def _contains_japanese_test_char(text: str) -> bool:
+    """判断测试样本文本是否含有日文假名。"""
+    return any("\u3040" <= char <= "\u30ff" for char in text)
 
 
 @pytest.mark.asyncio
@@ -207,6 +212,141 @@ async def test_manual_pending_translation_export_and_import(
 
 
 @pytest.mark.asyncio
+async def test_manual_translation_rejects_changed_unprotected_control_sequence(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """人工补译不得改写未被占位符规则覆盖的疑似控制符。"""
+    common_events_path = minimal_game_dir / "data" / "CommonEvents.json"
+    raw_common_events = cast(object, json.loads(common_events_path.read_text(encoding="utf-8")))
+    common_events = ensure_json_array(coerce_json_value(raw_common_events), "CommonEvents.json")
+    common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
+    commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
+    commands.insert(-1, {"code": 101, "parameters": [0, 0, 0, 2, "アリス"]})
+    commands.insert(-1, {"code": 401, "parameters": [r"\F3[66」「ふーん……？」"]})
+    _ = common_events_path.write_text(
+        json.dumps(common_events, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    pending_path = tmp_path / "pending-translations.json"
+
+    export_report = await service.export_pending_translations(
+        game_title="テストゲーム",
+        output_path=pending_path,
+        limit=None,
+    )
+    payload = load_json_object(pending_path)
+    target_path = ""
+    target_entry: JsonObject = {}
+    for location_path, raw_entry in payload.items():
+        entry = ensure_json_object(coerce_json_value(raw_entry), location_path)
+        original_lines = ensure_json_array(entry["original_lines"], f"{location_path}.original_lines")
+        if original_lines == [r"\F3[66」「ふーん……？」"]:
+            target_path = location_path
+            entry["translation_lines"] = [r"\F3[60」「唔——嗯……？」"]
+            target_entry = {key: value for key, value in entry.items()}
+            break
+    assert export_report.status == "ok"
+    assert target_path
+    _ = pending_path.write_text(
+        json.dumps({target_path: target_entry}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    rejected_report = await service.import_manual_translations(
+        game_title="テストゲーム",
+        input_path=pending_path,
+    )
+
+    assert rejected_report.status == "error"
+    assert rejected_report.errors
+    assert "疑似控制符不一致" in rejected_report.errors[0].message
+    assert r"\F3[66」" in rejected_report.errors[0].message
+    assert r"\F3[60」" in rejected_report.errors[0].message
+
+
+@pytest.mark.asyncio
+async def test_manual_translation_uses_japanese_residual_exception_rules(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """确需保留的日文片段必须先导入显式例外规则才能通过人工补译。"""
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    pending_path = tmp_path / "pending-translations.json"
+
+    export_report = await service.export_pending_translations(
+        game_title="テストゲーム",
+        output_path=pending_path,
+        limit=10,
+    )
+    payload = load_json_object(pending_path)
+    target_path = ""
+    target_entry: JsonObject = {}
+    for location_path, raw_entry in payload.items():
+        entry = ensure_json_object(coerce_json_value(raw_entry), location_path)
+        original_lines = ensure_json_array(entry["original_lines"], f"{location_path}.original_lines")
+        if original_lines == ["こんにちは"]:
+            target_path = location_path
+            entry["translation_lines"] = ["こんにちは"]
+            target_entry = {key: value for key, value in entry.items()}
+            break
+    assert export_report.status == "ok"
+    assert target_path
+    _ = pending_path.write_text(
+        json.dumps({target_path: target_entry}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    rejected_report = await service.import_manual_translations(
+        game_title="テストゲーム",
+        input_path=pending_path,
+    )
+    rules_text = json.dumps(
+        {
+            target_path: {
+                "allowed_terms": ["こんにちは"],
+                "reason": "proper_noun",
+            }
+        },
+        ensure_ascii=False,
+    )
+    validate_report = await service.validate_japanese_residual_rules(
+        game_title="テストゲーム",
+        rules_text=rules_text,
+    )
+    import_rules_report = await service.import_japanese_residual_rules(
+        game_title="テストゲーム",
+        rules_text=rules_text,
+    )
+    accepted_report = await service.import_manual_translations(
+        game_title="テストゲーム",
+        input_path=pending_path,
+    )
+    quality_report = await service.quality_report(game_title="テストゲーム")
+
+    assert rejected_report.status == "error"
+    assert "日文残留" in rejected_report.errors[0].message
+    assert validate_report.status == "ok"
+    assert import_rules_report.status == "ok"
+    assert accepted_report.status == "ok"
+    assert quality_report.summary["japanese_residual_rule_count"] == 1
+    assert quality_report.summary["japanese_residual_count"] == 0
+    assert quality_report.details["japanese_residual_items"] == []
+    async with await registry.open_game("テストゲーム") as session:
+        translated_items = await session.read_translated_items()
+        residual_rules = await session.read_japanese_residual_rules()
+    translated_by_path = {item.location_path: item for item in translated_items}
+    assert translated_by_path[target_path].translation_lines == ["こんにちは"]
+    assert residual_rules[0].allowed_terms == ["こんにちは"]
+    assert residual_rules[0].reason == "proper_noun"
+
+
+@pytest.mark.asyncio
 async def test_agent_reports_ignore_stale_plugin_rules(
     minimal_game_dir: Path,
     tmp_path: Path,
@@ -296,6 +436,182 @@ async def test_manual_long_text_import_splits_overwide_lines(
 
 
 @pytest.mark.asyncio
+async def test_export_quality_fix_template_collects_repairable_items(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """质量修复模板会从报告问题导出标准人工补译骨架并预填当前译文。"""
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    pending_path = tmp_path / "pending-translations.json"
+    template_path = tmp_path / "quality-fix-template.json"
+
+    _ = await service.export_pending_translations(
+        game_title="テストゲーム",
+        output_path=pending_path,
+        limit=None,
+    )
+    payload = load_json_object(pending_path)
+    sorted_paths = sorted(payload)
+    quality_error_path = sorted_paths[0]
+    residual_path = ""
+    for candidate_path in sorted_paths:
+        if candidate_path == quality_error_path:
+            continue
+        candidate_entry = ensure_json_object(coerce_json_value(payload[candidate_path]), candidate_path)
+        candidate_lines = ensure_json_array(candidate_entry["original_lines"], f"{candidate_path}.original_lines")
+        if any(isinstance(line, str) and _contains_japanese_test_char(line) for line in candidate_lines):
+            residual_path = candidate_path
+            break
+    assert residual_path
+    placeholder_path = next(path for path in sorted_paths if path not in {quality_error_path, residual_path})
+    quality_error_entry = ensure_json_object(coerce_json_value(payload[quality_error_path]), quality_error_path)
+    residual_entry = ensure_json_object(coerce_json_value(payload[residual_path]), residual_path)
+    residual_original_lines = [
+        line
+        for line in ensure_json_array(residual_entry["original_lines"], f"{residual_path}.original_lines")
+        if isinstance(line, str)
+    ]
+    async with await registry.open_game("テストゲーム") as session:
+        await session.write_translation_items(
+            [
+                TranslationItem(
+                    location_path=residual_path,
+                    item_type="short_text",
+                    role=None,
+                    original_lines=residual_original_lines,
+                    source_line_paths=[],
+                    translation_lines=residual_original_lines,
+                ),
+                TranslationItem(
+                    location_path=placeholder_path,
+                    item_type="long_text",
+                    role=None,
+                    original_lines=["こんにちは"],
+                    source_line_paths=[],
+                    translation_lines=[r"\C[4]甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲"],
+                ),
+            ]
+        )
+        run_record = await session.start_translation_run(
+            total_extracted=len(sorted_paths),
+            pending_count=len(sorted_paths),
+            deduplicated_count=len(sorted_paths),
+            batch_count=1,
+        )
+        await session.write_translation_quality_errors(
+            run_record.run_id,
+            [
+                TranslationErrorItem(
+                    location_path=quality_error_path,
+                    item_type="short_text",
+                    role=None,
+                    original_lines=[
+                        line
+                        for line in ensure_json_array(
+                            quality_error_entry["original_lines"],
+                            f"{quality_error_path}.original_lines",
+                        )
+                        if isinstance(line, str)
+                    ],
+                    translation_lines=["候选译文"],
+                    error_type="AI漏翻",
+                    error_detail=["测试质量错误"],
+                    model_response='{"translation_lines":["候选译文"]}',
+                )
+            ],
+        )
+
+    report = await service.export_quality_fix_template(
+        game_title="テストゲーム",
+        output_path=template_path,
+    )
+
+    template = load_json_object(template_path)
+    assert report.status == "ok"
+    assert report.summary["quality_error_count"] == 1
+    assert report.summary["japanese_residual_count"] == 1
+    assert report.summary["placeholder_risk_count"] == 1
+    assert report.summary["overwide_line_count"] == 1
+    assert set(template) == {quality_error_path, residual_path, placeholder_path}
+    quality_template = ensure_json_object(coerce_json_value(template[quality_error_path]), quality_error_path)
+    placeholder_template = ensure_json_object(coerce_json_value(template[placeholder_path]), placeholder_path)
+    assert quality_template["translation_lines"] == ["候选译文"]
+    assert placeholder_template["translation_lines"] == [r"\C[4]甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲"]
+    categories = ensure_json_object(report.details["problem_categories_by_path"], "problem_categories_by_path")
+    assert categories[placeholder_path] == ["placeholder_risk", "overwide_line"]
+
+
+@pytest.mark.asyncio
+async def test_reset_translations_validates_paths_before_deleting(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """重置译文命令遇到非法定位路径时不做部分删除。"""
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    pending_path = tmp_path / "pending-translations.json"
+    reset_path = tmp_path / "reset-translations.json"
+
+    _ = await service.export_pending_translations(
+        game_title="テストゲーム",
+        output_path=pending_path,
+        limit=1,
+    )
+    payload = load_json_object(pending_path)
+    target_path = next(iter(payload))
+    async with await registry.open_game("テストゲーム") as session:
+        await session.write_translation_items(
+            [
+                TranslationItem(
+                    location_path=target_path,
+                    item_type="short_text",
+                    role=None,
+                    original_lines=["こんにちは"],
+                    source_line_paths=[],
+                    translation_lines=["你好"],
+                )
+            ]
+        )
+
+    _ = reset_path.write_text(
+        json.dumps({"location_paths": [target_path, "Missing.json/1"]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    rejected_report = await service.reset_translations(
+        game_title="テストゲーム",
+        input_path=reset_path,
+    )
+    async with await registry.open_game("テストゲーム") as session:
+        paths_after_reject = await session.read_translation_location_paths()
+
+    _ = reset_path.write_text(
+        json.dumps({"location_paths": [target_path]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    accepted_report = await service.reset_translations(
+        game_title="テストゲーム",
+        input_path=reset_path,
+    )
+    quality_report = await service.quality_report(game_title="テストゲーム")
+    async with await registry.open_game("テストゲーム") as session:
+        paths_after_accept = await session.read_translation_location_paths()
+
+    assert rejected_report.status == "error"
+    assert rejected_report.summary["reset_count"] == 0
+    assert target_path in paths_after_reject
+    assert accepted_report.status == "ok"
+    assert accepted_report.summary["requested_count"] == 1
+    assert accepted_report.summary["reset_count"] == 1
+    assert target_path not in paths_after_accept
+    pending_count = quality_report.summary["pending_count"]
+    assert isinstance(pending_count, int)
+    assert pending_count >= 1
+
+
+@pytest.mark.asyncio
 async def test_validate_placeholder_rules_previews_roundtrip() -> None:
     """占位符规则校验报告展示模型可见文本与还原结果。"""
     service = AgentToolkitService(setting_path=EXAMPLE_SETTING_PATH)
@@ -315,6 +631,49 @@ async def test_validate_placeholder_rules_previews_roundtrip() -> None:
     assert first_sample["text_for_model"] == "[CUSTOM_FACE_PORTRAIT_1]こんにちは[RMMZ_VARIABLE_1]"
     assert first_sample["restored_text"] == r"\F[GuideA]こんにちは\V[1]"
     assert first_sample["roundtrip_ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_validate_placeholder_rules_blocks_bare_escape_match() -> None:
+    """占位符规则不得误匹配裸 \\n、\\r、\\t 这类常见文本转义。"""
+    service = AgentToolkitService(setting_path=EXAMPLE_SETTING_PATH)
+
+    unsafe_report = await service.validate_placeholder_rules(
+        game_title=None,
+        custom_placeholder_rules_text=json.dumps(
+            {r"(?i)\\N\d*": "[CUSTOM_PLUGIN_N_{index}]"},
+            ensure_ascii=False,
+        ),
+        sample_texts=[r"\n"],
+    )
+    safe_report = await service.validate_placeholder_rules(
+        game_title=None,
+        custom_placeholder_rules_text=json.dumps(
+            {r"(?i)\\N\d+": "[CUSTOM_PLUGIN_N_{index}]"},
+            ensure_ascii=False,
+        ),
+        sample_texts=[r"\N12"],
+    )
+
+    assert unsafe_report.status == "error"
+    assert {error.code for error in unsafe_report.errors} == {"placeholder_rule_matches_common_escape"}
+    assert safe_report.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_validate_placeholder_rules_warns_unicode_control_boundary() -> None:
+    """占位符校验会提示非 ASCII 控制符边界，避免 Agent 按终端乱码猜测。"""
+    service = AgentToolkitService(setting_path=EXAMPLE_SETTING_PATH)
+
+    report = await service.validate_placeholder_rules(
+        game_title=None,
+        custom_placeholder_rules_text="{}",
+        sample_texts=[r"\F3[66」「ふーん……？」"],
+    )
+
+    warning_codes = {warning.code for warning in report.warnings}
+    assert "unprotected_control_unicode_boundary" in warning_codes
+    assert "U+300D" in report.warnings[0].message
 
 
 @pytest.mark.asyncio
@@ -456,10 +815,14 @@ async def test_quality_report_counts_errors_and_model_response(
     assert report.summary["placeholder_risk_count"] == 1
     assert report.summary["overwide_line_count"] == 1
     assert report.details["error_type_counts"] == {"AI漏翻": 1}
+    quality_error_items = ensure_json_array(report.details["quality_error_items"], "quality_error_items")
     placeholder_items = ensure_json_array(report.details["placeholder_risk_items"], "placeholder_risk_items")
     overwide_items = ensure_json_array(report.details["overwide_line_items"], "overwide_line_items")
+    quality_error_detail = ensure_json_object(quality_error_items[0], "quality_error_items[0]")
     placeholder_detail = ensure_json_object(placeholder_items[0], "placeholder_risk_items[0]")
     overwide_detail = ensure_json_object(overwide_items[0], "overwide_line_items[0]")
+    assert quality_error_detail["location_path"] == "CommonEvents.json/1/2"
+    assert quality_error_detail["error_type"] == "AI漏翻"
     assert placeholder_detail["location_path"] == "CommonEvents.json/1/0"
     assert overwide_detail["location_path"] == "CommonEvents.json/1/0"
     assert overwide_detail["line_width"] == 30

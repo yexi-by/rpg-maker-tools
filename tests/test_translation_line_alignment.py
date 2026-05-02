@@ -158,3 +158,55 @@ def test_line_width_split_uses_punctuation_near_limit() -> None:
     )
 
     assert lines == ["甲乙丙丁戊己，", "庚辛壬癸"]
+
+
+def test_wrapping_punctuation_continuation_line_gets_visual_indent() -> None:
+    """跨行引号续行自动补全角空格，保持游戏窗口里的视觉对齐。"""
+    text_rules = _build_text_rules(width_limit=20)
+
+    lines = split_overwide_lines(
+        lines=["「甲乙丙。", "丁戊己」"],
+        location_path="Map001.json/1/0/0",
+        text_rules=text_rules,
+    )
+
+    assert lines == ["「甲乙丙。", "　丁戊己」"]
+
+
+def test_wrapping_punctuation_split_tail_gets_visual_indent() -> None:
+    """同一行被自动拆短后，拆出的引号续行也补全角空格。"""
+    text_rules = _build_text_rules(width_limit=8)
+
+    lines = split_overwide_lines(
+        lines=["「甲乙丙丁戊己，庚辛壬癸」"],
+        location_path="Map001.json/1/0/0",
+        text_rules=text_rules,
+    )
+
+    assert lines == ["「甲乙丙丁戊己，", "　庚辛壬癸」"]
+
+
+def test_wrapping_punctuation_existing_indent_is_preserved() -> None:
+    """Agent 已经补过续行缩进时不重复插入空白。"""
+    text_rules = _build_text_rules(width_limit=20)
+
+    lines = split_overwide_lines(
+        lines=["「甲乙丙。", "　丁戊己」"],
+        location_path="Map001.json/1/0/0",
+        text_rules=text_rules,
+    )
+
+    assert lines == ["「甲乙丙。", "　丁戊己」"]
+
+
+def test_wrapping_punctuation_state_ignores_edge_control_sequences() -> None:
+    """包裹标点状态判定忽略行首和行尾控制符。"""
+    text_rules = _build_text_rules(width_limit=20)
+
+    lines = split_overwide_lines(
+        lines=[r"\C[2]「甲乙丙。", r"丁戊己」\C[0]", "庚辛"],
+        location_path="Map001.json/1/0/0",
+        text_rules=text_rules,
+    )
+
+    assert lines == [r"\C[2]「甲乙丙。", r"　丁戊己」\C[0]", "庚辛"]

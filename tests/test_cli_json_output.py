@@ -119,6 +119,26 @@ def test_rule_validation_commands_accept_input_files() -> None:
             "--json",
         ]
     )
+    residual_args = parser.parse_args(
+        [
+            "validate-japanese-residual-rules",
+            "--game",
+            "demo",
+            "--input",
+            "japanese-residual-rules.json",
+            "--json",
+        ]
+    )
+    residual_import_args = parser.parse_args(
+        [
+            "import-japanese-residual-rules",
+            "--game",
+            "demo",
+            "--input",
+            "japanese-residual-rules.json",
+            "--json",
+        ]
+    )
 
     assert namespace_optional_str(scan_args, "input") == "placeholder-rules.json"
     assert namespace_optional_str(scan_args, "placeholder_rules") is None
@@ -126,6 +146,10 @@ def test_rule_validation_commands_accept_input_files() -> None:
     assert namespace_optional_str(plugin_args, "rules") is None
     assert namespace_optional_str(event_args, "input") == "event-command-rules.json"
     assert namespace_optional_str(event_args, "rules") is None
+    assert namespace_optional_str(residual_args, "input") == "japanese-residual-rules.json"
+    assert namespace_optional_str(residual_args, "rules") is None
+    assert namespace_optional_str(residual_import_args, "input") == "japanese-residual-rules.json"
+    assert getattr(residual_import_args, "json_output") is True
 
 
 def test_translate_quality_errors_do_not_fail_process() -> None:
@@ -188,6 +212,67 @@ def test_manual_translation_export_commands_are_black_box_friendly() -> None:
     assert getattr(all_args, "json_output") is True
     assert namespace_optional_str(limited_args, "game") == "demo"
     assert getattr(limited_args, "limit") == 20
+
+
+def test_quality_fix_and_reset_commands_are_black_box_friendly() -> None:
+    """质量修复模板和显式重置命令提供稳定文件型接口。"""
+    parser = build_parser()
+
+    quality_fix_args = parser.parse_args(
+        [
+            "export-quality-fix-template",
+            "--game",
+            "demo",
+            "--output",
+            "quality-fix-template.json",
+            "--json",
+        ]
+    )
+    reset_args = parser.parse_args(
+        [
+            "reset-translations",
+            "--game",
+            "demo",
+            "--input",
+            "reset-translations.json",
+            "--json",
+        ]
+    )
+
+    assert namespace_optional_str(quality_fix_args, "output") == "quality-fix-template.json"
+    assert getattr(quality_fix_args, "json_output") is True
+    assert namespace_optional_str(reset_args, "input") == "reset-translations.json"
+    assert getattr(reset_args, "json_output") is True
+
+
+def test_reset_translations_invalid_input_returns_json_error(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    """reset-translations 的输入 schema 错误会返回机器可读错误。"""
+    input_path = tmp_path / "reset-translations.json"
+    _ = input_path.write_text("{}", encoding="utf-8")
+
+    exit_code = main(
+        [
+            "reset-translations",
+            "--game",
+            "demo",
+            "--input",
+            str(input_path),
+            "--json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    raw_payload = cast(object, json.loads(captured.out))
+    payload = ensure_json_object(coerce_json_value(raw_payload), "CLI JSON 输出")
+    errors = payload["errors"]
+    assert isinstance(errors, list)
+    first_error = errors[0]
+    assert isinstance(first_error, dict)
+    assert exit_code == 1
+    assert first_error["code"] == "reset_translation_file"
 
 
 def test_report_output_can_leave_data_output_file_untouched(

@@ -130,6 +130,18 @@ class TranslationItem(BaseModel):
                         f"占位符 {placeholder} 数量错误 (期望: {expected_count}, 实际: {actual_count})"
                     )
 
+        original_raw_controls = rules.collect_unprotected_control_sequences(self.original_lines)
+        translated_raw_controls = rules.collect_unprotected_control_sequences(
+            self.translation_lines_with_placeholders
+        )
+        if original_raw_controls != translated_raw_controls:
+            control_error = (
+                "疑似控制符不一致，未被占位符规则覆盖的反斜杠控制片段必须原样保留 "
+                f"(原文: {_format_control_counts(original_raw_controls)}; "
+                f"译文: {_format_control_counts(translated_raw_controls)})"
+            )
+            errors.append(control_error)
+
         if errors:
             raise ValueError(";\n".join(errors))
 
@@ -155,6 +167,16 @@ class TranslationItem(BaseModel):
         self.translation_lines = new_translation_lines
 
 
+def _format_control_counts(counts: dict[str, int]) -> str:
+    """把控制符计数格式化为可读错误信息。"""
+    if not counts:
+        return "无"
+    parts: list[str] = []
+    for marker in sorted(counts):
+        parts.append(f"{marker}×{counts[marker]}")
+    return "、".join(parts)
+
+
 class TranslationErrorItem(BaseModel):
     """正文翻译错误记录。"""
 
@@ -173,6 +195,14 @@ class PlaceholderRuleRecord(BaseModel):
 
     pattern_text: str
     placeholder_template: str
+
+
+class JapaneseResidualRuleRecord(BaseModel):
+    """当前游戏导入的日文残留例外规则。"""
+
+    location_path: str
+    allowed_terms: list[str] = Field(default_factory=list)
+    reason: str
 
 
 class TranslationRunRecord(BaseModel):

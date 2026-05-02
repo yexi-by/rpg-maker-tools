@@ -10,6 +10,7 @@ import asyncio
 from json_repair import repair_json
 from pydantic import RootModel
 
+from app.japanese_residual import JapaneseResidualRuleSet, check_japanese_residual_for_item
 from app.rmmz.schema import ErrorType, TranslationErrorItem, TranslationItem
 from app.rmmz.text_rules import TextRules
 from app.translation.line_wrap import align_long_text_lines
@@ -32,6 +33,7 @@ async def verify_translation_batch(
     right_queue: asyncio.Queue[list[TranslationItem] | None],
     error_queue: asyncio.Queue[list[TranslationErrorItem] | None],
     text_rules: TextRules,
+    japanese_residual_rule_set: JapaneseResidualRuleSet | None = None,
 ) -> None:
     """解析模型返回并把通过校验/失败条目分别推入队列。"""
     right_items: list[TranslationItem] = []
@@ -124,7 +126,11 @@ async def verify_translation_batch(
             continue
 
         try:
-            text_rules.check_japanese_residual(item.translation_lines)
+            check_japanese_residual_for_item(
+                item=item,
+                text_rules=text_rules,
+                rule_set=japanese_residual_rule_set,
+            )
         except ValueError as error:
             error_items.append(
                 TranslationErrorItem(
