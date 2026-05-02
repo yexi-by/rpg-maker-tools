@@ -374,12 +374,15 @@ uv run python main.py translate --game "<游戏标题>"
 8. 分批送入 LLM 翻译
 9. 成功译文写入主翻译表；最终译文问题写入译文质量错误表，模型限流、超时和连接失败写入运行级故障表
 
+`translate` 返回 0 表示本轮命令正常结束，不代表所有条目都已经成功入库。少量失败项或 pending 是可续跑状态，应继续执行 `translation-status` 和 `quality-report` 判断下一步；只有配置错误、目标游戏不可用、不可恢复模型故障等阻断问题才应视为命令失败。
+
 ### 9.2 CLI 参数说明
 
 ```
 uv run python main.py translate --game "<游戏标题>" [选项]
 
 选项：
+  --json                         输出本轮翻译摘要 JSON
   --placeholder-rules <JSON>     自定义占位符规则 JSON 字符串
   --llm-model <MODEL>            LLM 模型名称
   --llm-timeout <秒>            请求超时
@@ -618,10 +621,10 @@ residual_escape_sequence_pattern = "\\\\[nrt]"  # 残留检查前剥离的转义
 | `validate-agent-workspace` | 校验 Agent 工作区产物 | `uv run python main.py validate-agent-workspace --game "<标题>" --workspace "<临时目录>/agent-workspace" --json` |
 | `cleanup-agent-workspace` | 清理 Agent 工作区产物 | `uv run python main.py cleanup-agent-workspace --workspace "<临时目录>/agent-workspace"` |
 | `export-plugins-json` | 导出插件配置 | `uv run python main.py export-plugins-json --game "<标题>" --output "<临时目录>/plugins.json"` |
-| `validate-plugin-rules` | 校验插件规则字符串 | `uv run python main.py validate-plugin-rules --game "<标题>" --rules '<规则 JSON 字符串>' --json` |
+| `validate-plugin-rules` | 校验插件规则 | `uv run python main.py validate-plugin-rules --game "<标题>" --input "<临时目录>/plugin-rules.json" --json` |
 | `import-plugin-rules` | 导入插件规则 | `uv run python main.py import-plugin-rules --game "<标题>" --input "<临时目录>/plugin-rules.json"` |
 | `export-event-commands-json` | 导出事件指令参数 | `uv run python main.py export-event-commands-json --game "<标题>" --output "<临时目录>/ec.json" --code 357 355` |
-| `validate-event-command-rules` | 校验事件指令规则字符串 | `uv run python main.py validate-event-command-rules --game "<标题>" --rules '<规则 JSON 字符串>' --json` |
+| `validate-event-command-rules` | 校验事件指令规则 | `uv run python main.py validate-event-command-rules --game "<标题>" --input "<临时目录>/event-command-rules.json" --json` |
 | `import-event-command-rules` | 导入事件指令规则 | `uv run python main.py import-event-command-rules --game "<标题>" --input "<临时目录>/ec-rules.json"` |
 | `export-name-context` | 导出名字上下文 | `uv run python main.py export-name-context --game "<标题>" --output-dir "<临时目录>/names"` |
 | `import-name-context` | 导入术语表 | `uv run python main.py import-name-context --game "<标题>" --input "<临时目录>/names/name_registry.json"` |

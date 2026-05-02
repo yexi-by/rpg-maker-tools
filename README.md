@@ -56,7 +56,7 @@ uv run python main.py run-all --game "<游戏标题>"
 uv run python main.py list
 uv run python main.py doctor [--game <标题> | --game-path <游戏根目录>] [--json] [--no-check-llm]
 uv run python main.py add-game --path <游戏根目录> [--json]
-uv run python main.py scan-placeholder-candidates --game <标题> [--output <路径>] [--json]
+uv run python main.py scan-placeholder-candidates --game <标题> [--output <路径>] [--json] [--placeholder-rules <JSON字符串> | --input <路径>]
 uv run python main.py build-placeholder-rules --game <标题> --output <路径> [--json]
 uv run python main.py validate-placeholder-rules [--game <标题>] [--json] [--output <路径>] [--placeholder-rules <JSON字符串> | --input <路径>]
 uv run python main.py import-placeholder-rules --game <标题> (--rules <JSON字符串> | --input <路径>)
@@ -64,15 +64,15 @@ uv run python main.py prepare-agent-workspace --game <标题> --output-dir <目�
 uv run python main.py validate-agent-workspace --game <标题> --workspace <目录> [--json]
 uv run python main.py cleanup-agent-workspace --workspace <目录> [--json]
 uv run python main.py export-plugins-json --game <标题> --output <路径>
-uv run python main.py validate-plugin-rules --game <标题> --rules <JSON字符串> [--json]
+uv run python main.py validate-plugin-rules --game <标题> (--rules <JSON字符串> | --input <路径>) [--json]
 uv run python main.py import-plugin-rules --game <标题> --input <路径>
 uv run python main.py export-event-commands-json --game <标题> --output <路径> [--code ...]
-uv run python main.py validate-event-command-rules --game <标题> --rules <JSON字符串> [--json]
+uv run python main.py validate-event-command-rules --game <标题> (--rules <JSON字符串> | --input <路径>) [--json]
 uv run python main.py import-event-command-rules --game <标题> --input <路径>
 uv run python main.py export-name-context --game <标题> --output-dir <目录>
 uv run python main.py import-name-context --game <标题> --input <路径>
 uv run python main.py write-name-context --game <标题>
-uv run python main.py translate --game <标题> [--max-items N] [--max-batches N] [--time-limit-seconds N]
+uv run python main.py translate --game <标题> [--json] [--max-items N] [--max-batches N] [--time-limit-seconds N]
 uv run python main.py translation-status --game <标题> [--json]
 uv run python main.py export-pending-translations --game <标题> --output <路径> [--limit N] [--json]
 uv run python main.py import-manual-translations --game <标题> --input <路径> [--json]

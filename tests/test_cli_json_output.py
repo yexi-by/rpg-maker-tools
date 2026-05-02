@@ -7,6 +7,9 @@ from main import main
 from pytest import CaptureFixture
 
 from app.cli import build_parser
+from app.cli import build_translate_summary_report
+from app.cli import ensure_text_translation_not_blocked
+from app.application.summaries import TextTranslationSummary
 from app.rmmz.json_types import coerce_json_value, ensure_json_object
 
 
@@ -76,3 +79,74 @@ def test_placeholder_rule_commands_accept_input_files() -> None:
     assert namespace_optional_str(import_args, "rules") is None
     assert namespace_optional_str(validate_args, "input") == "placeholder-rules.json"
     assert namespace_optional_str(validate_args, "placeholder_rules") is None
+
+
+def test_rule_validation_commands_accept_input_files() -> None:
+    """规则扫描与验收命令支持文件输入，避免 Agent 拼接大段 JSON 字符串。"""
+    parser = build_parser()
+
+    scan_args = parser.parse_args(
+        [
+            "scan-placeholder-candidates",
+            "--game",
+            "demo",
+            "--input",
+            "placeholder-rules.json",
+            "--json",
+        ]
+    )
+    plugin_args = parser.parse_args(
+        [
+            "validate-plugin-rules",
+            "--game",
+            "demo",
+            "--input",
+            "plugin-rules.json",
+            "--json",
+        ]
+    )
+    event_args = parser.parse_args(
+        [
+            "validate-event-command-rules",
+            "--game",
+            "demo",
+            "--input",
+            "event-command-rules.json",
+            "--json",
+        ]
+    )
+
+    assert namespace_optional_str(scan_args, "input") == "placeholder-rules.json"
+    assert namespace_optional_str(scan_args, "placeholder_rules") is None
+    assert namespace_optional_str(plugin_args, "input") == "plugin-rules.json"
+    assert namespace_optional_str(plugin_args, "rules") is None
+    assert namespace_optional_str(event_args, "input") == "event-command-rules.json"
+    assert namespace_optional_str(event_args, "rules") is None
+
+
+def test_translate_quality_errors_do_not_fail_process() -> None:
+    """单独 translate 命令的质量错误属于可续跑状态，不应变成进程失败。"""
+    summary = TextTranslationSummary(
+        total_extracted_items=10,
+        pending_count=10,
+        deduplicated_count=10,
+        batch_count=1,
+        success_count=8,
+        error_count=2,
+    )
+    ensure_text_translation_not_blocked(summary)
+
+    report = build_translate_summary_report(summary)
+
+    assert report.status == "warning"
+    assert report.summary["quality_error_count"] == 2
+
+
+def test_translate_command_accepts_json_summary_flag() -> None:
+    """translate 支持 JSON 摘要，方便 Agent 区分命令状态和条目状态。"""
+    parser = build_parser()
+
+    args = parser.parse_args(["translate", "--game", "demo", "--json"])
+
+    assert namespace_optional_str(args, "game") == "demo"
+    assert getattr(args, "json_output") is True

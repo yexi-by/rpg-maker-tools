@@ -17,7 +17,8 @@ import aiofiles
 from rich.progress import Progress, TaskID
 from rich.table import Table
 
-from app.agent_toolkit import AgentReport, AgentToolkitService
+from app.agent_toolkit import AgentIssue, AgentReport, AgentToolkitService
+from app.agent_toolkit.reports import issue
 from app.application.handler import (
     TextTranslationSummary,
     TranslationHandler,
@@ -244,9 +245,14 @@ def build_parser() -> argparse.ArgumentParser:
     add_optional_target_arguments(scan_placeholder_parser)
     _ = scan_placeholder_parser.add_argument("--output", help="写出 JSON 报告文件")
     _ = scan_placeholder_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
-    _ = scan_placeholder_parser.add_argument(
+    scan_placeholder_source_group = scan_placeholder_parser.add_mutually_exclusive_group()
+    _ = scan_placeholder_source_group.add_argument(
         "--placeholder-rules",
         help="本次扫描使用的自定义占位符规则 JSON 字符串；传入后不会读取当前游戏数据库规则",
+    )
+    _ = scan_placeholder_source_group.add_argument(
+        "--input",
+        help="本次扫描使用的自定义占位符规则 JSON 文件；传入后不会读取当前游戏数据库规则",
     )
 
     validate_placeholder_parser = subparsers.add_parser(
@@ -303,6 +309,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--placeholder-rules",
         help="本次翻译使用的自定义占位符规则 JSON 字符串；传入后不会读取当前游戏数据库规则",
     )
+    _ = translate_parser.add_argument("--json", action="store_true", dest="json_output", help="输出本轮翻译摘要 JSON")
     add_translation_limit_arguments(translate_parser)
     add_setting_override_arguments(translate_parser)
 
@@ -364,18 +371,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     validate_plugin_parser = subparsers.add_parser(
         "validate-plugin-rules",
-        help="校验插件文本规则 JSON 字符串",
+        help="校验插件文本规则 JSON",
     )
     add_optional_target_arguments(validate_plugin_parser)
-    _ = validate_plugin_parser.add_argument("--rules", required=True, help="插件规则 JSON 字符串")
+    validate_plugin_source_group = validate_plugin_parser.add_mutually_exclusive_group(required=True)
+    _ = validate_plugin_source_group.add_argument("--rules", help="插件规则 JSON 字符串")
+    _ = validate_plugin_source_group.add_argument("--input", help="插件规则 JSON 文件")
     _ = validate_plugin_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
     validate_event_parser = subparsers.add_parser(
         "validate-event-command-rules",
-        help="校验事件指令文本规则 JSON 字符串",
+        help="校验事件指令文本规则 JSON",
     )
     add_optional_target_arguments(validate_event_parser)
-    _ = validate_event_parser.add_argument("--rules", required=True, help="事件指令规则 JSON 字符串")
+    validate_event_source_group = validate_event_parser.add_mutually_exclusive_group(required=True)
+    _ = validate_event_source_group.add_argument("--rules", help="事件指令规则 JSON 字符串")
+    _ = validate_event_source_group.add_argument("--input", help="事件指令规则 JSON 文件")
     _ = validate_event_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
     prepare_workspace_parser = subparsers.add_parser(
@@ -662,7 +673,7 @@ async def run_import_event_command_rules_command(args: argparse.Namespace) -> in
 async def run_scan_placeholder_candidates_command(args: argparse.Namespace) -> int:
     """执行 `scan-placeholder-candidates` 命令。"""
     game_title = await resolve_target_game_title(args)
-    placeholder_rules_text = read_optional_str_arg(args, "placeholder_rules")
+    placeholder_rules_text = await read_optional_text_source_arg(args, "placeholder_rules", "input")
     service = AgentToolkitService()
     report = await service.scan_placeholder_candidates(
         game_title=game_title,
@@ -709,7 +720,7 @@ async def run_import_placeholder_rules_command(args: argparse.Namespace) -> int:
 async def run_validate_plugin_rules_command(args: argparse.Namespace) -> int:
     """执行 `validate-plugin-rules` 命令。"""
     game_title = await resolve_target_game_title(args)
-    rules_text = read_str_arg(args, "rules")
+    rules_text = await read_required_text_source_arg(args, "rules", "input")
     service = AgentToolkitService()
     report = await service.validate_plugin_rules(game_title=game_title, rules_text=rules_text)
     write_report_outputs(report=report, args=args, title="插件规则校验报告")
@@ -719,7 +730,7 @@ async def run_validate_plugin_rules_command(args: argparse.Namespace) -> int:
 async def run_validate_event_command_rules_command(args: argparse.Namespace) -> int:
     """执行 `validate-event-command-rules` 命令。"""
     game_title = await resolve_target_game_title(args)
-    rules_text = read_str_arg(args, "rules")
+    rules_text = await read_required_text_source_arg(args, "rules", "input")
     service = AgentToolkitService()
     report = await service.validate_event_command_rules(game_title=game_title, rules_text=rules_text)
     write_report_outputs(report=report, args=args, title="事件指令规则校验报告")
@@ -817,7 +828,10 @@ async def run_translate_command(args: argparse.Namespace) -> int:
             run_limits=build_translation_run_limits(args),
             args=args,
         )
-    ensure_text_translation_success(summary)
+    ensure_text_translation_not_blocked(summary)
+    if read_bool_arg(args, "json_output"):
+        report = build_translate_summary_report(summary)
+        print(report.to_json_text())
     return 0
 
 
@@ -953,6 +967,43 @@ def ensure_text_translation_success(summary: TextTranslationSummary) -> None:
         raise CliBusinessError(f"正文翻译被阻断：{summary.blocked_reason}")
     if summary.has_errors:
         raise CliBusinessError(f"正文翻译产生错误条目，已停止后续流程：成功 {summary.success_count} 条，失败 {summary.error_count} 条")
+
+
+def ensure_text_translation_not_blocked(summary: TextTranslationSummary) -> None:
+    """校验单独翻译命令是否遇到阻断级故障。"""
+    if summary.is_blocked:
+        raise CliBusinessError(f"正文翻译被阻断：{summary.blocked_reason}")
+    if summary.has_errors:
+        logger.warning(
+            f"[tag.warning]正文翻译存在待处理失败项[/tag.warning] 成功 [tag.count]{summary.success_count}[/tag.count] 条，失败 [tag.count]{summary.error_count}[/tag.count] 条；可继续运行 translate 或使用质量报告排查"
+        )
+
+
+def build_translate_summary_report(summary: TextTranslationSummary) -> AgentReport:
+    """把正文翻译摘要转换为稳定 JSON 报告。"""
+    warnings: list[AgentIssue] = []
+    if summary.has_errors:
+        warnings.append(
+            issue(
+                "translation_quality_errors",
+                f"本轮翻译产生 {summary.error_count} 条译文质量错误，可续跑或人工补译",
+            )
+        )
+    return AgentReport.from_parts(
+        errors=[],
+        warnings=warnings,
+        summary={
+            "run_id": summary.run_id,
+            "total_extracted_items": summary.total_extracted_items,
+            "pending_count": summary.pending_count,
+            "deduplicated_count": summary.deduplicated_count,
+            "batch_count": summary.batch_count,
+            "success_count": summary.success_count,
+            "quality_error_count": summary.error_count,
+            "llm_failure_count": summary.llm_failure_count,
+        },
+        details={},
+    )
 
 
 async def resolve_target_game_title(args: argparse.Namespace) -> str:

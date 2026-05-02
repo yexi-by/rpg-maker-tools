@@ -20,8 +20,9 @@ uv run python main.py --agent-mode prepare-agent-workspace \
 - `event-commands.json`：配置编码对应的事件指令参数样本。
 - `placeholder-candidates.json`：疑似控制符候选报告。
 - `placeholder-rules.json`：项目生成的自定义占位符规则草稿。
+- `WORKSPACE.md`：当前工作区内的产物格式、校验命令和导入命令速查。
 
-读取策略：先看 `manifest.json` 和报告 `summary`；大文件用搜索、分段读取、抽样和项目校验命令分析。Agent 可以写自己的临时脚本处理导出数据，但导出和导入必须走本项目 CLI。
+读取策略：先看 `WORKSPACE.md`、`manifest.json` 和报告 `summary`；大文件用搜索、分段读取、抽样和项目校验命令分析。Agent 可以写自己的临时脚本处理导出数据，但导出和导入必须走本项目 CLI。
 
 ## State RT4：自定义控制符未确认
 
@@ -38,7 +39,7 @@ uv run python main.py --agent-mode validate-placeholder-rules \
   --json
 uv run python main.py --agent-mode scan-placeholder-candidates \
   --game "<游戏标题>" \
-  --placeholder-rules '<规则 JSON 字符串>' \
+  --input "<外部临时目录>/agent-workspace/placeholder-rules.json" \
   --json
 uv run python main.py --agent-mode import-placeholder-rules \
   --game "<游戏标题>" \
@@ -95,7 +96,7 @@ uv run python main.py --agent-mode import-name-context \
 ```bash
 uv run python main.py --agent-mode validate-plugin-rules \
   --game "<游戏标题>" \
-  --rules '<规则 JSON 字符串>' \
+  --input "<外部临时目录>/agent-workspace/plugin-rules.json" \
   --json
 uv run python main.py --agent-mode import-plugin-rules \
   --game "<游戏标题>" \
@@ -115,7 +116,7 @@ uv run python main.py --agent-mode import-plugin-rules \
 ```bash
 uv run python main.py --agent-mode validate-event-command-rules \
   --game "<游戏标题>" \
-  --rules '<规则 JSON 字符串>' \
+  --input "<外部临时目录>/agent-workspace/event-command-rules.json" \
   --json
 uv run python main.py --agent-mode import-event-command-rules \
   --game "<游戏标题>" \

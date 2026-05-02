@@ -111,10 +111,15 @@ async def test_prepare_agent_workspace_includes_placeholder_rule_draft(
 
     assert report.status == "ok"
     rules_path = workspace / "placeholder-rules.json"
+    guide_path = workspace / "WORKSPACE.md"
     assert rules_path.exists()
+    assert guide_path.exists()
     rules = load_json_object(rules_path)
     assert rules == {r"(?i)\\F\d*\[[^\]\r\n]+\]": "[CUSTOM_FACE_PORTRAIT_{index}]"}
     assert report.summary["placeholder_rule_draft_count"] == 1
+    guide_text = guide_path.read_text(encoding="utf-8")
+    assert "validate-plugin-rules --game <游戏标题> --input" in guide_text
+    assert "validate-event-command-rules --game <游戏标题> --input" in guide_text
 
 
 @pytest.mark.asyncio

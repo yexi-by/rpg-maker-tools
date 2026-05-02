@@ -16,14 +16,16 @@ description: Use this skill when an agent operates this RPG Maker MZ translation
 - 临时工作区必须放在用户允许的位置，不放进游戏根目录。
 - 大型 JSON 先看 manifest、summary、校验报告，再搜索和分段读取。
 - Agent 中间可以用自己的办法处理导出文件；项目只要求导出和导入必须走本项目 CLI。
+- 文件型规则一律用 `--input`，不要用 `--rules "$(cat ...)"` 或把大 JSON 塞进命令行。
 
 ## 不可跳过的门禁
 
 - 未确认 `<项目目录>`、`<游戏根目录>`、`<外部临时目录>`、模型配置和写回许可前，不启动消耗模型额度的命令。
 - 没有完成 `doctor`、`add-game`、`prepare-agent-workspace` 和占位符检查前，不执行 `translate`。
 - name-context、plugins、event-commands 三类分析必须导出、分析、验收。游戏本身没有对应内容时允许为空，但必须先确认。
-- 占位符规则优先用文件：`validate-placeholder-rules --input <规则文件>`，`import-placeholder-rules --input <规则文件>`。
+- 占位符、插件、事件指令规则优先用文件：`validate-* --input <规则文件>`，`import-* --input <规则文件>`。
 - 如果使用子代理并行分析，主 Agent 必须等待所有子代理完成、读取结果、执行校验，再导入数据库。
+- 小批量翻译后如果出现模型运行故障、译文质量错误或占位符风险，先排查，不继续全量翻译。
 - `quality-report` 有阻断错误时，不执行 `write-back`。
 - 如果 pending 很少，先用 `export-pending-translations` 导出并人工补齐，再用 `import-manual-translations` 入库；补不了再停下反馈。
 - 找不到项目、游戏不可识别、data JSON 不可解析、模型不可用、连续多轮失败时，暂停并向用户报告。
@@ -42,8 +44,8 @@ description: Use this skill when an agent operates this RPG Maker MZ translation
 4. `prepare-agent-workspace --game <游戏标题> --output-dir <外部临时目录>/agent-workspace --json` 导出分析工作区。
 5. 分析并导入占位符、术语表、插件规则、事件指令规则。
 6. `validate-agent-workspace --game <游戏标题> --workspace <外部临时目录>/agent-workspace --json` 验收工作区。
-7. 小批量 `translate --game <游戏标题> --max-batches 1`，再看 `quality-report`。
-8. 稳定后续跑 `translate --game <游戏标题>`，直到 pending 为 0 或只剩少量可人工补齐。
+7. 小批量 `translate --game <游戏标题> --max-batches 1 --json`，再看 `translation-status` 和 `quality-report`；pending 正常，模型故障、质量错误和占位符风险不正常。
+8. 稳定后续跑 `translate --game <游戏标题> --json`，直到 pending 为 0 或只剩少量可人工补齐。
 9. 少量 pending 用人工补译命令补齐。
 10. `quality-report --game <游戏标题> --json` 通过并获得用户许可后，执行 `write-back --game <游戏标题>`。
 
@@ -70,4 +72,5 @@ description: Use this skill when an agent operates this RPG Maker MZ translation
 - 把没看懂结构当成“游戏没有对应内容”。
 - 子代理还没结束就导入半成品或启动翻译。
 - `quality-report` 有阻断错误仍写回。
+- 把 `translate` 的少量失败项当成程序崩溃；正确做法是看报告、补规则、续跑或人工补译。
 

@@ -7,7 +7,8 @@
 ```bash
 uv run python main.py --agent-mode translate \
   --game "<游戏标题>" \
-  --max-batches 1
+  --max-batches 1 \
+  --json
 uv run python main.py --agent-mode translation-status --game "<游戏标题>" --json
 uv run python main.py --agent-mode quality-report \
   --game "<游戏标题>" \
@@ -17,11 +18,18 @@ uv run python main.py --agent-mode quality-report \
 稳定后继续跑。
 
 ```bash
-uv run python main.py --agent-mode translate --game "<游戏标题>"
+uv run python main.py --agent-mode translate --game "<游戏标题>" --json
 uv run python main.py --agent-mode quality-report --game "<游戏标题>" --json
 ```
 
 读取报告顺序：运行状态、成功数、待处理数、停止原因、模型运行故障、译文质量错误、模型原始返回、占位符风险、日文残留、长文本超宽、可写回数量。
+
+判定规则：
+
+- `translate` 返回 0 只表示本轮命令正常结束，不表示所有条目都成功。
+- 小批量后存在 pending 是正常状态。
+- 小批量后只要出现模型运行故障、译文质量错误、模型原始返回解析问题或占位符风险，就先排查，不继续全量翻译。
+- 全量翻译后仍有少量 pending 或质量错误，先续跑；连续没有下降时进入人工补译或向用户反馈。
 
 ## State RT8：翻译反复失败
 
