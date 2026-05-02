@@ -23,6 +23,7 @@ from app.application.handler import (
     TextTranslationSummary,
     TranslationHandler,
     TranslationRunLimits,
+    WriteBackSummary,
 )
 from app.config import SettingOverrides
 from app.observability import console, get_progress, logger
@@ -315,6 +316,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     write_back_parser = subparsers.add_parser("write-back", help="把译文回写到游戏目录")
     add_optional_target_arguments(write_back_parser)
+    _ = write_back_parser.add_argument("--json", action="store_true", dest="json_output", help="输出本轮回写摘要 JSON")
     add_setting_override_arguments(write_back_parser)
 
     export_name_parser = subparsers.add_parser(
@@ -840,12 +842,15 @@ async def run_write_back_command(args: argparse.Namespace) -> int:
     game_title = await resolve_target_game_title(args)
     setting_overrides = build_setting_overrides(args)
     async with HandlerSession() as handler:
-        await write_back_for_handler(
+        summary = await write_back_for_handler(
             handler=handler,
             game_title=game_title,
             setting_overrides=setting_overrides,
             args=args,
         )
+    if read_bool_arg(args, "json_output"):
+        report = build_write_back_summary_report(summary)
+        print(report.to_json_text())
     return 0
 
 
@@ -905,7 +910,7 @@ async def run_all_command(args: argparse.Namespace) -> int:
             logger.warning(f"[tag.warning]已按参数跳过回写[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count]")
             return 0
 
-        await write_back_for_handler(
+        _ = await write_back_for_handler(
             handler=handler,
             game_title=game_title,
             setting_overrides=setting_overrides,
@@ -941,11 +946,11 @@ async def write_back_for_handler(
     game_title: str,
     setting_overrides: SettingOverrides,
     args: argparse.Namespace,
-) -> None:
+) -> WriteBackSummary:
     """使用已创建的编排器回写译文。"""
     await ensure_write_back_gate(game_title)
     with build_progress_reporter("回写数据", args) as progress:
-        await handler.write_back(
+        return await handler.write_back(
             game_title=game_title,
             callbacks=progress.progress_callbacks(),
             setting_overrides=setting_overrides,
@@ -1001,6 +1006,24 @@ def build_translate_summary_report(summary: TextTranslationSummary) -> AgentRepo
             "success_count": summary.success_count,
             "quality_error_count": summary.error_count,
             "llm_failure_count": summary.llm_failure_count,
+        },
+        details={},
+    )
+
+
+def build_write_back_summary_report(summary: WriteBackSummary) -> AgentReport:
+    """把游戏文件回写摘要转换为稳定 JSON 报告。"""
+    return AgentReport.from_parts(
+        errors=[],
+        warnings=[],
+        summary={
+            "data_item_count": summary.data_item_count,
+            "plugin_item_count": summary.plugin_item_count,
+            "name_written_count": summary.name_written_count,
+            "target_font_name": summary.target_font_name or "",
+            "source_font_count": summary.source_font_count,
+            "replaced_font_reference_count": summary.replaced_font_reference_count,
+            "font_copied": summary.font_copied,
         },
         details={},
     )

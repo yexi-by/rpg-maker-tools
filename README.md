@@ -50,10 +50,10 @@ uv run python main.py --agent-mode translate --game <游戏标题> --max-batches
 uv run python main.py --agent-mode translation-status --game <游戏标题> --json
 uv run python main.py --agent-mode quality-report --game <游戏标题> --json
 uv run python main.py --agent-mode translate --game <游戏标题> --json
-uv run python main.py --agent-mode write-back --game <游戏标题>
+uv run python main.py --agent-mode write-back --game <游戏标题> --json
 ```
 
-`translate` 返回 0 表示本轮命令正常结束，不代表所有条目都成功。失败条目、pending 和质量风险由 `translation-status`、`quality-report` 和人工补译命令处理。
+`translate` 返回 0 表示本轮命令正常结束，不代表所有条目都成功。失败条目、pending 和质量风险由 `translation-status`、`quality-report` 和人工补译命令处理，禁止绕过 CLI 直接修改数据库。
 
 ## 外部分析数据
 

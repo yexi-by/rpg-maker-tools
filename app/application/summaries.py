@@ -78,6 +78,19 @@ class NameContextWriteSummary:
     preserved_translation_count: int
 
 
+@dataclass(slots=True)
+class WriteBackSummary:
+    """游戏文件回写任务摘要。"""
+
+    data_item_count: int
+    plugin_item_count: int
+    name_written_count: int
+    target_font_name: str | None
+    source_font_count: int
+    replaced_font_reference_count: int
+    font_copied: bool
+
+
 __all__: list[str] = [
     "EventCommandJsonExportSummary",
     "EventCommandRuleImportSummary",
@@ -86,4 +99,5 @@ __all__: list[str] = [
     "PluginJsonExportSummary",
     "PluginRuleImportSummary",
     "TextTranslationSummary",
+    "WriteBackSummary",
 ]

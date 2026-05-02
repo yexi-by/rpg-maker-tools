@@ -273,7 +273,7 @@ def _ensure_source_paths_share_command_list(source_line_paths: list[str], locati
 def _write_event_command_text_item(command: JsonObject, item: TranslationItem) -> None:
     """将外部规则命中的事件指令短文本译文写回参数容器。"""
     path_parts = _extract_command_value_path_parts(item.location_path)
-    if len(path_parts) < 3 or path_parts[0] != "parameters":
+    if len(path_parts) < 2 or path_parts[0] != "parameters":
         raise ValueError(f"事件指令路径缺少 parameters 段: {item.location_path}")
 
     parameters = _ensure_command_parameters(command, item.location_path)

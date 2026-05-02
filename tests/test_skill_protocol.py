@@ -18,6 +18,8 @@ def test_att_mz_skill_requires_parallel_subagents_when_available() -> None:
         "`event-command-rules` 子代理",
         "主 Agent 必须等待四类子代理全部完成",
         "任一子代理未完成、失败或校验未通过，不启动翻译",
+        "write-back --game <游戏标题> --json",
+        "禁止直接修改数据库",
     ]
     for phrase in required_phrases:
         assert phrase in text

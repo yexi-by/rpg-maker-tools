@@ -2,12 +2,13 @@
 
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from app.application.file_writer import reset_writable_copies
-from app.cli import build_parser, read_int_set_arg
+from app.cli import build_parser, read_bool_arg, read_int_set_arg
 from app.config.schemas import EventCommandTextSetting
 from app.event_command_text import (
     EventCommandTextExtraction,
@@ -18,7 +19,7 @@ from app.event_command_text import (
 )
 from app.rmmz import load_game_data
 from app.rmmz.schema import EventCommandTextRuleRecord
-from app.rmmz.text_rules import JsonValue, ensure_json_array, ensure_json_object
+from app.rmmz.text_rules import JsonValue, coerce_json_value, ensure_json_array, ensure_json_object
 from app.rmmz.write_back import write_data_text
 
 
@@ -97,6 +98,21 @@ def test_export_event_command_parser_accepts_code_array() -> None:
     assert read_int_set_arg(args, "codes") == {357, 999}
 
 
+def test_write_back_parser_accepts_json_output() -> None:
+    """write-back 支持输出机器可读摘要。"""
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "write-back",
+            "--game",
+            "テストゲーム",
+            "--json",
+        ]
+    )
+
+    assert read_bool_arg(args, "json_output") is True
+
+
 @pytest.mark.asyncio
 async def test_event_command_rule_import_extracts_and_writes_back(
     minimal_game_dir: Path,
@@ -157,6 +173,69 @@ async def test_event_command_rule_import_extracts_and_writes_back(
     parameters = ensure_json_array(command["parameters"], "CommonEvents[1].list[4].parameters")
     payload = ensure_json_object(parameters[3], "CommonEvents[1].list[4].parameters[3]")
     assert payload["message"] == "事件指令译文"
+
+
+@pytest.mark.asyncio
+async def test_event_command_direct_parameter_string_writes_back(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """事件指令规则直接命中 parameters[N] 字符串叶子时可以写回。"""
+    common_events_path = minimal_game_dir / "data" / "CommonEvents.json"
+    raw_common_events = cast(object, json.loads(common_events_path.read_text(encoding="utf-8")))
+    common_events = ensure_json_array(coerce_json_value(raw_common_events), "CommonEvents.json")
+    common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
+    commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
+    command = ensure_json_object(commands[4], "CommonEvents[1].list[4]")
+    parameters = ensure_json_array(command["parameters"], "CommonEvents[1].list[4].parameters")
+    parameters[2] = "トップパラメータ"
+    _ = common_events_path.write_text(json.dumps(common_events, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    game_data = await load_game_data(minimal_game_dir)
+    input_path = tmp_path / "event-command-rules.json"
+    _ = input_path.write_text(
+        json.dumps(
+            {
+                "357": [
+                    {
+                        "match": {
+                            "0": "TestPlugin",
+                            "1": "Show",
+                        },
+                        "paths": [
+                            "$['parameters'][2]",
+                        ],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    import_file = await load_event_command_rule_import_file(input_path)
+    records = build_event_command_rule_records_from_import(
+        game_data=game_data,
+        import_file=import_file,
+    )
+    extracted = EventCommandTextExtraction(game_data, records).extract_all_text()
+    items = extracted["CommonEvents.json"].translation_items
+    assert [item.location_path for item in items] == [
+        "CommonEvents.json/1/4/parameters/2",
+    ]
+    item = items[0]
+    assert item.original_lines == ["トップパラメータ"]
+
+    item.translation_lines = ["顶层参数译文"]
+    reset_writable_copies(game_data)
+    write_data_text(game_data, [item])
+
+    common_events = ensure_json_array(game_data.writable_data["CommonEvents.json"], "CommonEvents")
+    common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
+    commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
+    command = ensure_json_object(commands[4], "CommonEvents[1].list[4]")
+    parameters = ensure_json_array(command["parameters"], "CommonEvents[1].list[4].parameters")
+    assert parameters[2] == "顶层参数译文"
 
 
 def test_event_command_text_extraction_supports_custom_command_code() -> None:

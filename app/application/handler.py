@@ -21,6 +21,7 @@ from app.application.summaries import (
     PluginJsonExportSummary,
     PluginRuleImportSummary,
     TextTranslationSummary,
+    WriteBackSummary,
 )
 from app.config import (
     SettingOverrides,
@@ -551,7 +552,7 @@ class TranslationHandler:
         game_title: str,
         callbacks: tuple[Callable[[int, int], None], Callable[[int], None]],
         setting_overrides: SettingOverrides | None = None,
-    ) -> None:
+    ) -> WriteBackSummary:
         """把数据库中的有效译文回写到游戏目录。"""
         async with await self.game_registry.open_game(game_title) as session:
             set_progress, advance_progress = callbacks
@@ -572,7 +573,15 @@ class TranslationHandler:
 
             if not translated_items:
                 logger.warning(f"[tag.warning]当前没有可回写译文[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count]")
-                return
+                return WriteBackSummary(
+                    data_item_count=0,
+                    plugin_item_count=0,
+                    name_written_count=0,
+                    target_font_name=None,
+                    source_font_count=0,
+                    replaced_font_reference_count=0,
+                    font_copied=False,
+                )
 
             reset_writable_copies(game_data)
             data_item_count = sum(
@@ -599,6 +608,15 @@ class TranslationHandler:
             if font_summary.target_font_name is not None:
                 logger.info(f"[tag.phase]字体引用已同步[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] 目标字体 [tag.path]{font_summary.target_font_name}[/tag.path] 原字体 [tag.count]{font_summary.source_font_count}[/tag.count] 个，替换引用 [tag.count]{font_summary.replaced_reference_count}[/tag.count] 处")
             logger.success(f"[tag.success]游戏文本回写完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] data 文本 [tag.count]{data_item_count}[/tag.count] 条，插件文本 [tag.count]{plugin_item_count}[/tag.count] 条，标准名 [tag.count]{name_written_count}[/tag.count] 条")
+            return WriteBackSummary(
+                data_item_count=data_item_count,
+                plugin_item_count=plugin_item_count,
+                name_written_count=name_written_count,
+                target_font_name=font_summary.target_font_name,
+                source_font_count=font_summary.source_font_count,
+                replaced_font_reference_count=font_summary.replaced_reference_count,
+                font_copied=font_summary.copied,
+            )
 
     async def export_name_context(
         self,
@@ -1201,4 +1219,5 @@ __all__: list[str] = [
     "PluginRuleImportSummary",
     "TextTranslationSummary",
     "TranslationHandler",
+    "WriteBackSummary",
 ]

@@ -183,6 +183,51 @@ async def test_validate_placeholder_rules_previews_roundtrip() -> None:
 
 
 @pytest.mark.asyncio
+async def test_validate_event_command_rules_previews_direct_parameter_write_back(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """事件指令规则校验会预演 direct parameters[N] 命中项的回写。"""
+    common_events_path = minimal_game_dir / "data" / "CommonEvents.json"
+    raw_common_events = cast(object, json.loads(common_events_path.read_text(encoding="utf-8")))
+    common_events = ensure_json_array(coerce_json_value(raw_common_events), "CommonEvents.json")
+    common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
+    commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
+    command = ensure_json_object(commands[4], "CommonEvents[1].list[4]")
+    parameters = ensure_json_array(command["parameters"], "CommonEvents[1].list[4].parameters")
+    parameters[2] = "トップパラメータ"
+    _ = common_events_path.write_text(json.dumps(common_events, ensure_ascii=False, indent=2), encoding="utf-8")
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+
+    report = await service.validate_event_command_rules(
+        game_title="テストゲーム",
+        rules_text=json.dumps(
+            {
+                "357": [
+                    {
+                        "match": {
+                            "0": "TestPlugin",
+                            "1": "Show",
+                        },
+                        "paths": [
+                            "$['parameters'][2]",
+                        ],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+    assert report.status == "ok"
+    preview = ensure_json_object(report.details["write_back_preview"], "write_back_preview")
+    assert preview["status"] == "ok"
+    assert preview["checked_item_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_quality_report_counts_errors_and_model_response(
     minimal_game_dir: Path,
     tmp_path: Path,
@@ -199,7 +244,7 @@ async def test_quality_report_counts_errors_and_model_response(
                     role="アリス",
                     original_lines=["こんにちは"],
                     source_line_paths=["CommonEvents.json/1/1"],
-                    translation_lines=["你好"],
+                    translation_lines=[r"\C[4]甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲"],
                 )
             ]
         )
@@ -231,4 +276,13 @@ async def test_quality_report_counts_errors_and_model_response(
     assert report.status == "error"
     assert report.summary["quality_error_count"] == 1
     assert report.summary["model_response_error_count"] == 1
+    assert report.summary["placeholder_risk_count"] == 1
+    assert report.summary["overwide_line_count"] == 1
     assert report.details["error_type_counts"] == {"AI漏翻": 1}
+    placeholder_items = ensure_json_array(report.details["placeholder_risk_items"], "placeholder_risk_items")
+    overwide_items = ensure_json_array(report.details["overwide_line_items"], "overwide_line_items")
+    placeholder_detail = ensure_json_object(placeholder_items[0], "placeholder_risk_items[0]")
+    overwide_detail = ensure_json_object(overwide_items[0], "overwide_line_items[0]")
+    assert placeholder_detail["location_path"] == "CommonEvents.json/1/0"
+    assert overwide_detail["location_path"] == "CommonEvents.json/1/0"
+    assert overwide_detail["line_width"] == 30

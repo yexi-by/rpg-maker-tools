@@ -21,6 +21,7 @@ from app.agent_toolkit.placeholder_scan import (
     scan_placeholder_candidates,
 )
 from app.agent_toolkit.reports import AgentIssue, AgentReport, issue
+from app.application.file_writer import reset_writable_copies
 from app.config import load_custom_placeholder_rules_text
 from app.config.environment import load_environment_overrides
 from app.llm import ChatMessage, LLMHandler
@@ -45,6 +46,7 @@ from app.rmmz.schema import (
 from app.rmmz.text_rules import JsonArray, JsonObject, JsonValue, TextRules
 from app.rmmz.json_types import coerce_json_value, ensure_json_array, ensure_json_object, ensure_json_string_list
 from app.rmmz.control_codes import ControlSequenceSpan
+from app.rmmz.write_back import write_data_text
 from app.translation.line_wrap import count_line_width_chars
 from app.utils.config_loader_utils import load_setting, resolve_setting_path
 from app.event_command_text import (
@@ -352,8 +354,8 @@ class AgentToolkitService:
                 llm_failures = await session.read_llm_failures(latest_run.run_id)
 
         residual_count = _count_residual_items(translated_items, text_rules)
-        placeholder_risk_count = _count_placeholder_risk_items(translated_items, text_rules)
-        overwide_line_count = _count_overwide_lines(translated_items, text_rules)
+        placeholder_risk_items = _collect_placeholder_risk_items(translated_items, text_rules)
+        overwide_line_items = _collect_overwide_line_items(translated_items, text_rules)
         error_type_counts = Counter(item.error_type for item in quality_error_items)
         model_response_count = sum(
             1
@@ -377,12 +379,12 @@ class AgentToolkitService:
             errors.append(issue("translation_quality_errors", f"最新翻译运行存在 {len(quality_error_items)} 条译文质量错误"))
         if pending_paths:
             errors.append(issue("pending_translations", f"存在 {len(pending_paths)} 条正文尚未成功入库"))
-        if placeholder_risk_count:
-            errors.append(issue("placeholder_risk", f"发现 {placeholder_risk_count} 条占位符风险译文"))
+        if placeholder_risk_items:
+            errors.append(issue("placeholder_risk", f"发现 {len(placeholder_risk_items)} 条占位符风险译文"))
         if residual_count:
             warnings.append(issue("japanese_residual", f"发现 {residual_count} 条译文存在日文残留风险"))
-        if overwide_line_count:
-            warnings.append(issue("overwide_line", f"发现 {overwide_line_count} 行译文超过当前长文本宽度上限"))
+        if overwide_line_items:
+            errors.append(issue("overwide_line", f"发现 {len(overwide_line_items)} 行译文超过当前长文本宽度上限"))
         if stale_paths:
             warnings.append(issue("stale_cache", f"发现 {len(stale_paths)} 条不在当前提取范围内的缓存译文"))
 
@@ -404,13 +406,15 @@ class AgentToolkitService:
                 "quality_error_count": len(quality_error_items),
                 "model_response_error_count": model_response_count,
                 "japanese_residual_count": residual_count,
-                "placeholder_risk_count": placeholder_risk_count,
-                "overwide_line_count": overwide_line_count,
+                "placeholder_risk_count": len(placeholder_risk_items),
+                "overwide_line_count": len(overwide_line_items),
                 "writable_translation_count": len(translated_paths & active_paths),
             },
             details={
                 "error_type_counts": dict(error_type_counts),
                 "llm_failure_counts": dict(llm_failure_counts),
+                "placeholder_risk_items": placeholder_risk_items,
+                "overwide_line_items": overwide_line_items,
             },
         )
 
@@ -702,6 +706,28 @@ class AgentToolkitService:
                 for translation_data in extracted_map.values()
                 for item in translation_data.translation_items
             ]
+            try:
+                _preview_event_command_write_back(
+                    game_data=game_data,
+                    extracted_items=extracted_items,
+                    text_rules=text_rules,
+                )
+                details["write_back_preview"] = {
+                    "checked_item_count": len(extracted_items),
+                    "status": "ok",
+                }
+            except Exception as error:
+                errors.append(
+                    issue(
+                        "event_command_write_back_invalid",
+                        f"事件指令规则命中项无法回写: {type(error).__name__}: {error}",
+                    )
+                )
+                details["write_back_preview"] = {
+                    "checked_item_count": len(extracted_items),
+                    "status": "error",
+                    "reason": f"{type(error).__name__}: {error}",
+                }
             details["rules"] = [
                 {
                     "command_code": record.command_code,
@@ -1191,6 +1217,35 @@ def _count_event_rule_hits(
     return len(items)
 
 
+def _preview_event_command_write_back(
+    *,
+    game_data: GameData,
+    extracted_items: list[TranslationItem],
+    text_rules: TextRules,
+) -> None:
+    """用规则命中项做内存回写预演，提前暴露路径不兼容问题。"""
+    if not extracted_items:
+        return
+    probe_items: list[TranslationItem] = []
+    for item in extracted_items:
+        probe_item = item.model_copy(deep=True)
+        probe_item.translation_lines = _build_write_back_probe_lines(item)
+        probe_items.append(probe_item)
+
+    reset_writable_copies(game_data)
+    try:
+        write_data_text(game_data, probe_items, text_rules=text_rules)
+    finally:
+        reset_writable_copies(game_data)
+
+
+def _build_write_back_probe_lines(item: TranslationItem) -> list[str]:
+    """按条目类型生成不会依赖模型结果的回写探针译文。"""
+    if item.item_type == "array":
+        return ["回写校验" for _line in item.original_lines]
+    return ["回写校验"]
+
+
 def _count_name_variant_mismatches(speaker_names: dict[str, str]) -> int:
     """检查带冒号或声音后缀的名字译名是否延续本体译名。"""
     mismatch_count = 0
@@ -1224,9 +1279,9 @@ def _count_residual_items(items: list[TranslationItem], text_rules: TextRules) -
     return count
 
 
-def _count_placeholder_risk_items(items: list[TranslationItem], text_rules: TextRules) -> int:
-    """统计占位符数量或未知控制符存在风险的译文条目。"""
-    count = 0
+def _collect_placeholder_risk_items(items: list[TranslationItem], text_rules: TextRules) -> JsonArray:
+    """收集占位符数量或未知控制符存在风险的译文条目明细。"""
+    details: JsonArray = []
     for item in items:
         cloned_item = item.model_copy(deep=True)
         try:
@@ -1236,9 +1291,11 @@ def _count_placeholder_risk_items(items: list[TranslationItem], text_rules: Text
                 for line in cloned_item.translation_lines
             ]
             cloned_item.verify_placeholders(text_rules)
-        except ValueError:
-            count += 1
-    return count
+        except ValueError as error:
+            detail = _build_translation_item_quality_detail(item)
+            detail["reason"] = str(error)
+            details.append(detail)
+    return details
 
 
 def _mask_translation_controls(*, line: str, item: TranslationItem, text_rules: TextRules) -> str:
@@ -1285,17 +1342,42 @@ def _prepare_manual_translation_item(
     return cloned_item
 
 
-def _count_overwide_lines(items: list[TranslationItem], text_rules: TextRules) -> int:
-    """统计超过当前行宽上限的长文本译文行数。"""
+def _collect_overwide_line_items(items: list[TranslationItem], text_rules: TextRules) -> JsonArray:
+    """收集超过当前行宽上限的长文本译文行明细。"""
     limit = text_rules.setting.long_text_line_width_limit
-    count = 0
+    details: JsonArray = []
     for item in items:
         if item.item_type != "long_text":
             continue
-        for line in item.translation_lines:
-            if line and count_line_width_chars(line, text_rules) > limit:
-                count += 1
-    return count
+        for index, line in enumerate(item.translation_lines):
+            if not line:
+                continue
+            width = count_line_width_chars(line, text_rules)
+            if width <= limit:
+                continue
+            detail = _build_translation_item_quality_detail(item)
+            detail["line_index"] = index
+            detail["line"] = line
+            detail["line_width"] = width
+            detail["line_width_limit"] = limit
+            details.append(detail)
+    return details
+
+
+def _build_translation_item_quality_detail(item: TranslationItem) -> JsonObject:
+    """把译文条目转换为质量报告中可定位、可修复的明细。"""
+    return {
+        "location_path": item.location_path,
+        "item_type": item.item_type,
+        "role": item.role,
+        "original_lines": _string_lines_to_json_array(item.original_lines),
+        "translation_lines": _string_lines_to_json_array(item.translation_lines),
+    }
+
+
+def _string_lines_to_json_array(lines: list[str]) -> JsonArray:
+    """把字符串行列表收窄为 JSON 数组。"""
+    return [line for line in lines]
 
 
 __all__: list[str] = [
