@@ -28,6 +28,7 @@ from app.llm import ChatMessage, LLMHandler
 from app.persistence import GameRegistry, TargetGameSession, ensure_db_directory
 from app.plugin_text import (
     PluginTextExtraction,
+    build_plugin_hash,
     build_plugin_rule_records_from_import,
     export_plugins_json_file,
     parse_plugin_rule_import_text,
@@ -35,10 +36,10 @@ from app.plugin_text import (
 from app.rmmz import DataTextExtraction
 from app.rmmz.control_codes import CustomPlaceholderRule
 from app.rmmz.schema import (
-    EventCommandTextRuleRecord,
     GameData,
     LlmFailureRecord,
     PLUGINS_FILE_NAME,
+    PluginTextRuleRecord,
     TranslationData,
     TranslationErrorItem,
     TranslationItem,
@@ -47,7 +48,7 @@ from app.rmmz.text_rules import JsonArray, JsonObject, JsonValue, TextRules
 from app.rmmz.json_types import coerce_json_value, ensure_json_array, ensure_json_object, ensure_json_string_list
 from app.rmmz.control_codes import ControlSequenceSpan
 from app.rmmz.write_back import write_data_text
-from app.translation.line_wrap import count_line_width_chars
+from app.translation.line_wrap import count_line_width_chars, split_overwide_lines
 from app.utils.config_loader_utils import load_setting, resolve_setting_path
 from app.event_command_text import (
     EventCommandTextExtraction,
@@ -324,7 +325,10 @@ class AgentToolkitService:
                 custom_placeholder_rules=custom_rules,
             )
             game_data = await self._load_game_data(session)
-            plugin_rules = await session.read_plugin_text_rules()
+            plugin_rules, stale_plugin_rule_count = await self._read_fresh_plugin_text_rules(
+                session=session,
+                game_data=game_data,
+            )
             event_rules = await session.read_event_command_text_rules()
             name_registry = await session.read_name_context_registry()
             latest_run = await session.read_latest_translation_run()
@@ -353,6 +357,12 @@ class AgentToolkitService:
                 quality_error_items = await session.read_translation_quality_errors(latest_run.run_id)
                 llm_failures = await session.read_llm_failures(latest_run.run_id)
 
+        run_quality_error_count = len(quality_error_items)
+        quality_error_items = [
+            item
+            for item in quality_error_items
+            if item.location_path in pending_paths
+        ]
         residual_count = _count_residual_items(translated_items, text_rules)
         placeholder_risk_items = _collect_placeholder_risk_items(translated_items, text_rules)
         overwide_line_items = _collect_overwide_line_items(translated_items, text_rules)
@@ -373,8 +383,10 @@ class AgentToolkitService:
                 if value.strip()
             )
 
-        if llm_failures:
+        if llm_failures and pending_paths:
             errors.append(issue("llm_failures", f"最新翻译运行存在 {len(llm_failures)} 条模型运行故障"))
+        elif llm_failures:
+            warnings.append(issue("historical_llm_failures", f"最新翻译运行记录过 {len(llm_failures)} 条模型故障，但当前没有待处理正文由此阻断"))
         if quality_error_items:
             errors.append(issue("translation_quality_errors", f"最新翻译运行存在 {len(quality_error_items)} 条译文质量错误"))
         if pending_paths:
@@ -387,6 +399,8 @@ class AgentToolkitService:
             errors.append(issue("overwide_line", f"发现 {len(overwide_line_items)} 行译文超过当前长文本宽度上限"))
         if stale_paths:
             warnings.append(issue("stale_cache", f"发现 {len(stale_paths)} 条不在当前提取范围内的缓存译文"))
+        if stale_plugin_rule_count:
+            warnings.append(issue("stale_plugin_rules", f"发现 {stale_plugin_rule_count} 个过期插件规则，已从本轮质量统计中排除"))
 
         return AgentReport.from_parts(
             errors=errors,
@@ -397,6 +411,7 @@ class AgentToolkitService:
                 "pending_count": len(pending_paths),
                 "stale_cache_count": len(stale_paths),
                 "plugin_rule_count": sum(len(rule.path_templates) for rule in plugin_rules),
+                "stale_plugin_rule_count": stale_plugin_rule_count,
                 "event_command_rule_count": sum(len(rule.path_templates) for rule in event_rules),
                 "name_context_total_count": total_name_count,
                 "name_context_filled_count": filled_name_count,
@@ -404,6 +419,7 @@ class AgentToolkitService:
                 "latest_run_status": latest_run.status if latest_run is not None else "",
                 "llm_failure_count": len(llm_failures),
                 "quality_error_count": len(quality_error_items),
+                "run_quality_error_count": run_quality_error_count,
                 "model_response_error_count": model_response_count,
                 "japanese_residual_count": residual_count,
                 "placeholder_risk_count": len(placeholder_risk_items),
@@ -419,7 +435,7 @@ class AgentToolkitService:
         )
 
     async def translation_status(self, *, game_title: str) -> AgentReport:
-        """读取最新正文翻译运行状态。"""
+        """读取最新正文翻译运行状态，并补充当前数据库实时 pending。"""
         async with await self.game_registry.open_game(game_title) as session:
             latest_run = await session.read_latest_translation_run()
             if latest_run is None:
@@ -429,8 +445,31 @@ class AgentToolkitService:
                     summary={},
                     details={},
                 )
+            setting = load_setting(self.setting_path)
             llm_failures = await session.read_llm_failures(latest_run.run_id)
             quality_errors = await session.read_translation_quality_errors(latest_run.run_id)
+            custom_rules = await self._resolve_custom_rules(
+                session=session,
+                custom_placeholder_rules_text=None,
+            )
+            text_rules = TextRules.from_setting(setting.text_rules, custom_placeholder_rules=custom_rules)
+            game_data = await self._load_game_data(session)
+            translation_data_map = await self._extract_active_translation_data_map(
+                session=session,
+                game_data=game_data,
+                text_rules=text_rules,
+            )
+            active_paths = {
+                item.location_path
+                for translation_data in translation_data_map.values()
+                for item in translation_data.translation_items
+            }
+            translated_paths = await session.read_translation_location_paths()
+            current_pending_paths = active_paths - translated_paths
+            run_quality_error_count = len(quality_errors)
+            quality_errors = [
+                error for error in quality_errors if error.location_path in current_pending_paths
+            ]
         return AgentReport.from_parts(
             errors=[],
             warnings=[],
@@ -438,11 +477,15 @@ class AgentToolkitService:
                 "run_id": latest_run.run_id,
                 "status": latest_run.status,
                 "total_extracted": latest_run.total_extracted,
-                "pending_count": latest_run.pending_count,
+                "pending_count": len(current_pending_paths),
+                "run_pending_count": latest_run.pending_count,
+                "translated_count": len(translated_paths & active_paths),
+                "extractable_count": len(active_paths),
                 "deduplicated_count": latest_run.deduplicated_count,
                 "batch_count": latest_run.batch_count,
                 "success_count": latest_run.success_count,
                 "quality_error_count": len(quality_errors),
+                "run_quality_error_count": run_quality_error_count,
                 "llm_failure_count": len(llm_failures),
                 "stop_reason": latest_run.stop_reason,
                 "last_error": latest_run.last_error,
@@ -460,7 +503,7 @@ class AgentToolkitService:
         output_path: Path,
         limit: int | None,
     ) -> AgentReport:
-        """导出尚未入库的翻译条目，供 Agent 做少量人工补译。"""
+        """导出尚未入库的翻译条目，供 Agent 做人工补译。"""
         setting = load_setting(self.setting_path)
         async with await self.game_registry.open_game(game_title) as session:
             custom_rules = await self._resolve_custom_rules(
@@ -728,17 +771,29 @@ class AgentToolkitService:
                     "status": "error",
                     "reason": f"{type(error).__name__}: {error}",
                 }
-            details["rules"] = [
-                {
-                    "command_code": record.command_code,
-                    "match_count": len(record.parameter_filters),
-                    "path_count": len(record.path_templates),
-                    "paths": list(record.path_templates),
-                    "hit_count": _count_event_rule_hits(record=record, items=extracted_items),
-                    "samples": _first_original_line_samples(extracted_items),
-                }
-                for record in records
-            ]
+            rule_details: JsonArray = []
+            for record in records:
+                record_extracted_map = EventCommandTextExtraction(
+                    game_data,
+                    rule_records=[record],
+                    text_rules=text_rules,
+                ).extract_all_text()
+                record_items = [
+                    item
+                    for translation_data in record_extracted_map.values()
+                    for item in translation_data.translation_items
+                ]
+                rule_details.append(
+                    {
+                        "command_code": record.command_code,
+                        "match_count": len(record.parameter_filters),
+                        "path_count": len(record.path_templates),
+                        "paths": list(record.path_templates),
+                        "hit_count": len(record_items),
+                        "samples": _first_original_line_samples(record_items),
+                    }
+                )
+            details["rules"] = rule_details
             if not records:
                 warnings.append(issue("event_command_rules_empty", "事件指令规则为空"))
             if records and not extracted_items:
@@ -947,17 +1002,23 @@ class AgentToolkitService:
                     custom_placeholder_rules=custom_rules,
                 )
                 game_data = await self._load_game_data(session)
-                plugin_rules = await session.read_plugin_text_rules()
+                plugin_rules, stale_plugin_rule_count = await self._read_fresh_plugin_text_rules(
+                    session=session,
+                    game_data=game_data,
+                )
                 event_rules = await session.read_event_command_text_rules()
                 name_registry = await session.read_name_context_registry()
                 placeholder_rules = await session.read_placeholder_rules()
                 summary["game_registered"] = True
                 summary["plugin_rule_count"] = sum(len(rule.path_templates) for rule in plugin_rules)
+                summary["stale_plugin_rule_count"] = stale_plugin_rule_count
                 summary["event_command_rule_count"] = sum(len(rule.path_templates) for rule in event_rules)
                 summary["placeholder_rule_count"] = len(placeholder_rules)
                 summary["name_context_imported"] = name_registry is not None
-                if not plugin_rules:
+                if not plugin_rules and stale_plugin_rule_count == 0:
                     warnings.append(issue("plugin_rules", "当前游戏尚未导入插件文本规则"))
+                if stale_plugin_rule_count:
+                    warnings.append(issue("stale_plugin_rules", f"发现 {stale_plugin_rule_count} 个过期插件规则，请重新导出并导入插件规则"))
                 if not event_rules:
                     warnings.append(issue("event_command_rules", "当前游戏尚未导入事件指令文本规则"))
                 if name_registry is None:
@@ -1018,7 +1079,10 @@ class AgentToolkitService:
         text_rules: TextRules,
     ) -> dict[str, TranslationData]:
         """按当前数据库规则提取本轮有效正文条目。"""
-        plugin_rules = await session.read_plugin_text_rules()
+        plugin_rules, _stale_plugin_rule_count = await self._read_fresh_plugin_text_rules(
+            session=session,
+            game_data=game_data,
+        )
         event_rules = await session.read_event_command_text_rules()
         translation_data_map = DataTextExtraction(game_data, text_rules).extract_all_text()
         _merge_translation_data_map(
@@ -1030,6 +1094,27 @@ class AgentToolkitService:
             PluginTextExtraction(game_data, plugin_rules, text_rules).extract_all_text(),
         )
         return translation_data_map
+
+    async def _read_fresh_plugin_text_rules(
+        self,
+        *,
+        session: TargetGameSession,
+        game_data: GameData,
+    ) -> tuple[list[PluginTextRuleRecord], int]:
+        """读取仍匹配当前 `plugins.js` 的插件规则，并统计过期规则。"""
+        plugin_rules = await session.read_plugin_text_rules()
+        fresh_rules: list[PluginTextRuleRecord] = []
+        stale_count = 0
+        for rule in plugin_rules:
+            if rule.plugin_index >= len(game_data.plugins_js):
+                stale_count += 1
+                continue
+            plugin_hash = build_plugin_hash(game_data.plugins_js[rule.plugin_index])
+            if rule.plugin_hash != plugin_hash:
+                stale_count += 1
+                continue
+            fresh_rules.append(rule)
+        return fresh_rules, stale_count
 
     async def _resolve_custom_rules(
         self,
@@ -1209,16 +1294,6 @@ def _first_original_line_samples(items: Iterable[TranslationItem], limit: int = 
     return samples
 
 
-def _count_event_rule_hits(
-    *,
-    record: EventCommandTextRuleRecord,
-    items: Sequence[TranslationItem],
-) -> int:
-    """按事件指令规则组返回命中条目数。"""
-    _ = record
-    return len(items)
-
-
 def _preview_event_command_write_back(
     *,
     game_data: GameData,
@@ -1331,17 +1406,38 @@ def _prepare_manual_translation_item(
     if visible_placeholders:
         joined_placeholders = "、".join(sorted(visible_placeholders))
         raise ValueError(f"translation_lines 必须使用游戏原始控制符，不得保留程序占位符: {joined_placeholders}")
+    normalized_translation_lines = _normalize_manual_translation_lines(
+        item=item,
+        translation_lines=translation_lines,
+        text_rules=text_rules,
+    )
 
     cloned_item = item.model_copy(deep=True)
     cloned_item.build_placeholders(text_rules)
     cloned_item.translation_lines_with_placeholders = [
         _mask_translation_controls(line=line, item=cloned_item, text_rules=text_rules)
-        for line in translation_lines
+        for line in normalized_translation_lines
     ]
     cloned_item.verify_placeholders(text_rules)
-    text_rules.check_japanese_residual(translation_lines)
-    cloned_item.translation_lines = list(translation_lines)
+    text_rules.check_japanese_residual(normalized_translation_lines)
+    cloned_item.translation_lines = list(normalized_translation_lines)
     return cloned_item
+
+
+def _normalize_manual_translation_lines(
+    *,
+    item: TranslationItem,
+    translation_lines: list[str],
+    text_rules: TextRules,
+) -> list[str]:
+    """人工 long_text 入库前套用与写回一致的行宽兜底。"""
+    if item.item_type != "long_text":
+        return list(translation_lines)
+    return split_overwide_lines(
+        lines=list(translation_lines),
+        location_path=item.location_path,
+        text_rules=text_rules,
+    )
 
 
 def _collect_overwide_line_items(items: list[TranslationItem], text_rules: TextRules) -> JsonArray:

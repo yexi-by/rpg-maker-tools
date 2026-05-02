@@ -1,14 +1,18 @@
 """CLI 机器可读 JSON 输出测试。"""
 
+from argparse import Namespace
 import json
+from pathlib import Path
 from typing import cast
 
 from main import main
 from pytest import CaptureFixture
 
+from app.agent_toolkit import AgentReport
 from app.cli import build_parser
 from app.cli import build_translate_summary_report
 from app.cli import ensure_text_translation_not_blocked
+from app.cli import write_report_outputs
 from app.application.summaries import TextTranslationSummary
 from app.rmmz.json_types import coerce_json_value, ensure_json_object
 
@@ -150,3 +154,85 @@ def test_translate_command_accepts_json_summary_flag() -> None:
 
     assert namespace_optional_str(args, "game") == "demo"
     assert getattr(args, "json_output") is True
+
+
+def test_manual_translation_export_commands_are_black_box_friendly() -> None:
+    """人工补译导出命令同时支持全量别名和分批限制。"""
+    parser = build_parser()
+
+    all_args = parser.parse_args(
+        [
+            "export-untranslated-translations",
+            "--game",
+            "demo",
+            "--output",
+            "pending-translations.json",
+            "--json",
+        ]
+    )
+    limited_args = parser.parse_args(
+        [
+            "export-pending-translations",
+            "--game",
+            "demo",
+            "--limit",
+            "20",
+            "--output",
+            "pending-translations.json",
+            "--json",
+        ]
+    )
+
+    assert namespace_optional_str(all_args, "game") == "demo"
+    assert namespace_optional_str(all_args, "output") == "pending-translations.json"
+    assert getattr(all_args, "json_output") is True
+    assert namespace_optional_str(limited_args, "game") == "demo"
+    assert getattr(limited_args, "limit") == 20
+
+
+def test_report_output_can_leave_data_output_file_untouched(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    """业务数据导出命令打印报告时不得覆盖自己的输出文件。"""
+    output_path = tmp_path / "pending-translations.json"
+    data_json = '{"entry": {"translation_lines": []}}\n'
+    _ = output_path.write_text(data_json, encoding="utf-8")
+    report = AgentReport(status="ok", summary={"exported_item_count": 1})
+
+    write_report_outputs(
+        report=report,
+        args=Namespace(output=str(output_path), json_output=True),
+        title="人工补译导出报告",
+        write_output_file=False,
+    )
+
+    captured = capsys.readouterr()
+    raw_payload = cast(object, json.loads(captured.out))
+    payload = ensure_json_object(coerce_json_value(raw_payload), "CLI JSON 输出")
+    assert payload["status"] == "ok"
+    assert output_path.read_text(encoding="utf-8") == data_json
+
+
+def test_placeholder_rule_build_report_can_leave_rule_file_untouched(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    """占位符规则草稿命令打印报告时不得覆盖规则文件。"""
+    output_path = tmp_path / "placeholder-rules.json"
+    rules_json = '{"(?i)\\\\A<tag>\\\\Z": "[CUSTOM_TAG_1]"}\n'
+    _ = output_path.write_text(rules_json, encoding="utf-8")
+    report = AgentReport(status="ok", summary={"draft_rule_count": 1})
+
+    write_report_outputs(
+        report=report,
+        args=Namespace(output=str(output_path), json_output=True),
+        title="占位符规则草稿报告",
+        write_output_file=False,
+    )
+
+    captured = capsys.readouterr()
+    raw_payload = cast(object, json.loads(captured.out))
+    payload = ensure_json_object(coerce_json_value(raw_payload), "CLI JSON 输出")
+    assert payload["status"] == "ok"
+    assert output_path.read_text(encoding="utf-8") == rules_json

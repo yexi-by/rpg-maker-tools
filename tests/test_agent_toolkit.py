@@ -10,7 +10,7 @@ from app.agent_toolkit import AgentToolkitService
 from app.llm import LLMHandler
 from app.persistence import GameRegistry
 from app.rmmz.json_types import coerce_json_value, ensure_json_array, ensure_json_object
-from app.rmmz.schema import TranslationErrorItem, TranslationItem
+from app.rmmz.schema import PluginTextRuleRecord, TranslationErrorItem, TranslationItem
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_SETTING_PATH = ROOT / "setting.example.toml"
@@ -163,17 +163,136 @@ async def test_manual_pending_translation_export_and_import(
             break
     assert target_path
     _ = pending_path.write_text(json.dumps({target_path: payload[target_path]}, ensure_ascii=False, indent=2), encoding="utf-8")
+    async with await registry.open_game("テストゲーム") as session:
+        run_record = await session.start_translation_run(
+            total_extracted=10,
+            pending_count=10,
+            deduplicated_count=10,
+            batch_count=1,
+        )
+        await session.write_translation_quality_errors(
+            run_record.run_id,
+            [
+                TranslationErrorItem(
+                    location_path=target_path,
+                    item_type="short_text",
+                    role=None,
+                    original_lines=["こんにちは"],
+                    translation_lines=[],
+                    error_type="AI漏翻",
+                    error_detail=["人工补译前的历史错误"],
+                    model_response='{"bad": true}',
+                )
+            ],
+        )
+
+    import_report = await service.import_manual_translations(
+        game_title="テストゲーム",
+        input_path=pending_path,
+    )
+    status_report = await service.translation_status(game_title="テストゲーム")
+    quality_report = await service.quality_report(game_title="テストゲーム")
+
+    assert import_report.status == "ok"
+    assert status_report.summary["pending_count"] == quality_report.summary["pending_count"]
+    assert status_report.summary["run_pending_count"] == 10
+    assert status_report.summary["quality_error_count"] == 0
+    assert status_report.summary["run_quality_error_count"] == 1
+    assert quality_report.summary["quality_error_count"] == 0
+    assert quality_report.summary["run_quality_error_count"] == 1
+    async with await registry.open_game("テストゲーム") as session:
+        translated_items = await session.read_translated_items()
+    translated_by_path = {item.location_path: item for item in translated_items}
+    assert translated_by_path[target_path].translation_lines == ["你好"]
+
+
+@pytest.mark.asyncio
+async def test_agent_reports_ignore_stale_plugin_rules(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Agent 工具包与主翻译流程一样跳过过期插件规则，避免生成假 pending。"""
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    async with await registry.open_game("テストゲーム") as session:
+        await session.replace_plugin_text_rules(
+            [
+                PluginTextRuleRecord(
+                    plugin_index=0,
+                    plugin_name="TestPlugin",
+                    plugin_hash="stale-hash",
+                    path_templates=["$['parameters']['Message']"],
+                )
+            ]
+        )
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    pending_path = tmp_path / "pending-translations.json"
+
+    quality_report = await service.quality_report(game_title="テストゲーム")
+    export_report = await service.export_pending_translations(
+        game_title="テストゲーム",
+        output_path=pending_path,
+        limit=None,
+    )
+
+    payload = load_json_object(pending_path)
+    warning_codes = {warning.code for warning in quality_report.warnings}
+    assert quality_report.summary["plugin_rule_count"] == 0
+    assert quality_report.summary["stale_plugin_rule_count"] == 1
+    assert "stale_plugin_rules" in warning_codes
+    assert export_report.status in {"ok", "warning"}
+    assert all(not location_path.startswith("plugins.js/") for location_path in payload)
+
+
+@pytest.mark.asyncio
+async def test_manual_long_text_import_splits_overwide_lines(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """人工补译 long_text 入库前会按当前行宽配置自动拆短。"""
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    setting_path = tmp_path / "setting.toml"
+    setting_text = EXAMPLE_SETTING_PATH.read_text(encoding="utf-8")
+    setting_text = setting_text.replace("long_text_line_width_limit = 26", "long_text_line_width_limit = 3")
+    setting_text = setting_text.replace(
+        'system_prompt_file = "prompts/text_translation_system.md"',
+        f'system_prompt_file = "{(ROOT / "prompts" / "text_translation_system.md").as_posix()}"',
+    )
+    _ = setting_path.write_text(setting_text, encoding="utf-8")
+    service = AgentToolkitService(game_registry=registry, setting_path=setting_path)
+    pending_path = tmp_path / "pending-translations.json"
+
+    export_report = await service.export_pending_translations(
+        game_title="テストゲーム",
+        output_path=pending_path,
+        limit=None,
+    )
+    payload = load_json_object(pending_path)
+    target_path = ""
+    for location_path, raw_entry in payload.items():
+        entry = ensure_json_object(coerce_json_value(raw_entry), location_path)
+        if entry["item_type"] == "long_text":
+            target_path = location_path
+            entry["translation_lines"] = ["甲乙丙丁戊己庚辛"]
+            _ = pending_path.write_text(
+                json.dumps({target_path: entry}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            break
 
     import_report = await service.import_manual_translations(
         game_title="テストゲーム",
         input_path=pending_path,
     )
 
+    assert export_report.status == "ok"
+    assert target_path
     assert import_report.status == "ok"
     async with await registry.open_game("テストゲーム") as session:
         translated_items = await session.read_translated_items()
     translated_by_path = {item.location_path: item for item in translated_items}
-    assert translated_by_path[target_path].translation_lines == ["你好"]
+    assert translated_by_path[target_path].translation_lines == ["甲乙丙", "丁戊己", "庚辛"]
 
 
 @pytest.mark.asyncio
@@ -241,6 +360,48 @@ async def test_validate_event_command_rules_previews_direct_parameter_write_back
     preview = ensure_json_object(report.details["write_back_preview"], "write_back_preview")
     assert preview["status"] == "ok"
     assert preview["checked_item_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_validate_event_command_rules_reports_hits_per_rule(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """事件指令规则报告按规则组统计命中数量，避免把总命中数写到每条规则。"""
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    rules_text = json.dumps(
+        {
+            "357": [
+                {
+                    "match": {"0": "TestPlugin", "1": "Show"},
+                    "paths": ["$['parameters'][3]['message']"],
+                },
+                {
+                    "match": {"0": "ComplexPlugin", "1": "ShowWindow"},
+                    "paths": [
+                        "$['parameters'][3]['window']['title']",
+                        "$['parameters'][3]['choices'][*]",
+                    ],
+                },
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+    report = await service.validate_event_command_rules(
+        game_title="テストゲーム",
+        rules_text=rules_text,
+    )
+
+    assert report.status == "ok"
+    rule_details = ensure_json_array(report.details["rules"], "rules")
+    hit_counts = [
+        ensure_json_object(coerce_json_value(raw_detail), f"rules[{index}]")["hit_count"]
+        for index, raw_detail in enumerate(rule_details)
+    ]
+    assert hit_counts == [1, 3]
 
 
 @pytest.mark.asyncio

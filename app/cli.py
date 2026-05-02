@@ -289,16 +289,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     export_pending_parser = subparsers.add_parser(
         "export-pending-translations",
-        help="导出尚未成功入库的少量正文条目，供 Agent 人工补译",
+        help="导出尚未成功入库的正文条目；不传 --limit 时导出全部",
     )
     add_optional_target_arguments(export_pending_parser)
     _ = export_pending_parser.add_argument("--output", required=True, help="人工补译 JSON 输出文件")
-    _ = export_pending_parser.add_argument("--limit", type=int, help="最多导出的待补译条目数")
+    _ = export_pending_parser.add_argument("--limit", type=int, help="最多导出的待补译条目数；省略则导出全部")
     _ = export_pending_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+
+    export_untranslated_parser = subparsers.add_parser(
+        "export-untranslated-translations",
+        help="一键导出全部尚未成功入库的正文原文结构，供 Agent 填写 translation_lines",
+    )
+    add_optional_target_arguments(export_untranslated_parser)
+    _ = export_untranslated_parser.add_argument("--output", required=True, help="全部未翻译正文 JSON 输出文件")
+    _ = export_untranslated_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
     import_manual_parser = subparsers.add_parser(
         "import-manual-translations",
-        help="导入 Agent 人工补齐的正文译文并写入当前游戏数据库",
+        help="导入 Agent 人工补齐的正文译文，校验并按行宽规范化 long_text 后写入当前游戏数据库",
     )
     add_optional_target_arguments(import_manual_parser)
     _ = import_manual_parser.add_argument("--input", required=True, help="已填写的人工补译 JSON 文件")
@@ -547,6 +555,8 @@ async def dispatch_command(args: argparse.Namespace) -> int:
         return await run_quality_report_command(args)
     if command == "export-pending-translations":
         return await run_export_pending_translations_command(args)
+    if command == "export-untranslated-translations":
+        return await run_export_untranslated_translations_command(args)
     if command == "import-manual-translations":
         return await run_import_manual_translations_command(args)
     if command == "translation-status":
@@ -706,7 +716,7 @@ async def run_build_placeholder_rules_command(args: argparse.Namespace) -> int:
     output_path = read_required_path_arg(args, "output")
     service = AgentToolkitService()
     report = await service.build_placeholder_rules(game_title=game_title, output_path=output_path)
-    write_report_outputs(report=report, args=args, title="占位符规则草稿报告")
+    write_report_outputs(report=report, args=args, title="占位符规则草稿报告", write_output_file=False)
     return 1 if report.status == "error" else 0
 
 
@@ -793,7 +803,21 @@ async def run_export_pending_translations_command(args: argparse.Namespace) -> i
         output_path=output_path,
         limit=limit,
     )
-    write_report_outputs(report=report, args=args, title="人工补译导出报告")
+    write_report_outputs(report=report, args=args, title="人工补译导出报告", write_output_file=False)
+    return 1 if report.status == "error" else 0
+
+
+async def run_export_untranslated_translations_command(args: argparse.Namespace) -> int:
+    """执行 `export-untranslated-translations` 命令。"""
+    game_title = await resolve_target_game_title(args)
+    output_path = read_required_path_arg(args, "output")
+    service = AgentToolkitService()
+    report = await service.export_pending_translations(
+        game_title=game_title,
+        output_path=output_path,
+        limit=None,
+    )
+    write_report_outputs(report=report, args=args, title="全部未翻译正文导出报告", write_output_file=False)
     return 1 if report.status == "error" else 0
 
 
@@ -1067,9 +1091,15 @@ def build_translation_run_limits(args: argparse.Namespace) -> TranslationRunLimi
     )
 
 
-def write_report_outputs(*, report: AgentReport, args: argparse.Namespace, title: str) -> None:
+def write_report_outputs(
+    *,
+    report: AgentReport,
+    args: argparse.Namespace,
+    title: str,
+    write_output_file: bool = True,
+) -> None:
     """按用户参数输出 Agent 工具包报告。"""
-    output_path = read_optional_path_arg(args, "output")
+    output_path = read_optional_path_arg(args, "output") if write_output_file else None
     json_text = report.to_json_text()
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
