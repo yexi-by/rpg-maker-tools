@@ -56,11 +56,11 @@ uv run python main.py --agent-mode write-back --game <游戏标题> --json
 `translate` 返回 0 表示本轮命令正常结束，不代表所有条目都成功。失败条目、pending 和质量风险由 `translation-status`、`quality-report` 和人工补译命令处理，禁止绕过 CLI 直接修改数据库。
 `translation-status --json` 的 `pending_count` 表示当前数据库实时未翻译数，`run_pending_count` 表示最近一次运行开始时的待处理数。
 
-## Claude Code 自动翻译示范
+## Agent 自动翻译示范（以 Claude Code 为例）
 
-下面示范面向第一次使用的 Agent 操作者。核心思路是：先让 Claude Code 读取本项目 Skill，再由它按 CLI 协议准备工作区、分析规则、小批量翻译、质量检查、补译和写回。
+下面示范面向第一次使用的 Agent 操作者。A.T.T MZ 不绑定某一个 Agent；Codex、Claude Code 或其他能读取项目文件并运行命令的工具都可以使用。核心思路是：先让 Agent 读取本项目 Skill，再由它按 CLI 协议准备工作区、分析规则、小批量翻译、质量检查、补译和写回。
 
-友情提示：Windows 终端容易把中日文和控制符显示成乱码。启动 Claude Code 前，先在同一个 PowerShell 会话里设置 UTF-8：
+友情提示：Windows 终端容易把中日文和控制符显示成乱码。启动 Agent 前，先在同一个 PowerShell 会话里设置 UTF-8：
 
 ```powershell
 cd <项目目录>
@@ -73,16 +73,16 @@ $env:LANG = "C.UTF-8"
 $env:LC_ALL = "C.UTF-8"
 ```
 
-然后在项目目录启动 Claude Code：
+然后用你熟悉的 Agent 打开项目目录。下面仅以 Claude Code 为例：
 
 ```powershell
 claude --permission-mode bypassPermissions
 ```
 
-进入交互界面后，可以提交类似下面的任务说明：
+如果使用 Codex 或其他 Agent，按对应工具的 Skill 使用方式加载 `skills/att-mz`，或在任务说明中要求它读取 `<项目目录>/skills/att-mz/SKILL.md`。进入交互界面后，可以提交类似下面的任务说明：
 
 ```text
-请使用本项目的 skills/att-mz/SKILL.md 执行 RPG Maker MZ 游戏自动翻译。
+请使用 <项目目录>/skills/att-mz/SKILL.md 执行 RPG Maker MZ 游戏自动翻译。
 
 项目目录：<项目目录>
 游戏目录：<游戏目录>
@@ -99,7 +99,7 @@ claude --permission-mode bypassPermissions
 8. 最终写回前先向我确认；我确认后再执行 write-back --json。
 ```
 
-新手建议先让 Agent 跑到小批量质量报告为止，确认没有占位符、乱码、超宽行和日文残留问题后，再让它继续全量翻译。若 Claude Code 输出出现乱码，先停止当前阶段，重新设置 UTF-8 后再重跑相关命令，不要基于乱码内容修译文或规则。
+新手建议先让 Agent 跑到小批量质量报告为止，确认没有占位符、乱码、超宽行和日文残留问题后，再让它继续全量翻译。若 Agent 输出出现乱码，先停止当前阶段，重新设置 UTF-8 后再重跑相关命令，不要基于乱码内容修译文或规则。
 
 ## 外部分析数据
 

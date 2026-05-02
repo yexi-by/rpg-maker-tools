@@ -1,6 +1,6 @@
 # A.T.T MZ
 
-A.T.T MZ 是面向 RPG Maker MZ 日文游戏的自动汉化工具。新手只需要准备一个游戏目录、一个 OpenAI 兼容模型服务，然后让 Claude Code 按本项目 Skill 执行流程：分析规则、翻译、检查质量、写回游戏，最后运行汉化后的游戏。
+A.T.T MZ 是面向 RPG Maker MZ 日文游戏的自动汉化工具。新手只需要准备一个游戏目录、一个 OpenAI 兼容模型服务，以及一个能读取项目文件并运行命令的 Agent，例如 Codex、Claude Code 或其他同类工具。Agent 按本项目 Skill 执行流程：分析规则、翻译、检查质量、写回游戏，最后运行汉化后的游戏。
 
 进阶命令、Agent 协议和人工补译细节见：[进阶使用技术文档](docs/advanced-usage.md)。
 
@@ -9,7 +9,7 @@ A.T.T MZ 是面向 RPG Maker MZ 日文游戏的自动汉化工具。新手只需
 - Windows PowerShell。
 - Python 3.14+。
 - `uv`。
-- Claude Code。
+- 一个能读取本项目文件并运行终端命令的 Agent。
 - OpenAI 兼容格式的模型服务地址和 API Key。
 - 一个 RPG Maker MZ 游戏目录，目录里通常能看到 `Game.exe`、`data/`、`js/`。
 
@@ -45,9 +45,21 @@ $env:RPG_MAKER_TOOLS_LLM_API_KEY = "<API_KEY>"
 
 如果你的模型服务、模型名称或超时时间需要调整，编辑 `<项目目录>/setting.toml`。
 
-## 3. 启动前设置 UTF-8
+## 3. 让 Agent 能读取 Skill
 
-友情提示：游戏文本里经常同时包含日文、中文和 RPG Maker 控制符。Windows 终端编码不对时，Claude Code 可能看到乱码并误判文本。启动 Claude Code 前，先在同一个 PowerShell 会话里执行：
+本项目的 Agent 执行协议在：
+
+```text
+<项目目录>/skills/att-mz/SKILL.md
+```
+
+如果你的 Agent 支持安装 Skill，就按该 Agent 的安装方式加载 `skills/att-mz`。如果它不支持安装 Skill，也可以在任务说明里明确要求它读取 `<项目目录>/skills/att-mz/SKILL.md`，再按文档里的黑盒流程执行。
+
+换句话说，A.T.T MZ 不绑定某一个 Agent。Codex 用户按 Codex 的 Skill 使用方式处理，Claude Code 用户可以直接在项目目录里让 Claude Code 读取这份 Skill。
+
+## 4. 启动前设置 UTF-8
+
+友情提示：游戏文本里经常同时包含日文、中文和 RPG Maker 控制符。Windows 终端编码不对时，Agent 可能看到乱码并误判文本。启动 Agent 前，先在同一个 PowerShell 会话里执行：
 
 ```powershell
 $OutputEncoding = [System.Text.UTF8Encoding]::new()
@@ -67,18 +79,18 @@ uv run python main.py --agent-mode doctor --no-check-llm --json
 
 如果这一步返回 `status=error`，先按错误提示修环境。
 
-## 4. 启动 Claude Code
+## 5. 启动 Agent
 
-仍然停留在 `<项目目录>`，启动 Claude Code：
+使用你熟悉的 Agent 工具打开 `<项目目录>`，并确保它能运行终端命令。下面仅以 Claude Code 为例：
 
 ```powershell
 claude --permission-mode bypassPermissions
 ```
 
-进入 Claude Code 交互界面后，提交下面的任务说明。把 `<游戏目录>` 和 `<工作区>` 换成你自己的目录；`<工作区>` 建议放在游戏目录旁边或游戏目录内的临时文件夹。
+如果使用 Codex 或其他 Agent，按对应工具的方式打开这个项目，然后提交同一份任务说明即可。把 `<游戏目录>` 和 `<工作区>` 换成你自己的目录；`<工作区>` 建议放在游戏目录旁边或游戏目录内的临时文件夹。
 
 ```text
-请使用本项目的 skills/att-mz/SKILL.md 自动汉化这个 RPG Maker MZ 游戏。
+请使用 <项目目录>/skills/att-mz/SKILL.md 自动汉化这个 RPG Maker MZ 游戏。
 
 项目目录：<项目目录>
 游戏目录：<游戏目录>
@@ -96,15 +108,15 @@ claude --permission-mode bypassPermissions
 9. 写回完成后告诉我如何启动汉化后的游戏。
 ```
 
-Claude Code 会在过程中运行 `add-game`，并从游戏数据中识别 `<游戏标题>`。之后它会使用 `<游戏标题>` 调用后续命令。
+Agent 会在过程中运行 `add-game`，并从游戏数据中识别 `<游戏标题>`。之后它会使用 `<游戏标题>` 调用后续命令。
 
-## 5. 确认写回
+## 6. 确认写回
 
-当 Claude Code 告诉你 `quality-report --json` 已经没有阻断问题，并询问是否执行 `write-back` 时，确认后再让它继续。
+当 Agent 告诉你 `quality-report --json` 已经没有阻断问题，并询问是否执行 `write-back` 时，确认后再让它继续。
 
 写回完成后，游戏目录会被更新为汉化文本。工具会尽量保留原始数据备份；但新手仍建议使用复制出来的游戏目录操作。
 
-## 6. 运行汉化游戏
+## 7. 运行汉化游戏
 
 写回完成后，进入 `<游戏目录>`，运行游戏启动程序：
 
@@ -112,7 +124,7 @@ Claude Code 会在过程中运行 `add-game`，并从游戏数据中识别 `<游
 Start-Process -FilePath "<游戏目录>/Game.exe"
 ```
 
-如果游戏启动后仍显示日文，先让 Claude Code 重新运行：
+如果游戏启动后仍显示日文，先让 Agent 重新运行：
 
 ```powershell
 uv run python main.py --agent-mode quality-report --game <游戏标题> --json
