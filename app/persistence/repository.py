@@ -16,6 +16,7 @@ from app.rmmz.schema import (
     EventCommandParameterFilter,
     EventCommandTextRuleRecord,
     ErrorType,
+    FontReplacementRecord,
     GameData,
     JapaneseResidualRuleRecord,
     LlmFailureCategory,
@@ -43,6 +44,7 @@ from .sql import (
     CREATE_EVENT_COMMAND_TEXT_RULE_FILTERS_TABLE,
     CREATE_EVENT_COMMAND_TEXT_RULE_GROUPS_TABLE,
     CREATE_EVENT_COMMAND_TEXT_RULE_PATHS_TABLE,
+    CREATE_FONT_REPLACEMENT_RECORDS_TABLE,
     CREATE_JAPANESE_RESIDUAL_RULES_TABLE,
     CREATE_LLM_FAILURES_TABLE,
     CREATE_METADATA_TABLE,
@@ -56,6 +58,7 @@ from .sql import (
     DELETE_ALL_EVENT_COMMAND_TEXT_RULE_FILTERS,
     DELETE_ALL_EVENT_COMMAND_TEXT_RULE_GROUPS,
     DELETE_ALL_EVENT_COMMAND_TEXT_RULE_PATHS,
+    DELETE_ALL_FONT_REPLACEMENT_RECORDS,
     DELETE_ALL_JAPANESE_RESIDUAL_RULES,
     DELETE_ALL_NAME_CONTEXT_TERMS,
     DELETE_ALL_NOTE_TAG_TEXT_RULES,
@@ -67,6 +70,7 @@ from .sql import (
     INSERT_EVENT_COMMAND_TEXT_RULE_FILTER,
     INSERT_EVENT_COMMAND_TEXT_RULE_GROUP,
     INSERT_EVENT_COMMAND_TEXT_RULE_PATH,
+    INSERT_FONT_REPLACEMENT_RECORD,
     INSERT_JAPANESE_RESIDUAL_RULE,
     INSERT_LLM_FAILURE,
     INSERT_NAME_CONTEXT_TERM,
@@ -77,6 +81,7 @@ from .sql import (
     INSERT_TRANSLATION,
     METADATA_KEY,
     SELECT_LATEST_TRANSLATION_RUN,
+    SELECT_FONT_REPLACEMENT_RECORDS,
     SELECT_JAPANESE_RESIDUAL_RULES,
     SELECT_LLM_FAILURES_BY_RUN,
     SELECT_EVENT_COMMAND_TEXT_RULE_FILTERS,
@@ -146,6 +151,7 @@ async def create_static_tables(connection: aiosqlite.Connection) -> None:
     _ = await connection.execute(CREATE_NAME_CONTEXT_TERMS_TABLE)
     _ = await connection.execute(CREATE_PLACEHOLDER_RULES_TABLE)
     _ = await connection.execute(CREATE_JAPANESE_RESIDUAL_RULES_TABLE)
+    _ = await connection.execute(CREATE_FONT_REPLACEMENT_RECORDS_TABLE)
     _ = await connection.execute(CREATE_TRANSLATION_RUNS_TABLE)
     _ = await connection.execute(CREATE_LLM_FAILURES_TABLE)
     _ = await connection.execute(CREATE_TRANSLATION_QUALITY_ERRORS_TABLE)
@@ -627,6 +633,50 @@ class TargetGameSession:
             )
             for row in rows
         ]
+
+    async def replace_font_replacement_records(
+        self,
+        records: Sequence[FontReplacementRecord],
+    ) -> None:
+        """用本次字体覆盖记录替换当前游戏的可还原字体记录。"""
+        _ = await self.connection.execute(DELETE_ALL_FONT_REPLACEMENT_RECORDS)
+        if records:
+            serialized_records = [
+                (
+                    record.file_name,
+                    record.value_path,
+                    record.original_text,
+                    record.replaced_text,
+                    record.replacement_font_name,
+                )
+                for record in records
+            ]
+            _ = await self.connection.executemany(
+                INSERT_FONT_REPLACEMENT_RECORD,
+                serialized_records,
+            )
+        await self.connection.commit()
+
+    async def read_font_replacement_records(self) -> list[FontReplacementRecord]:
+        """读取当前游戏最近一次字体覆盖产生的可还原记录。"""
+        async with self.connection.execute(SELECT_FONT_REPLACEMENT_RECORDS) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            FontReplacementRecord(
+                file_name=row_str(row, "file_name", self.db_path),
+                value_path=row_str(row, "value_path", self.db_path),
+                original_text=row_str(row, "original_text", self.db_path),
+                replaced_text=row_str(row, "replaced_text", self.db_path),
+                replacement_font_name=row_str(row, "replacement_font_name", self.db_path),
+            )
+            for row in rows
+        ]
+
+    async def clear_font_replacement_records(self) -> int:
+        """清空当前游戏已经完成还原的字体覆盖记录。"""
+        cursor = await self.connection.execute(DELETE_ALL_FONT_REPLACEMENT_RECORDS)
+        await self.connection.commit()
+        return max(cursor.rowcount, 0)
 
     async def start_translation_run(
         self,

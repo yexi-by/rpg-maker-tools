@@ -20,6 +20,7 @@ system_prompt_file = "prompts/text_translation_system.md"
 default_command_codes = [357]
 
 [write_back]
+# 仅在 CLI 显式传入 --confirm-font-overwrite 时使用；普通写回不会覆盖字体引用。
 replacement_font_path = "fonts/NotoSansSC-Regular.ttf"
 
 [text_rules]

@@ -58,6 +58,14 @@ uv run python main.py --agent-mode write-back --game <游戏标题> --json
 `translate` 返回 0 表示本轮命令正常结束，不代表所有文本都已经成功保存译文。没成功保存译文的文本和检查没通过的译文由 `translation-status`、`quality-report` 和手动填写译文表命令处理，禁止绕过 CLI 直接修改数据库。
 `translation-status --json` 的 `pending_count` 表示当前还有多少文本没成功保存译文，`run_pending_count` 表示最近一次运行开始时有多少文本需要处理。
 
+普通 `write-back` 只把译文写进游戏文件，不覆盖字体引用。只有用户明确允许字体覆盖时，才可以在最终写回命令里追加 `--confirm-font-overwrite`。如果需要还原曾经由项目覆盖过的字体引用，使用：
+
+```powershell
+uv run python main.py --agent-mode restore-font --game <游戏标题> --json
+```
+
+字体还原只使用项目先前记录过的字段位置和原始值；没有记录时不会猜测原字体。
+
 ## Agent 自动翻译示范（以 Claude Code 为例）
 
 下面示范面向第一次使用的 Agent 操作者。A.T.T MZ 不绑定某一个 Agent；Codex、Claude Code 或其他能读取项目文件并运行命令的工具都可以使用。核心思路是：先让 Agent 读取本项目 Skill，再由它按 CLI 协议准备工作区、分析规则、小批量翻译、质量检查、手动填写失败译文和写回。
@@ -99,6 +107,7 @@ claude --permission-mode bypassPermissions
 6. 如果还有没成功保存译文的文本，使用 export-untranslated-translations 导出完整译文表，只填写 translation_lines，也就是中文译文行。
 7. 不直接修改数据库，不跳过 validate，不在 quality-report 报告错误时执行 write-back，也就是把译文写进游戏文件。
 8. 最终写回前先向我确认；我确认后再执行 write-back --json。
+9. 除非我单独明确允许覆盖字体，否则不要添加 --confirm-font-overwrite。
 ```
 
 新手建议先让 Agent 跑到小批量质量报告为止，确认没有占位符、乱码、超宽行和日文残留问题后，再让它继续全量翻译。若 Agent 输出出现乱码，先停止当前阶段，重新设置 UTF-8 后再重跑相关命令，不要基于乱码内容修译文或规则。

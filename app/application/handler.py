@@ -11,11 +11,16 @@ from pathlib import Path
 from typing import Self
 
 from app.application.file_writer import reset_writable_copies, write_game_files
-from app.application.font_replacement import apply_font_replacement
+from app.application.font_replacement import (
+    apply_font_replacement,
+    build_empty_font_replacement_summary,
+    restore_font_references,
+)
 from app.application.runtime import load_runtime_setting
 from app.application.summaries import (
     EventCommandJsonExportSummary,
     EventCommandRuleImportSummary,
+    FontRestoreSummary,
     NameContextImportSummary,
     NameContextWriteSummary,
     NoteTagJsonExportSummary,
@@ -658,6 +663,7 @@ class TranslationHandler:
         game_title: str,
         callbacks: tuple[Callable[[int, int], None], Callable[[int], None]],
         setting_overrides: SettingOverrides | None = None,
+        confirm_font_overwrite: bool = False,
     ) -> WriteBackSummary:
         """把数据库中的有效译文回写到游戏目录。"""
         async with await self.game_registry.open_game(game_title) as session:
@@ -704,11 +710,17 @@ class TranslationHandler:
                 session=session,
                 game_data=game_data,
             )
-            font_summary = apply_font_replacement(
-                game_data=game_data,
-                game_root=session.game_path,
-                replacement_font_path=setting.write_back.replacement_font_path,
-            )
+            font_summary = build_empty_font_replacement_summary()
+            if confirm_font_overwrite:
+                font_summary = apply_font_replacement(
+                    game_data=game_data,
+                    game_root=session.game_path,
+                    replacement_font_path=setting.write_back.replacement_font_path,
+                )
+                if font_summary.target_font_name is not None:
+                    await session.replace_font_replacement_records(font_summary.records)
+            elif setting.write_back.replacement_font_path is not None:
+                logger.info(f"[tag.skip]未确认覆盖字体，已跳过字体替换[/tag.skip] 游戏 [tag.count]{game_title}[/tag.count]")
 
             write_game_files(game_data=game_data, game_root=session.game_path)
             if font_summary.target_font_name is not None:
@@ -765,6 +777,7 @@ class TranslationHandler:
         game_title: str,
         callbacks: tuple[Callable[[int, int], None], Callable[[int], None]],
         setting_overrides: SettingOverrides | None = None,
+        confirm_font_overwrite: bool = False,
     ) -> NameContextWriteSummary:
         """根据数据库中的术语表写回 `101` 名字框与地图显示名。"""
         async with await self.game_registry.open_game(game_title) as session:
@@ -794,16 +807,48 @@ class TranslationHandler:
             written_count = apply_name_context_translations(game_data, registry)
             set_progress(0, max(written_count, 1))
             advance_progress(written_count)
-            font_summary = apply_font_replacement(
-                game_data=game_data,
-                game_root=session.game_path,
-                replacement_font_path=setting.write_back.replacement_font_path,
-            )
+            font_summary = build_empty_font_replacement_summary()
+            if confirm_font_overwrite:
+                font_summary = apply_font_replacement(
+                    game_data=game_data,
+                    game_root=session.game_path,
+                    replacement_font_path=setting.write_back.replacement_font_path,
+                )
+                if font_summary.target_font_name is not None:
+                    await session.replace_font_replacement_records(font_summary.records)
+            elif setting.write_back.replacement_font_path is not None:
+                logger.info(f"[tag.skip]未确认覆盖字体，已跳过字体替换[/tag.skip] 游戏 [tag.count]{game_title}[/tag.count]")
             write_game_files(game_data=game_data, game_root=session.game_path)
             if font_summary.target_font_name is not None:
                 logger.info(f"[tag.phase]字体引用已同步[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] 目标字体 [tag.path]{font_summary.target_font_name}[/tag.path] 原字体 [tag.count]{font_summary.source_font_count}[/tag.count] 个，替换引用 [tag.count]{font_summary.replaced_reference_count}[/tag.count] 处")
             logger.success(f"[tag.success]标准名写回完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 写回 [tag.count]{written_count}[/tag.count] 条，保留已有正文译文 [tag.count]{len(translated_items)}[/tag.count] 条")
             return NameContextWriteSummary(written_count=written_count, preserved_translation_count=len(translated_items))
+
+    async def restore_font_replacement(self, game_title: str) -> FontRestoreSummary:
+        """按最近一次字体覆盖记录还原游戏数据中的字体引用。"""
+        async with await self.game_registry.open_game(game_title) as session:
+            records = await session.read_font_replacement_records()
+            if not records:
+                logger.warning(f"[tag.warning]没有可还原字体记录[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count]；项目不会猜测原字体")
+                return FontRestoreSummary(
+                    restored_record_count=0,
+                    restored_reference_count=0,
+                    target_font_name=None,
+                )
+
+            game_data = await self._load_session_game_data(session)
+            reset_writable_copies(game_data)
+            restored_count = restore_font_references(game_data=game_data, records=records)
+            write_game_files(game_data=game_data, game_root=session.game_path)
+            _ = await session.clear_font_replacement_records()
+            font_names = sorted({record.replacement_font_name for record in records})
+            target_font_name = "、".join(font_names) if font_names else None
+            logger.success(f"[tag.success]字体引用还原完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 还原字段 [tag.count]{restored_count}[/tag.count] 个")
+            return FontRestoreSummary(
+                restored_record_count=len(records),
+                restored_reference_count=restored_count,
+                target_font_name=target_font_name,
+            )
 
     async def _filter_writable_translation_items(
         self,
@@ -1341,6 +1386,7 @@ class TranslationHandler:
 __all__: list[str] = [
     "EventCommandJsonExportSummary",
     "EventCommandRuleImportSummary",
+    "FontRestoreSummary",
     "NameContextImportSummary",
     "NameContextWriteSummary",
     "PluginJsonExportSummary",

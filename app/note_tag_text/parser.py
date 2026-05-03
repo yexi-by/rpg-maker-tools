@@ -3,6 +3,8 @@
 import re
 from dataclasses import dataclass
 
+from app.rmmz.text_protocol import encode_visible_text_like, ensure_encoded_text_valid
+
 NOTE_TAG_PATTERN: re.Pattern[str] = re.compile(
     r"<(?P<tag>[^<>:\r\n]+)(?::(?P<value>[^<>]*))?>",
     re.DOTALL,
@@ -62,7 +64,16 @@ def replace_note_tag_value(note_text: str, tag_name: str, translated_text: str) 
     if match.value_span is None:
         raise ValueError(f"Note 标签没有可替换值: {tag_name}")
     start, end = match.value_span
-    return f"{note_text[:start]}{translated_text}{note_text[end:]}"
+    written_text = encode_visible_text_like(
+        original_raw_text=match.value,
+        translated_visible_text=translated_text,
+    )
+    ensure_encoded_text_valid(
+        original_raw_text=match.value,
+        written_raw_text=written_text,
+        context=f"Note 标签 {tag_name}",
+    )
+    return f"{note_text[:start]}{written_text}{note_text[end:]}"
 
 
 __all__: list[str] = [

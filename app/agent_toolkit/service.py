@@ -39,6 +39,7 @@ from app.plugin_text import (
     export_plugins_json_file,
     parse_plugin_rule_import_text,
 )
+from app.plugin_text.write_back import write_plugin_text
 from app.rmmz import DataTextExtraction
 from app.rmmz.control_codes import CustomPlaceholderRule
 from app.rmmz.schema import (
@@ -54,6 +55,7 @@ from app.rmmz.schema import (
     TranslationErrorItem,
     TranslationItem,
 )
+from app.rmmz.placeholder_guard import collect_internal_placeholder_tokens
 from app.rmmz.text_rules import JsonArray, JsonObject, JsonValue, TextRules
 from app.rmmz.json_types import coerce_json_value, ensure_json_array, ensure_json_object, ensure_json_string_list
 from app.rmmz.control_codes import ControlSequenceSpan
@@ -395,11 +397,18 @@ class AgentToolkitService:
         )
         placeholder_details = _collect_placeholder_risk_items(translated_items, text_rules)
         overwide_details = _collect_overwide_line_items(translated_items, text_rules)
+        write_back_protocol_details = _collect_write_back_protocol_items(
+            game_data=game_data,
+            items=translated_items,
+            active_paths=active_paths,
+            text_rules=text_rules,
+        )
         problem_paths = _collect_quality_fix_problem_paths(
             quality_error_items=quality_error_items,
             residual_details=residual_details,
             placeholder_details=placeholder_details,
             overwide_details=overwide_details,
+            write_back_protocol_details=write_back_protocol_details,
             active_paths=active_paths,
         )
         quality_errors_by_path = {
@@ -411,6 +420,7 @@ class AgentToolkitService:
             residual_details=residual_details,
             placeholder_details=placeholder_details,
             overwide_details=overwide_details,
+            write_back_protocol_details=write_back_protocol_details,
             active_paths=active_paths,
         )
         payload: JsonObject = {}
@@ -444,6 +454,7 @@ class AgentToolkitService:
                 "japanese_residual_count": _count_active_quality_details(residual_details, active_paths),
                 "placeholder_risk_count": _count_active_quality_details(placeholder_details, active_paths),
                 "overwide_line_count": _count_active_quality_details(overwide_details, active_paths),
+                "write_back_protocol_count": _count_active_quality_details(write_back_protocol_details, active_paths),
             },
             details={
                 "location_paths": _string_lines_to_json_array(problem_paths),
@@ -516,6 +527,12 @@ class AgentToolkitService:
         residual_count = len(residual_items)
         placeholder_risk_items = _collect_placeholder_risk_items(translated_items, text_rules)
         overwide_line_items = _collect_overwide_line_items(translated_items, text_rules)
+        write_back_protocol_items = _collect_write_back_protocol_items(
+            game_data=game_data,
+            items=translated_items,
+            active_paths=active_paths,
+            text_rules=text_rules,
+        )
         error_type_counts = Counter(item.error_type for item in quality_error_items)
         quality_error_details: JsonArray = []
         for item in quality_error_items:
@@ -550,6 +567,8 @@ class AgentToolkitService:
             warnings.append(issue("japanese_residual", f"发现 {residual_count} 条译文存在日文残留风险"))
         if overwide_line_items:
             errors.append(issue("overwide_line", f"发现 {len(overwide_line_items)} 行译文超过当前长文本宽度上限"))
+        if write_back_protocol_items:
+            errors.append(issue("write_back_protocol", f"发现 {len(write_back_protocol_items)} 条译文写回后会破坏游戏或插件解析协议"))
         if stale_paths:
             warnings.append(issue("stale_cache", f"发现 {len(stale_paths)} 条不在当前提取范围内的已保存译文"))
         if stale_plugin_rule_count:
@@ -582,6 +601,7 @@ class AgentToolkitService:
                 "japanese_residual_count": residual_count,
                 "placeholder_risk_count": len(placeholder_risk_items),
                 "overwide_line_count": len(overwide_line_items),
+                "write_back_protocol_count": len(write_back_protocol_items),
                 "writable_translation_count": len(translated_paths & active_paths),
             },
             details={
@@ -591,6 +611,7 @@ class AgentToolkitService:
                 "japanese_residual_items": residual_items,
                 "placeholder_risk_items": placeholder_risk_items,
                 "overwide_line_items": overwide_line_items,
+                "write_back_protocol_items": write_back_protocol_items,
             },
         )
 
@@ -1639,7 +1660,7 @@ class AgentToolkitService:
                     warnings.append(issue("placeholder_rules", "当前游戏尚未导入自定义占位符规则"))
                 font_path = setting.write_back.replacement_font_path
                 if font_path is not None and not Path(font_path).exists():
-                    warnings.append(issue("replacement_font", "配置的替换字体文件不存在"))
+                    warnings.append(issue("replacement_font", "配置的候选覆盖字体文件不存在"))
                 candidates = scan_placeholder_candidates(game_data, text_rules)
                 uncovered_count = count_uncovered_candidates(candidates)
                 summary["uncovered_placeholder_count"] = uncovered_count
@@ -1798,9 +1819,21 @@ def _append_check(details: JsonObject, name: str, status: str) -> None:
 
 
 COMMON_ESCAPE_SAMPLES: dict[str, str] = {
+    "\\\"": "裸 \\\" 双引号转义",
+    "\\'": "裸 \\' 单引号转义",
+    "\\/": "裸 \\/ 斜杠转义",
+    "\\?": "裸 \\? 问号转义",
+    "\\a": "裸 \\a 响铃转义",
+    "\\b": "裸 \\b 退格转义",
+    "\\f": "裸 \\f 换页转义",
     "\\n": "裸 \\n 换行标记",
     "\\r": "裸 \\r 回车标记",
     "\\t": "裸 \\t 制表标记",
+    "\\v": "裸 \\v 垂直制表转义",
+    "\\x41": "裸 \\xHH 十六进制转义",
+    "\\u3042": "裸 \\uXXXX Unicode 转义",
+    "\\U0001F600": "裸 \\UXXXXXXXX Unicode 转义",
+    "\\012": "裸八进制转义",
 }
 PLAIN_TEXT_RULE_SAMPLES: tuple[str, ...] = (
     "普通中文文本",
@@ -2017,13 +2050,14 @@ def _collect_quality_fix_problem_paths(
     residual_details: JsonArray,
     placeholder_details: JsonArray,
     overwide_details: JsonArray,
+    write_back_protocol_details: JsonArray,
     active_paths: set[str],
 ) -> list[str]:
     """按质量报告优先级收集需要导出的唯一定位路径。"""
     location_paths: list[str] = []
     for item in quality_error_items:
         _append_unique_active_path(location_paths, item.location_path, active_paths)
-    for details in (residual_details, placeholder_details, overwide_details):
+    for details in (residual_details, placeholder_details, overwide_details, write_back_protocol_details):
         for location_path in _location_paths_from_quality_details(details):
             _append_unique_active_path(location_paths, location_path, active_paths)
     return location_paths
@@ -2035,6 +2069,7 @@ def _build_quality_fix_categories_by_path(
     residual_details: JsonArray,
     placeholder_details: JsonArray,
     overwide_details: JsonArray,
+    write_back_protocol_details: JsonArray,
     active_paths: set[str],
 ) -> JsonObject:
     """建立质量修复条目到问题类型的映射，方便 Agent 分工处理。"""
@@ -2045,6 +2080,7 @@ def _build_quality_fix_categories_by_path(
     _append_quality_detail_categories(categories, residual_details, active_paths, "japanese_residual")
     _append_quality_detail_categories(categories, placeholder_details, active_paths, "placeholder_risk")
     _append_quality_detail_categories(categories, overwide_details, active_paths, "overwide_line")
+    _append_quality_detail_categories(categories, write_back_protocol_details, active_paths, "write_back_protocol")
     return {
         location_path: _string_lines_to_json_array(path_categories)
         for location_path, path_categories in categories.items()
@@ -2317,6 +2353,60 @@ def _build_write_back_probe_lines(item: TranslationItem) -> list[str]:
     return ["回写校验"]
 
 
+def _collect_write_back_protocol_items(
+    *,
+    game_data: GameData,
+    items: list[TranslationItem],
+    active_paths: set[str],
+    text_rules: TextRules,
+) -> JsonArray:
+    """在内存副本中预演写回，收集会破坏插件或事件解析结构的译文。"""
+    probe_items = [
+        item
+        for item in items
+        if item.location_path in active_paths
+        and _is_protocol_sensitive_translation_path(item.location_path)
+    ]
+    if not probe_items:
+        return []
+
+    reset_writable_copies(game_data)
+    try:
+        write_data_text(game_data, probe_items, text_rules=text_rules)
+        write_plugin_text(game_data, probe_items)
+        return []
+    except ValueError as error:
+        first_error = str(error)
+    finally:
+        reset_writable_copies(game_data)
+
+    details: JsonArray = []
+    for item in probe_items:
+        reset_writable_copies(game_data)
+        try:
+            write_data_text(game_data, [item], text_rules=text_rules)
+            write_plugin_text(game_data, [item])
+        except ValueError as error:
+            detail = _build_translation_item_quality_detail(item)
+            detail["reason"] = str(error)
+            details.append(detail)
+        finally:
+            reset_writable_copies(game_data)
+    if details:
+        return details
+
+    return [{"reason": first_error}]
+
+
+def _is_protocol_sensitive_translation_path(location_path: str) -> bool:
+    """判断路径是否属于需要二次解析或保留标签外壳的文本。"""
+    return (
+        location_path.startswith(f"{PLUGINS_FILE_NAME}/")
+        or "/parameters/" in location_path
+        or "/note/" in location_path
+    )
+
+
 def _count_name_variant_mismatches(speaker_names: dict[str, str]) -> int:
     """检查带冒号或声音后缀的名字译名是否延续本体译名。"""
     mismatch_count = 0
@@ -2368,6 +2458,15 @@ def _collect_placeholder_risk_items(items: list[TranslationItem], text_rules: Te
     """收集占位符数量或未知控制符存在风险的译文条目明细。"""
     details: JsonArray = []
     for item in items:
+        leaked_tokens = collect_internal_placeholder_tokens(
+            lines=item.translation_lines,
+            text_rules=text_rules,
+        )
+        if leaked_tokens:
+            detail = _build_translation_item_quality_detail(item)
+            detail["reason"] = f"译文残留项目内部占位符，不能写进游戏文件: {'、'.join(sorted(leaked_tokens))}"
+            details.append(detail)
+            continue
         cloned_item = item.model_copy(deep=True)
         try:
             cloned_item.build_placeholders(text_rules)

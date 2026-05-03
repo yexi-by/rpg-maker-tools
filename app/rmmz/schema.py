@@ -212,6 +212,16 @@ class JapaneseResidualRuleRecord(BaseModel):
     reason: str
 
 
+class FontReplacementRecord(BaseModel):
+    """一次字体覆盖写回中可安全还原的字段记录。"""
+
+    file_name: str
+    value_path: str
+    original_text: str
+    replaced_text: str
+    replacement_font_name: str
+
+
 class TranslationRunRecord(BaseModel):
     """正文翻译运行状态快照。"""
 
@@ -346,6 +356,7 @@ __all__: list[str] = [
     "EventCommandParameterFilter",
     "EventCommandTextRuleRecord",
     "FIXED_FILE_NAMES",
+    "FontReplacementRecord",
     "GameData",
     "ItemType",
     "JS_DIRECTORY_NAME",

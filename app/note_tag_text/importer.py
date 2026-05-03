@@ -10,6 +10,7 @@ from pydantic import TypeAdapter
 from app.note_tag_text.parser import iter_note_tag_matches
 from app.rmmz.schema import GameData, NoteTagTextRuleRecord
 from app.rmmz.text_rules import TextRules, coerce_json_value, get_default_text_rules
+from app.rmmz.text_protocol import normalize_visible_text_for_extraction
 
 type NoteTagRuleImportFile = dict[str, list[str]]
 _NOTE_TAG_RULE_IMPORT_ADAPTER: TypeAdapter[NoteTagRuleImportFile] = TypeAdapter(NoteTagRuleImportFile)
@@ -126,7 +127,10 @@ def _validate_note_tag_rule_hit(
         if not matches:
             continue
         hit_count += 1
-        normalized_value = text_rules.normalize_extraction_text(matches[0].value)
+        normalized_value = normalize_visible_text_for_extraction(
+            matches[0].value,
+            plain_text_normalizer=text_rules.normalize_extraction_text,
+        )
         if not normalized_value:
             continue
         if text_rules.should_translate_source_text(normalized_value):

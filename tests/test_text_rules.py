@@ -11,7 +11,7 @@ from app.config.custom_placeholder_rules import (
     load_custom_placeholder_rules_text,
 )
 from app.config.schemas import TextRulesSetting
-from app.rmmz.control_codes import CustomPlaceholderRule, LITERAL_LINE_BREAK_PLACEHOLDER
+from app.rmmz.control_codes import CustomPlaceholderRule, LITERAL_ESCAPE_PLACEHOLDERS, LITERAL_LINE_BREAK_PLACEHOLDER
 from app.rmmz.schema import TranslationItem
 from app.rmmz.text_rules import TextRules, get_default_text_rules
 
@@ -41,6 +41,20 @@ def test_text_rules_replace_and_restore_standard_rmmz_control_sequences() -> Non
         "\\FS[8]",
         "%9",
         "\\n",
+        "\\r",
+        "\\t",
+        "\\\"",
+        "\\'",
+        "\\/",
+        "\\?",
+        "\\a",
+        "\\b",
+        "\\f",
+        "\\v",
+        "\\x41",
+        "\\u3042",
+        "\\U0001F600",
+        "\\012",
     ]
     placeholders = [
         "[RMMZ_VARIABLE_1]",
@@ -64,6 +78,20 @@ def test_text_rules_replace_and_restore_standard_rmmz_control_sequences() -> Non
         "[RMMZ_FONT_SIZE_8]",
         "[RMMZ_MESSAGE_ARGUMENT_9]",
         LITERAL_LINE_BREAK_PLACEHOLDER,
+        LITERAL_ESCAPE_PLACEHOLDERS["\\r"],
+        LITERAL_ESCAPE_PLACEHOLDERS["\\t"],
+        LITERAL_ESCAPE_PLACEHOLDERS["\\\""],
+        LITERAL_ESCAPE_PLACEHOLDERS["\\'"],
+        LITERAL_ESCAPE_PLACEHOLDERS["\\/"],
+        LITERAL_ESCAPE_PLACEHOLDERS["\\?"],
+        LITERAL_ESCAPE_PLACEHOLDERS["\\a"],
+        LITERAL_ESCAPE_PLACEHOLDERS["\\b"],
+        LITERAL_ESCAPE_PLACEHOLDERS["\\f"],
+        LITERAL_ESCAPE_PLACEHOLDERS["\\v"],
+        "[RMMZ_LITERAL_HEX_ESCAPE_5C783431]",
+        "[RMMZ_LITERAL_UNICODE_ESCAPE_5C7533303432]",
+        "[RMMZ_LITERAL_UNICODE_ESCAPE_5C553030303146363030]",
+        "[RMMZ_LITERAL_OCTAL_ESCAPE_5C303132]",
     ]
     item = TranslationItem(
         location_path="Map001.json/1/0/0",

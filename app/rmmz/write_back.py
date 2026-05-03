@@ -5,9 +5,6 @@
 标准 RMMZ 数据与外部规则命中的事件指令参数，不处理任何非标准 JSON 文件。
 """
 
-import json
-from typing import cast
-
 from app.note_tag_text import replace_note_tag_value
 from app.rmmz.schema import (
     Code,
@@ -19,7 +16,14 @@ from app.rmmz.schema import (
     TROOPS_FILE_NAME,
     TranslationItem,
 )
-from app.rmmz.text_rules import JsonArray, JsonObject, JsonValue, TextRules, coerce_json_value, ensure_json_array, ensure_json_object
+from app.rmmz.placeholder_guard import ensure_no_internal_placeholder_tokens
+from app.rmmz.text_rules import JsonArray, JsonObject, JsonValue, TextRules, ensure_json_array, ensure_json_object
+from app.rmmz.text_protocol import (
+    decode_json_container_text,
+    encode_json_container_like,
+    encode_visible_text_like,
+    ensure_encoded_text_valid,
+)
 from app.translation.line_wrap import (
     normalize_translated_wrapping_punctuation,
     split_overwide_lines,
@@ -31,6 +35,11 @@ def write_data_text(game_data: GameData, items: list[TranslationItem], text_rule
     """将最终翻译文本写回 `data/` 目录游戏数据的内存副本。"""
     command_items: list[TranslationItem] = []
     for item in items:
+        ensure_no_internal_placeholder_tokens(
+            lines=item.translation_lines,
+            context=item.location_path,
+            text_rules=text_rules,
+        )
         file_name = item.location_path.split("/")[0]
         if file_name == PLUGINS_FILE_NAME:
             continue
@@ -327,6 +336,7 @@ def _write_event_command_text_item(command: JsonObject, item: TranslationItem, t
         current_value=parameters[param_index],
         path_parts=path_parts[2:],
         translated_text=translated_text,
+        context=item.location_path,
     )
 
 
@@ -431,12 +441,22 @@ def _set_event_command_value(
     current_value: JsonValue,
     path_parts: list[str],
     translated_text: str,
+    context: str,
 ) -> JsonValue:
     """按路径深入事件指令参数容器，并替换最终字符串叶子。"""
     if not path_parts:
         if not isinstance(current_value, str):
             raise ValueError("事件指令路径没有指向字符串叶子")
-        return translated_text
+        written_text = encode_visible_text_like(
+            original_raw_text=current_value,
+            translated_visible_text=translated_text,
+        )
+        ensure_encoded_text_valid(
+            original_raw_text=current_value,
+            written_raw_text=written_text,
+            context=context,
+        )
+        return written_text
 
     key = path_parts[0]
     remain_parts = path_parts[1:]
@@ -447,6 +467,7 @@ def _set_event_command_value(
             current_value=current_value[key],
             path_parts=remain_parts,
             translated_text=translated_text,
+            context=context,
         )
         return current_value
 
@@ -458,6 +479,7 @@ def _set_event_command_value(
             current_value=current_value[index],
             path_parts=remain_parts,
             translated_text=translated_text,
+            context=context,
         )
         return current_value
 
@@ -469,23 +491,24 @@ def _set_event_command_value(
             current_value=parsed_container,
             path_parts=path_parts,
             translated_text=translated_text,
+            context=context,
         )
-        return json.dumps(updated_value, ensure_ascii=False)
+        if not isinstance(updated_value, dict | list):
+            raise ValueError("事件指令 JSON 容器写回结果不是数组或对象")
+        return encode_json_container_like(
+            original_raw_text=current_value,
+            updated_value=updated_value,
+        )
 
     raise ValueError(f"事件指令路径无法继续下钻: {path_parts}")
 
 
 def _try_parse_container_text(value: str) -> dict[str, JsonValue] | list[JsonValue] | None:
     """尝试将字符串反序列化为 JSON 容器。"""
-    try:
-        decoded = cast(object, json.loads(value))
-        parsed = coerce_json_value(decoded)
-    except (json.JSONDecodeError, TypeError):
+    decoded = decode_json_container_text(value)
+    if decoded is None:
         return None
-
-    if isinstance(parsed, dict | list):
-        return parsed
-    return None
+    return decoded.value
 
 
 def _write_first_parameter(command: JsonObject, text: str) -> None:

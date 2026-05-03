@@ -8,9 +8,10 @@ import pytest
 
 from app.application.file_writer import reset_writable_copies
 from app.application.file_writer import write_game_files
-from app.application.font_replacement import apply_font_replacement
+from app.application.font_replacement import apply_font_replacement, restore_font_references
 from app.config.schemas import TextRulesSetting
-from app.note_tag_text import NoteTagTextExtraction
+from app.note_tag_text import NoteTagTextExtraction, build_note_tag_rule_records_from_import
+from app.note_tag_text.exporter import collect_note_tag_candidates
 from app.rmmz import DataTextExtraction, load_game_data
 from app.rmmz.control_codes import CustomPlaceholderRule
 from app.rmmz.schema import NoteTagTextRuleRecord, PLUGINS_FILE_NAME
@@ -154,6 +155,58 @@ async def test_note_tag_multiline_value_splits_overwide_lines_before_write_back(
 
 
 @pytest.mark.asyncio
+async def test_note_tag_json_string_leaf_uses_visible_text_protocol(minimal_game_dir: Path) -> None:
+    """Note 标签值如果带 JSON 字符串外壳，只翻玩家可见文本并按原结构写回。"""
+    items_path = minimal_game_dir / "data" / "Items.json"
+    raw_items = _read_test_json(items_path)
+    items = ensure_json_array(raw_items, "Items.json")
+    item = ensure_json_object(items[1], "Items.json[1]")
+    source_note = "\n　" + r"\C[2]詳細説明\C[0]\n次の行" + "　\n"
+    item["note"] = f"<拡張説明:{json.dumps(source_note, ensure_ascii=False)}>\n<upgrade:1,2,3>"
+    _rewrite_json(items_path, raw_items)
+
+    game_data = await load_game_data(minimal_game_dir)
+    candidates = collect_note_tag_candidates(
+        game_data=game_data,
+        text_rules=get_default_text_rules(),
+    )
+    candidate = next(
+        ensure_json_object(candidate_value, "note_tag_candidate")
+        for candidate_value in candidates
+        if isinstance(candidate_value, dict)
+        and candidate_value.get("file_name") == "Items.json"
+        and candidate_value.get("tag_name") == "拡張説明"
+    )
+    assert candidate["sample_values"] == [source_note]
+
+    rule_records = build_note_tag_rule_records_from_import(
+        game_data=game_data,
+        import_file={"Items.json": ["拡張説明"]},
+        text_rules=get_default_text_rules(),
+    )
+    note_items = NoteTagTextExtraction(
+        game_data=game_data,
+        rule_records=rule_records,
+        text_rules=get_default_text_rules(),
+    ).extract_all_text()["Items.json"].translation_items
+
+    assert note_items[0].original_lines == [source_note]
+
+    translated_note = "\n　" + r"\C[2]详细说明\C[0]\n下一行" + "　\n"
+    note_items[0].translation_lines = [translated_note]
+    reset_writable_copies(game_data)
+    write_data_text(game_data, [note_items[0]])
+
+    writable_items = ensure_json_array(game_data.writable_data["Items.json"], "Items.json")
+    writable_item = ensure_json_object(writable_items[1], "Items.json[1]")
+    writable_note = writable_item["note"]
+    assert isinstance(writable_note, str)
+    assert writable_note.endswith("\n<upgrade:1,2,3>")
+    tag_value = writable_note.removeprefix("<拡張説明:").split(">", maxsplit=1)[0]
+    assert json.loads(tag_value) == translated_note
+
+
+@pytest.mark.asyncio
 async def test_fixture_custom_control_sequences_can_be_protected(minimal_game_dir: Path) -> None:
     """测试夹具里的自定义控制符可通过外部规则保护。"""
     text_rules = TextRules.from_setting(
@@ -197,6 +250,23 @@ async def test_write_data_text_updates_writable_copy(minimal_game_dir: Path) -> 
     text_command = ensure_json_object(commands[1], "CommonEvents[1].list[1]")
     parameters = ensure_json_array(text_command["parameters"], "CommonEvents[1].list[1].parameters")
     assert parameters[0] == "你好"
+
+
+@pytest.mark.asyncio
+async def test_write_data_text_rejects_internal_placeholder_leak(minimal_game_dir: Path) -> None:
+    """正文写回前必须拒绝项目内部占位符。"""
+    game_data = await load_game_data(minimal_game_dir)
+    extracted = DataTextExtraction(game_data, get_default_text_rules()).extract_all_text()
+    item = next(
+        candidate
+        for candidate in extracted["CommonEvents.json"].translation_items
+        if candidate.location_path == "CommonEvents.json/1/0"
+    )
+    item.translation_lines = ["你好[RMMZ_TEXT_COLOR_0]"]
+
+    reset_writable_copies(game_data)
+    with pytest.raises(ValueError, match="译文残留项目内部占位符"):
+        write_data_text(game_data, [item])
 
 
 @pytest.mark.asyncio
@@ -658,6 +728,7 @@ async def test_font_replacement_updates_only_writable_outputs(
     assert summary.target_font_name == replacement_name
     assert summary.source_font_count == 2
     assert summary.replaced_reference_count == 5
+    assert len(summary.records) == 5
     serialized_system = json.dumps(game_data.writable_data["System.json"], ensure_ascii=False)
     serialized_plugins = str(game_data.writable_data[PLUGINS_FILE_NAME])
     assert old_font not in serialized_system
@@ -670,3 +741,15 @@ async def test_font_replacement_updates_only_writable_outputs(
     original_system = json.dumps(game_data.data["System.json"], ensure_ascii=False)
     assert old_font not in original_system
     assert another_font not in original_system
+
+    restored_count = restore_font_references(game_data=game_data, records=summary.records)
+
+    assert restored_count == len(summary.records)
+    restored_system = json.dumps(game_data.writable_data["System.json"], ensure_ascii=False)
+    restored_plugins = str(game_data.writable_data[PLUGINS_FILE_NAME])
+    assert old_font in restored_system
+    assert another_font in restored_system
+    assert old_font in restored_plugins
+    assert another_font in restored_plugins
+    assert Path(old_font).stem in restored_plugins
+    assert replacement_name not in restored_system

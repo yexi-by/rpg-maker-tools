@@ -104,8 +104,26 @@ SYMBOL_STANDARD_PLACEHOLDERS: dict[str, str] = {
     "<": "[RMMZ_INSTANT_TEXT_OFF]",
     "^": "[RMMZ_NO_WAIT]",
 }
-LITERAL_LINE_BREAK_MARKER = "\\n"
+LITERAL_LINE_BREAK_MARKER = r"\n"
 LITERAL_LINE_BREAK_PLACEHOLDER = "[RMMZ_LITERAL_LINE_BREAK]"
+LITERAL_ESCAPE_PLACEHOLDERS: dict[str, str] = {
+    "\\\"": "[RMMZ_LITERAL_DOUBLE_QUOTE]",
+    "\\'": "[RMMZ_LITERAL_SINGLE_QUOTE]",
+    r"\/": "[RMMZ_LITERAL_SLASH]",
+    r"\?": "[RMMZ_LITERAL_QUESTION_MARK]",
+    r"\a": "[RMMZ_LITERAL_BELL]",
+    r"\b": "[RMMZ_LITERAL_BACKSPACE]",
+    r"\f": "[RMMZ_LITERAL_FORM_FEED]",
+    r"\n": LITERAL_LINE_BREAK_PLACEHOLDER,
+    r"\r": "[RMMZ_LITERAL_CARRIAGE_RETURN]",
+    r"\t": "[RMMZ_LITERAL_TAB]",
+    r"\v": "[RMMZ_LITERAL_VERTICAL_TAB]",
+}
+LITERAL_DYNAMIC_ESCAPE_PATTERNS: dict[str, re.Pattern[str]] = {
+    "UNICODE": re.compile(r"\\(?:u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})"),
+    "HEX": re.compile(r"\\x[0-9A-Fa-f]{2}"),
+    "OCTAL": re.compile(r"\\[0-7]{1,3}(?!\[)"),
+}
 
 INDEXED_STANDARD_CONTROL_PATTERN: re.Pattern[str] = re.compile(
     r"\\(?P<code>V|N|P|C|I|PX|PY|FS)\[(?P<param>\d+)\]",
@@ -121,7 +139,9 @@ SYMBOL_STANDARD_CONTROL_PATTERN: re.Pattern[str] = re.compile(
 TERMS_PERCENT_PLACEHOLDER_PATTERN: re.Pattern[str] = re.compile(
     r"%(?P<param>\d+)"
 )
-LITERAL_LINE_BREAK_PATTERN: re.Pattern[str] = re.compile(re.escape(LITERAL_LINE_BREAK_MARKER))
+LITERAL_ESCAPE_PATTERN: re.Pattern[str] = re.compile(
+    "|".join(re.escape(marker) for marker in LITERAL_ESCAPE_PLACEHOLDERS)
+)
 STANDARD_PLACEHOLDER_PATTERN: re.Pattern[str] = re.compile(
     "|".join(
         (
@@ -131,7 +151,8 @@ STANDARD_PLACEHOLDER_PATTERN: re.Pattern[str] = re.compile(
                 + r")_\d+\]"
             ),
             r"\[RMMZ_MESSAGE_ARGUMENT_\d+\]",
-            re.escape(LITERAL_LINE_BREAK_PLACEHOLDER),
+            r"\[RMMZ_LITERAL_(?:UNICODE|HEX|OCTAL)_ESCAPE_[0-9A-F]+\]",
+            *(re.escape(placeholder) for placeholder in LITERAL_ESCAPE_PLACEHOLDERS.values()),
             *(
                 re.escape(placeholder)
                 for placeholder in [
@@ -165,7 +186,7 @@ def iter_standard_control_spans(text: str) -> list[ControlSequenceSpan]:
     spans.extend(_iter_no_param_standard_control_spans(text))
     spans.extend(_iter_symbol_standard_control_spans(text))
     spans.extend(_iter_terms_percent_spans(text))
-    spans.extend(_iter_literal_line_break_spans(text))
+    spans.extend(_iter_literal_escape_spans(text))
     return spans
 
 
@@ -301,21 +322,44 @@ def _iter_terms_percent_spans(text: str) -> list[ControlSequenceSpan]:
     return spans
 
 
-def _iter_literal_line_break_spans(text: str) -> list[ControlSequenceSpan]:
-    """扫描插件和 Note 文本中用字面量反斜杠 n 表达的游戏内换行。"""
+def _format_literal_dynamic_escape_placeholder(*, escape_name: str, original: str) -> str:
+    """用原始转义文本生成可精确还原的稳定占位符。"""
+    encoded_original = original.encode("utf-8").hex().upper()
+    return f"[RMMZ_LITERAL_{escape_name}_ESCAPE_{encoded_original}]"
+
+
+def _iter_literal_escape_spans(text: str) -> list[ControlSequenceSpan]:
+    """扫描插件和 Note 文本中的字面量反斜杠转义片段。"""
     spans: list[ControlSequenceSpan] = []
-    for match in LITERAL_LINE_BREAK_PATTERN.finditer(text):
+    for match in LITERAL_ESCAPE_PATTERN.finditer(text):
+        original = match.group(0)
         spans.append(
             ControlSequenceSpan(
                 start_index=match.start(),
                 end_index=match.end(),
-                original=match.group(0),
+                original=original,
                 source="standard",
-                placeholder=LITERAL_LINE_BREAK_PLACEHOLDER,
+                placeholder=LITERAL_ESCAPE_PLACEHOLDERS[original],
                 custom_template=None,
                 priority=0,
             )
         )
+    for escape_name, pattern in LITERAL_DYNAMIC_ESCAPE_PATTERNS.items():
+        for match in pattern.finditer(text):
+            spans.append(
+                ControlSequenceSpan(
+                    start_index=match.start(),
+                    end_index=match.end(),
+                    original=match.group(0),
+                    source="standard",
+                    placeholder=_format_literal_dynamic_escape_placeholder(
+                        escape_name=escape_name,
+                        original=match.group(0),
+                    ),
+                    custom_template=None,
+                    priority=0,
+                )
+            )
     return spans
 
 
@@ -325,6 +369,8 @@ __all__: list[str] = [
     "ControlSequenceSpan",
     "CustomPlaceholderRule",
     "INDEXED_STANDARD_CODES",
+    "LITERAL_DYNAMIC_ESCAPE_PATTERNS",
+    "LITERAL_ESCAPE_PLACEHOLDERS",
     "LITERAL_LINE_BREAK_MARKER",
     "LITERAL_LINE_BREAK_PLACEHOLDER",
     "RawControlSequenceCandidate",

@@ -105,7 +105,8 @@ claude --permission-mode bypassPermissions
 6. 如果还有没成功保存译文的文本，用 export-untranslated-translations 导出完整译文表，只填写 translation_lines，也就是中文译文行。
 7. 不直接修改数据库，不跳过 validate，不在 quality-report 报告错误时执行 write-back，也就是把译文写进游戏文件。
 8. 执行 write-back 前先向我确认；我确认后再写回游戏目录。
-9. 写回完成后告诉我如何启动汉化后的游戏。
+9. 除非我单独明确允许覆盖字体，否则不要添加 --confirm-font-overwrite。
+10. 写回完成后告诉我如何启动汉化后的游戏。
 ```
 
 Agent 会在过程中运行 `add-game`，并从游戏数据中识别 `<游戏标题>`。之后它会使用 `<游戏标题>` 调用后续命令。
@@ -113,6 +114,14 @@ Agent 会在过程中运行 `add-game`，并从游戏数据中识别 `<游戏标
 ## 6. 确认写回
 
 当 Agent 告诉你 `quality-report --json` 已经没有错误，并询问是否执行 `write-back` 时，确认后再让它继续。
+
+默认写回只更新游戏文本，不会因为配置里有候选字体就自动覆盖字体引用。只有你明确同意覆盖字体时，Agent 才能使用 `--confirm-font-overwrite`。
+
+如果曾经确认覆盖字体，项目会记录被改过的字体引用。需要把这些引用还原时运行：
+
+```powershell
+uv run python main.py --agent-mode restore-font --game <游戏标题> --json
+```
 
 写回完成后，游戏目录会被更新为汉化文本。工具会尽量保留原始数据备份；但新手仍建议使用复制出来的游戏目录操作。
 

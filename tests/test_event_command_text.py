@@ -99,11 +99,28 @@ def test_export_event_command_parser_accepts_code_array() -> None:
 
 
 def test_write_back_parser_accepts_json_output() -> None:
-    """write-back 支持输出机器可读摘要。"""
+    """write-back 支持输出机器可读摘要和显式字体覆盖确认。"""
     parser = build_parser()
     args = parser.parse_args(
         [
             "write-back",
+            "--game",
+            "テストゲーム",
+            "--confirm-font-overwrite",
+            "--json",
+        ]
+    )
+
+    assert read_bool_arg(args, "json_output") is True
+    assert read_bool_arg(args, "confirm_font_overwrite") is True
+
+
+def test_restore_font_parser_accepts_json_output() -> None:
+    """restore-font 支持输出机器可读摘要。"""
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "restore-font",
             "--game",
             "テストゲーム",
             "--json",
@@ -173,6 +190,71 @@ async def test_event_command_rule_import_extracts_and_writes_back(
     parameters = ensure_json_array(command["parameters"], "CommonEvents[1].list[4].parameters")
     payload = ensure_json_object(parameters[3], "CommonEvents[1].list[4].parameters[3]")
     assert payload["message"] == "事件指令译文"
+
+
+@pytest.mark.asyncio
+async def test_event_command_json_string_leaf_uses_visible_text_protocol(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """事件指令参数里的 JSON 字符串叶子按玩家可见文本提取和写回。"""
+    common_events_path = minimal_game_dir / "data" / "CommonEvents.json"
+    raw_common_events = cast(object, json.loads(common_events_path.read_text(encoding="utf-8")))
+    common_events = ensure_json_array(coerce_json_value(raw_common_events), "CommonEvents.json")
+    common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
+    commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
+    command = ensure_json_object(commands[4], "CommonEvents[1].list[4]")
+    parameters = ensure_json_array(command["parameters"], "CommonEvents[1].list[4].parameters")
+    payload = ensure_json_object(parameters[3], "CommonEvents[1].list[4].parameters[3]")
+    source_message = "\n　" + r"\C[2]任務説明\C[0]\n村へ向かう。" + "　\n"
+    payload["message"] = json.dumps(source_message, ensure_ascii=False)
+    _ = common_events_path.write_text(json.dumps(common_events, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    game_data = await load_game_data(minimal_game_dir)
+    input_path = tmp_path / "event-command-rules.json"
+    _ = input_path.write_text(
+        json.dumps(
+            {
+                "357": [
+                    {
+                        "match": {
+                            "0": "TestPlugin",
+                            "1": "Show",
+                        },
+                        "paths": [
+                            "$['parameters'][3]['message']",
+                        ],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    import_file = await load_event_command_rule_import_file(input_path)
+    records = build_event_command_rule_records_from_import(
+        game_data=game_data,
+        import_file=import_file,
+    )
+    item = EventCommandTextExtraction(game_data, records).extract_all_text()[
+        "CommonEvents.json"
+    ].translation_items[0]
+    assert item.original_lines == [source_message]
+
+    translated_message = "\n　" + r"\C[2]任务说明\C[0]\n前往村子。" + "　\n"
+    item.translation_lines = [translated_message]
+    reset_writable_copies(game_data)
+    write_data_text(game_data, [item])
+
+    writable_common_events = ensure_json_array(game_data.writable_data["CommonEvents.json"], "CommonEvents")
+    writable_common_event = ensure_json_object(writable_common_events[1], "CommonEvents[1]")
+    writable_commands = ensure_json_array(writable_common_event["list"], "CommonEvents[1].list")
+    writable_command = ensure_json_object(writable_commands[4], "CommonEvents[1].list[4]")
+    writable_parameters = ensure_json_array(writable_command["parameters"], "CommonEvents[1].list[4].parameters")
+    writable_payload = ensure_json_object(writable_parameters[3], "CommonEvents[1].list[4].parameters[3]")
+    assert isinstance(writable_payload["message"], str)
+    assert json.loads(writable_payload["message"]) == translated_message
 
 
 @pytest.mark.asyncio

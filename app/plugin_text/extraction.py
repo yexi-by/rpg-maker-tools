@@ -15,6 +15,7 @@ from app.rmmz.schema import (
     TranslationItem,
 )
 from app.rmmz.text_rules import TextRules, get_default_text_rules
+from app.rmmz.text_protocol import normalize_visible_text_for_extraction
 from app.plugin_text.common import (
     expand_rule_to_leaf_paths,
     jsonpath_to_location_path,
@@ -80,7 +81,7 @@ class PluginTextExtraction:
                 if not isinstance(leaf_value, str):
                     continue
 
-                normalized_value = leaf_value.strip()
+                normalized_value = normalize_visible_text_for_extraction(leaf_value)
                 if not self.text_rules.should_translate_source_text(normalized_value):
                     continue
 

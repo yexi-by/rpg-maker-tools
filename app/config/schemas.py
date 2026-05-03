@@ -76,7 +76,7 @@ class EventCommandTextSetting(StrictBaseModel):
 class WriteBackSetting(StrictBaseModel):
     """游戏文件写回阶段配置。"""
 
-    replacement_font_path: str | None = Field(default=None, title="写回时复制并替换引用的字体路径")
+    replacement_font_path: str | None = Field(default=None, title="用户确认覆盖字体后使用的候选字体路径")
 
 
 class TextRulesSetting(StrictBaseModel):

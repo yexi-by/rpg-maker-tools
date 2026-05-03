@@ -15,6 +15,7 @@ from app.rmmz.schema import (
     TranslationItem,
 )
 from app.rmmz.text_rules import TextRules, get_default_text_rules
+from app.rmmz.text_protocol import normalize_visible_text_for_extraction
 
 
 class EventCommandTextExtraction:
@@ -84,7 +85,7 @@ class EventCommandTextExtraction:
                         leaf_value = string_leaf_map.get(leaf_path)
                         if not isinstance(leaf_value, str):
                             continue
-                        normalized_value = leaf_value.strip()
+                        normalized_value = normalize_visible_text_for_extraction(leaf_value)
                         if not self.text_rules.should_translate_source_text(normalized_value):
                             continue
                         seen_location_paths.add(location_path)

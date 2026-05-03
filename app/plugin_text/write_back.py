@@ -6,10 +6,16 @@
 """
 
 import json
-from typing import cast
 
 from app.rmmz.schema import GameData, PLUGINS_FILE_NAME, TranslationItem
-from app.rmmz.text_rules import JsonValue, coerce_json_value
+from app.rmmz.placeholder_guard import ensure_no_internal_placeholder_tokens
+from app.rmmz.text_rules import JsonValue
+from app.rmmz.text_protocol import (
+    decode_json_container_text,
+    encode_json_container_like,
+    encode_visible_text_like,
+    ensure_encoded_text_valid,
+)
 
 
 def write_plugin_text(game_data: GameData, items: list[TranslationItem]) -> None:
@@ -21,6 +27,10 @@ def write_plugin_text(game_data: GameData, items: list[TranslationItem]) -> None
             continue
         if len(parts) < 3:
             continue
+        ensure_no_internal_placeholder_tokens(
+            lines=item.translation_lines,
+            context=item.location_path,
+        )
 
         plugin_index = int(parts[1])
         translated_text = item.translation_lines[0] if item.translation_lines else ""
@@ -33,11 +43,15 @@ def write_plugin_text(game_data: GameData, items: list[TranslationItem]) -> None
         if top_key not in parameters:
             raise ValueError(f"插件参数不存在: {item.location_path}")
 
-        parameters[top_key] = _set_plugin_value(
-            current_value=parameters[top_key],
-            path_parts=parts[3:],
-            translated_text=translated_text,
-        )
+        try:
+            parameters[top_key] = _set_plugin_value(
+                current_value=parameters[top_key],
+                path_parts=parts[3:],
+                translated_text=translated_text,
+                context=item.location_path,
+            )
+        except ValueError as error:
+            raise ValueError(f"{item.location_path}: {error}") from error
         wrote_plugin_item = True
 
     if not wrote_plugin_item:
@@ -51,10 +65,22 @@ def _set_plugin_value(
     current_value: JsonValue,
     path_parts: list[str],
     translated_text: str,
+    context: str,
 ) -> JsonValue:
     """循着路径深入插件配置内部，并将最深处叶子替换为译文。"""
     if not path_parts:
-        return translated_text
+        if not isinstance(current_value, str):
+            raise ValueError("插件路径没有指向字符串叶子")
+        written_text = encode_visible_text_like(
+            original_raw_text=current_value,
+            translated_visible_text=translated_text,
+        )
+        ensure_encoded_text_valid(
+            original_raw_text=current_value,
+            written_raw_text=written_text,
+            context=context,
+        )
+        return written_text
 
     key = path_parts[0]
     remain_parts = path_parts[1:]
@@ -66,6 +92,7 @@ def _set_plugin_value(
             current_value=current_value[key],
             path_parts=remain_parts,
             translated_text=translated_text,
+            context=context,
         )
         return current_value
 
@@ -77,6 +104,7 @@ def _set_plugin_value(
             current_value=current_value[index],
             path_parts=remain_parts,
             translated_text=translated_text,
+            context=context,
         )
         return current_value
 
@@ -88,23 +116,24 @@ def _set_plugin_value(
             current_value=parsed_container,
             path_parts=path_parts,
             translated_text=translated_text,
+            context=context,
         )
-        return json.dumps(updated_value, ensure_ascii=False)
+        if not isinstance(updated_value, dict | list):
+            raise ValueError("插件 JSON 容器写回结果不是数组或对象")
+        return encode_json_container_like(
+            original_raw_text=current_value,
+            updated_value=updated_value,
+        )
 
     raise ValueError(f"插件参数类型无法处理: {type(current_value).__name__}")
 
 
 def _try_parse_container_text(value: str) -> dict[str, JsonValue] | list[JsonValue] | None:
     """尝试将字符串反序列化为 JSON 容器。"""
-    try:
-        decoded = cast(object, json.loads(value))
-        parsed = coerce_json_value(decoded)
-    except (json.JSONDecodeError, TypeError):
+    decoded = decode_json_container_text(value)
+    if decoded is None:
         return None
-
-    if isinstance(parsed, dict | list):
-        return parsed
-    return None
+    return decoded.value
 
 
 def _serialize_plugins_js(plugins_js: list[dict[str, JsonValue]]) -> str:

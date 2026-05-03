@@ -8,6 +8,7 @@ from app.rmmz.schema import (
     TranslationItem,
 )
 from app.rmmz.text_rules import TextRules, get_default_text_rules
+from app.rmmz.text_protocol import normalize_visible_text_for_extraction
 
 
 class NoteTagTextExtraction:
@@ -50,7 +51,10 @@ class NoteTagTextExtraction:
                         raise ValueError(
                             f"{rule_record.file_name}/{base_item.id}/note/{tag_name} 标签重复，无法生成唯一定位路径"
                         )
-                    normalized_value = self.text_rules.normalize_extraction_text(values[0])
+                    normalized_value = normalize_visible_text_for_extraction(
+                        values[0],
+                        plain_text_normalizer=self.text_rules.normalize_extraction_text,
+                    )
                     if not self.text_rules.should_translate_source_text(normalized_value):
                         continue
                     translation_data.translation_items.append(

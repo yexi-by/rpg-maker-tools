@@ -1,12 +1,12 @@
 """JSON 参数树展开与受限 JSONPath 工具。"""
 
-import json
 import re
-from typing import Literal, cast
+from typing import Literal
 
 from pydantic import BaseModel
 
-from app.rmmz.text_rules import JsonValue, coerce_json_value
+from app.rmmz.text_rules import JsonValue
+from app.rmmz.text_protocol import decode_json_container_text
 
 JSON_INDEX_SEGMENT_PATTERN: re.Pattern[str] = re.compile(r"\[\d+\]")
 JSON_PATH_PATTERN: re.Pattern[str] = re.compile(
@@ -141,15 +141,10 @@ def walk_plugin_value(
 
 def try_parse_container_string(value: str) -> dict[str, JsonValue] | list[JsonValue] | None:
     """尝试把字符串解析成 JSON 容器。"""
-    try:
-        decoded = cast(object, json.loads(value))
-        parsed = coerce_json_value(decoded)
-    except (TypeError, json.JSONDecodeError):
+    decoded = decode_json_container_text(value)
+    if decoded is None:
         return None
-
-    if isinstance(parsed, dict | list):
-        return parsed
-    return None
+    return decoded.value
 
 
 def quote_jsonpath_key(key: str) -> str:

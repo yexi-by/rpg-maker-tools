@@ -109,9 +109,19 @@ class WriteBackSummary:
     font_copied: bool
 
 
+@dataclass(slots=True)
+class FontRestoreSummary:
+    """字体引用还原任务摘要。"""
+
+    restored_record_count: int
+    restored_reference_count: int
+    target_font_name: str | None
+
+
 __all__: list[str] = [
     "EventCommandJsonExportSummary",
     "EventCommandRuleImportSummary",
+    "FontRestoreSummary",
     "NameContextImportSummary",
     "NameContextWriteSummary",
     "NoteTagJsonExportSummary",

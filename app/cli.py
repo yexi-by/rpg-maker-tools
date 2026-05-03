@@ -20,6 +20,7 @@ from rich.table import Table
 from app.agent_toolkit import AgentIssue, AgentReport, AgentToolkitService
 from app.agent_toolkit.reports import issue
 from app.application.handler import (
+    FontRestoreSummary,
     TextTranslationSummary,
     TranslationHandler,
     TranslationRunLimits,
@@ -392,7 +393,19 @@ def build_parser() -> argparse.ArgumentParser:
     write_back_parser = subparsers.add_parser("write-back", help="把译文回写到游戏目录")
     add_optional_target_arguments(write_back_parser)
     _ = write_back_parser.add_argument("--json", action="store_true", dest="json_output", help="输出本轮回写摘要 JSON")
+    _ = write_back_parser.add_argument(
+        "--confirm-font-overwrite",
+        action="store_true",
+        help="明确允许本次写回用配置字体覆盖游戏字体引用",
+    )
     add_setting_override_arguments(write_back_parser)
+
+    restore_font_parser = subparsers.add_parser(
+        "restore-font",
+        help="按最近一次覆盖记录还原游戏数据中的字体引用",
+    )
+    add_optional_target_arguments(restore_font_parser)
+    _ = restore_font_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
     export_name_parser = subparsers.add_parser(
         "export-name-context",
@@ -417,6 +430,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="根据数据库中的术语表写回 101 名字框和 MapXXX.displayName",
     )
     add_optional_target_arguments(write_name_parser)
+    _ = write_name_parser.add_argument(
+        "--confirm-font-overwrite",
+        action="store_true",
+        help="明确允许本次写回用配置字体覆盖游戏字体引用",
+    )
     add_setting_override_arguments(write_name_parser)
 
     run_all_parser = subparsers.add_parser("run-all", help="按固定顺序执行正文翻译和回写")
@@ -427,6 +445,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_translation_limit_arguments(run_all_parser)
     _ = run_all_parser.add_argument("--skip-write-back", action="store_true", help="跳过最终回写阶段")
+    _ = run_all_parser.add_argument(
+        "--confirm-font-overwrite",
+        action="store_true",
+        help="明确允许最终写回用配置字体覆盖游戏字体引用",
+    )
     add_setting_override_arguments(run_all_parser)
 
     build_placeholder_parser = subparsers.add_parser(
@@ -534,7 +557,7 @@ def add_setting_override_arguments(parser: argparse.ArgumentParser) -> None:
     _ = group.add_argument("--translation-retry-count", type=int, help="可恢复错误重试次数")
     _ = group.add_argument("--translation-retry-delay", type=int, help="可恢复错误重试间隔秒数")
     _ = group.add_argument("--system-prompt", help="正文翻译系统提示词文本")
-    _ = group.add_argument("--replacement-font-path", help="写回时复制并替换引用的字体路径")
+    _ = group.add_argument("--replacement-font-path", help="用户确认覆盖字体后使用的候选字体路径")
     _ = group.add_argument(
         "--event-command-default-code",
         action="extend",
@@ -646,6 +669,8 @@ async def dispatch_command(args: argparse.Namespace) -> int:
         return await run_translate_command(args)
     if command == "write-back":
         return await run_write_back_command(args)
+    if command == "restore-font":
+        return await run_restore_font_command(args)
     if command == "export-name-context":
         return await run_export_name_context_command(args)
     if command == "import-name-context":
@@ -1036,6 +1061,17 @@ async def run_write_back_command(args: argparse.Namespace) -> int:
     return 0
 
 
+async def run_restore_font_command(args: argparse.Namespace) -> int:
+    """执行 `restore-font` 命令。"""
+    game_title = await resolve_target_game_title(args)
+    async with HandlerSession() as handler:
+        summary = await handler.restore_font_replacement(game_title=game_title)
+    if read_bool_arg(args, "json_output"):
+        report = build_font_restore_summary_report(summary)
+        print(report.to_json_text())
+    return 0
+
+
 async def run_export_name_context_command(args: argparse.Namespace) -> int:
     """执行 `export-name-context` 命令。"""
     game_title = await resolve_target_game_title(args)
@@ -1065,6 +1101,7 @@ async def run_write_name_context_command(args: argparse.Namespace) -> int:
                 game_title=game_title,
                 callbacks=progress.progress_callbacks(),
                 setting_overrides=setting_overrides,
+                confirm_font_overwrite=read_bool_arg(args, "confirm_font_overwrite"),
             )
     return 0
 
@@ -1136,6 +1173,7 @@ async def write_back_for_handler(
             game_title=game_title,
             callbacks=progress.progress_callbacks(),
             setting_overrides=setting_overrides,
+            confirm_font_overwrite=read_bool_arg(args, "confirm_font_overwrite"),
         )
 
 
@@ -1206,6 +1244,23 @@ def build_write_back_summary_report(summary: WriteBackSummary) -> AgentReport:
             "source_font_count": summary.source_font_count,
             "replaced_font_reference_count": summary.replaced_font_reference_count,
             "font_copied": summary.font_copied,
+        },
+        details={},
+    )
+
+
+def build_font_restore_summary_report(summary: FontRestoreSummary) -> AgentReport:
+    """把字体还原摘要转换为稳定 JSON 报告。"""
+    warnings: list[AgentIssue] = []
+    if summary.restored_record_count == 0:
+        warnings.append(issue("font_restore", "没有可还原字体记录；项目不会猜测原字体"))
+    return AgentReport.from_parts(
+        errors=[],
+        warnings=warnings,
+        summary={
+            "restored_record_count": summary.restored_record_count,
+            "restored_reference_count": summary.restored_reference_count,
+            "target_font_name": summary.target_font_name or "",
         },
         details={},
     )
