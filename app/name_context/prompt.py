@@ -1,11 +1,17 @@
 """正文提示词使用的术语表索引。"""
 
+import re
 from dataclasses import dataclass
 
 from app.rmmz.schema import TranslationItem
 
 from .extraction import is_translatable_name_context_source
 from .schemas import NameContextRegistry
+
+PROMPT_MEANINGFUL_TERM_PATTERN: re.Pattern[str] = re.compile(
+    r"[\w\u3040-\u30FF\u3400-\u9FFF]",
+    re.UNICODE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,27 +94,33 @@ class NamePromptIndex:
 
 def format_name_prompt_section(entries: list[NamePromptEntry]) -> str:
     """把术语映射格式化为用户提示词片段。"""
-    if not entries:
+    prompt_entries = [
+        entry
+        for entry in entries
+        if not _is_prompt_noise_entry(entry)
+    ]
+    if not prompt_entries:
         return ""
 
-    speaker_lines = [format_prompt_entry(entry) for entry in entries if entry.category == "角色名"]
-    map_lines = [format_prompt_entry(entry) for entry in entries if entry.category == "地图名"]
-    sections = [
-        "[[术语表]]",
-        "以下术语必须统一使用指定译名。",
-    ]
-    if speaker_lines:
-        sections.append("[角色名]")
-        sections.extend(speaker_lines)
-    if map_lines:
-        sections.append("[地图名]")
-        sections.extend(map_lines)
+    sections = ["# 术语表"]
+    sections.extend(format_prompt_entry(entry) for entry in prompt_entries)
     return "\n".join(sections)
+
+
+def _is_prompt_noise_entry(entry: NamePromptEntry) -> bool:
+    """过滤不会提升翻译质量的术语提示噪音。"""
+    source = entry.source_text.strip()
+    translated = entry.translated_text.strip()
+    if not source or not translated:
+        return True
+    if source == translated:
+        return True
+    return PROMPT_MEANINGFUL_TERM_PATTERN.search(source) is None
 
 
 def format_prompt_entry(entry: NamePromptEntry) -> str:
     """格式化单条术语映射。"""
-    return f"- {entry.source_text} => {entry.translated_text}"
+    return f"{entry.source_text} => {entry.translated_text}"
 
 
 def deduplicate_prompt_entries(entries: list[NamePromptEntry]) -> list[NamePromptEntry]:

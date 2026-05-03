@@ -259,7 +259,7 @@ INSERT_JAPANESE_RESIDUAL_RULE = f"""
 
 UPSERT_TRANSLATION_RUN = f"""
 --sql
-    INSERT OR REPLACE INTO [{TRANSLATION_RUNS_TABLE_NAME}]
+    INSERT INTO [{TRANSLATION_RUNS_TABLE_NAME}]
     (
         run_id,
         status,
@@ -277,6 +277,20 @@ UPSERT_TRANSLATION_RUN = f"""
         last_error
     )
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(run_id) DO UPDATE SET
+        status = excluded.status,
+        total_extracted = excluded.total_extracted,
+        pending_count = excluded.pending_count,
+        deduplicated_count = excluded.deduplicated_count,
+        batch_count = excluded.batch_count,
+        success_count = excluded.success_count,
+        quality_error_count = excluded.quality_error_count,
+        llm_failure_count = excluded.llm_failure_count,
+        started_at = excluded.started_at,
+        updated_at = excluded.updated_at,
+        finished_at = excluded.finished_at,
+        stop_reason = excluded.stop_reason,
+        last_error = excluded.last_error
 ;
 """
 
@@ -293,6 +307,12 @@ INSERT_TRANSLATION_QUALITY_ERROR = f"""
     INSERT OR REPLACE INTO [{TRANSLATION_QUALITY_ERRORS_TABLE_NAME}]
     (run_id, location_path, item_type, role, original_lines, translation_lines, error_type, error_detail, model_response)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+;
+"""
+
+DELETE_ALL_TRANSLATION_QUALITY_ERRORS = f"""
+--sql
+    DELETE FROM [{TRANSLATION_QUALITY_ERRORS_TABLE_NAME}]
 ;
 """
 
@@ -511,6 +531,7 @@ __all__: list[str] = [
     "DELETE_ALL_NAME_CONTEXT_TERMS",
     "DELETE_ALL_NOTE_TAG_TEXT_RULES",
     "DELETE_ALL_PLUGIN_TEXT_RULES",
+    "DELETE_ALL_TRANSLATION_QUALITY_ERRORS",
     "DELETE_TRANSLATION_ITEM_BY_PATH",
     "DELETE_TRANSLATION_ITEMS_BY_PREFIX",
     "EVENT_COMMAND_TEXT_RULE_FILTERS_TABLE_NAME",

@@ -12,6 +12,7 @@ from typing import Literal, Self
 from pydantic import BaseModel, Field, model_validator
 
 from app.rmmz.game_data import BaseItem, CommonEvent, MapData, System, Troop
+from app.rmmz.control_codes import LITERAL_LINE_BREAK_PLACEHOLDER
 from app.rmmz.text_rules import ControlSequenceSpan, JsonValue, TextRules, get_default_text_rules
 
 
@@ -125,6 +126,12 @@ class TranslationItem(BaseModel):
             combined_text = "".join(self.translation_lines_with_placeholders).lower()
             for placeholder, expected_count in self.placeholder_counts.items():
                 actual_count = combined_text.count(placeholder.lower())
+                if placeholder.lower() == LITERAL_LINE_BREAK_PLACEHOLDER.lower():
+                    if actual_count < expected_count:
+                        errors.append(
+                            f"占位符 {placeholder} 数量不足 (至少需要: {expected_count}, 实际: {actual_count})"
+                        )
+                    continue
                 if actual_count != expected_count:
                     errors.append(
                         f"占位符 {placeholder} 数量错误 (期望: {expected_count}, 实际: {actual_count})"

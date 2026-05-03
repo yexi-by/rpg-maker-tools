@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.observability import logger
+from app.rmmz.control_codes import LITERAL_LINE_BREAK_MARKER, LITERAL_LINE_BREAK_PLACEHOLDER
 from app.rmmz.text_rules import TextRules
 
 WRAPPING_CONTINUATION_INDENT = "　"
@@ -137,6 +138,22 @@ def split_overwide_single_text_value_if_needed(
     内部的换行会被游戏窗口当作多行显示。只要源文或译文已经带有换行，就按
     显示行拆开执行与 long_text 相同的宽度保护，再重新拼回单个字符串。
     """
+    if _has_literal_line_break_marker(original_lines):
+        line_break_token = (
+            LITERAL_LINE_BREAK_PLACEHOLDER
+            if LITERAL_LINE_BREAK_PLACEHOLDER in translation_text
+            else LITERAL_LINE_BREAK_MARKER
+        )
+        normalized_text = translation_text.replace(LITERAL_LINE_BREAK_PLACEHOLDER, line_break_token)
+        normalized_text = normalized_text.replace(LITERAL_LINE_BREAK_MARKER, line_break_token)
+        normalized_text = normalized_text.replace("\n", line_break_token)
+        return line_break_token.join(
+            split_overwide_lines(
+                lines=normalized_text.split(line_break_token),
+                location_path=location_path,
+                text_rules=text_rules,
+            )
+        )
     if "\n" not in translation_text and not _has_embedded_line_break(original_lines):
         return translation_text
     return "\n".join(
@@ -146,6 +163,11 @@ def split_overwide_single_text_value_if_needed(
             text_rules=text_rules,
         )
     )
+
+
+def _has_literal_line_break_marker(lines: list[str]) -> bool:
+    """判断源文是否用字面量反斜杠 n 表达游戏内换行。"""
+    return any(LITERAL_LINE_BREAK_MARKER in line for line in lines)
 
 
 def count_line_width_chars(text: str, text_rules: TextRules) -> int:

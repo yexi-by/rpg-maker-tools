@@ -273,11 +273,23 @@ def test_quality_fix_and_reset_commands_are_black_box_friendly() -> None:
             "--json",
         ]
     )
+    reset_all_args = parser.parse_args(
+        [
+            "reset-translations",
+            "--game",
+            "demo",
+            "--all",
+            "--json",
+        ]
+    )
 
     assert namespace_optional_str(quality_fix_args, "output") == "quality-fix-template.json"
     assert getattr(quality_fix_args, "json_output") is True
     assert namespace_optional_str(reset_args, "input") == "reset-translations.json"
     assert getattr(reset_args, "json_output") is True
+    assert namespace_optional_str(reset_all_args, "input") is None
+    assert getattr(reset_all_args, "reset_all") is True
+    assert getattr(reset_all_args, "json_output") is True
 
 
 def test_reset_translations_invalid_input_returns_json_error(
@@ -323,7 +335,7 @@ def test_report_output_can_leave_data_output_file_untouched(
     write_report_outputs(
         report=report,
         args=Namespace(output=str(output_path), json_output=True),
-        title="人工补译导出报告",
+        title="手动填写译文表导出报告",
         write_output_file=False,
     )
 

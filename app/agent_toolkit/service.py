@@ -43,9 +43,12 @@ from app.rmmz import DataTextExtraction
 from app.rmmz.control_codes import CustomPlaceholderRule
 from app.rmmz.schema import (
     GameData,
+    EventCommandTextRuleRecord,
     JapaneseResidualRuleRecord,
     LlmFailureRecord,
+    NoteTagTextRuleRecord,
     PLUGINS_FILE_NAME,
+    PlaceholderRuleRecord,
     PluginTextRuleRecord,
     TranslationData,
     TranslationErrorItem,
@@ -69,13 +72,15 @@ from app.event_command_text import (
     parse_event_command_rule_import_text,
     resolve_event_command_codes,
 )
-from app.name_context import export_name_context_artifacts, load_name_context_registry
+from app.name_context import NameContextRegistry, export_name_context_artifacts, load_name_context_registry
+from app.name_context.files import write_registry_json
 from app.note_tag_text import (
     NoteTagTextExtraction,
     build_note_tag_rule_records_from_import,
     export_note_tag_candidates_file,
     parse_note_tag_rule_import_text,
 )
+from app.persistence.repository import current_timestamp_text
 
 type LlmCheckFunc = Callable[[LLMHandler, str], Awaitable[None]]
 
@@ -342,7 +347,7 @@ class AgentToolkitService:
         game_title: str,
         output_path: Path,
     ) -> AgentReport:
-        """从质量报告问题生成可人工修复的补译 JSON 骨架。"""
+        """从质量报告问题生成可填写的修复表。"""
         setting = load_setting(self.setting_path)
         async with await self.game_registry.open_game(game_title) as session:
             custom_rules = await self._resolve_custom_rules(
@@ -534,19 +539,19 @@ class AgentToolkitService:
         if llm_failures and pending_paths:
             errors.append(issue("llm_failures", f"最新翻译运行存在 {len(llm_failures)} 条模型运行故障"))
         elif llm_failures:
-            warnings.append(issue("historical_llm_failures", f"最新翻译运行记录过 {len(llm_failures)} 条模型故障，但当前没有待处理正文由此阻断"))
+            warnings.append(issue("historical_llm_failures", f"最新翻译运行记录过 {len(llm_failures)} 条模型故障，但当前没有正文因此无法继续"))
         if quality_error_items:
-            errors.append(issue("translation_quality_errors", f"最新翻译运行存在 {len(quality_error_items)} 条译文质量错误"))
+            errors.append(issue("translation_quality_errors", f"最新翻译运行有 {len(quality_error_items)} 条模型翻了但项目检查没通过的译文"))
         if pending_paths:
-            errors.append(issue("pending_translations", f"存在 {len(pending_paths)} 条正文尚未成功入库"))
+            errors.append(issue("pending_translations", f"存在 {len(pending_paths)} 条正文还没成功保存译文"))
         if placeholder_risk_items:
-            errors.append(issue("placeholder_risk", f"发现 {len(placeholder_risk_items)} 条占位符风险译文"))
+            errors.append(issue("placeholder_risk", f"发现 {len(placeholder_risk_items)} 条译文里的游戏控制符可能被改坏"))
         if residual_count:
             warnings.append(issue("japanese_residual", f"发现 {residual_count} 条译文存在日文残留风险"))
         if overwide_line_items:
             errors.append(issue("overwide_line", f"发现 {len(overwide_line_items)} 行译文超过当前长文本宽度上限"))
         if stale_paths:
-            warnings.append(issue("stale_cache", f"发现 {len(stale_paths)} 条不在当前提取范围内的缓存译文"))
+            warnings.append(issue("stale_cache", f"发现 {len(stale_paths)} 条不在当前提取范围内的已保存译文"))
         if stale_plugin_rule_count:
             warnings.append(issue("stale_plugin_rules", f"发现 {stale_plugin_rule_count} 个过期插件规则，已从本轮质量统计中排除"))
         if stale_japanese_residual_rule_paths:
@@ -590,7 +595,7 @@ class AgentToolkitService:
         )
 
     async def translation_status(self, *, game_title: str) -> AgentReport:
-        """读取最新正文翻译运行状态，并补充当前数据库实时 pending。"""
+        """读取最新正文翻译运行状态，并补充当前还没成功保存译文的数量。"""
         async with await self.game_registry.open_game(game_title) as session:
             latest_run = await session.read_latest_translation_run()
             if latest_run is None:
@@ -658,7 +663,7 @@ class AgentToolkitService:
         output_path: Path,
         limit: int | None,
     ) -> AgentReport:
-        """导出尚未入库的翻译条目，供 Agent 做人工补译。"""
+        """导出还没成功保存译文的条目，供 Agent 手动填写译文。"""
         setting = load_setting(self.setting_path)
         async with await self.game_registry.open_game(game_title) as session:
             custom_rules = await self._resolve_custom_rules(
@@ -697,7 +702,7 @@ class AgentToolkitService:
 
         warnings: list[AgentIssue] = []
         if not pending_items:
-            warnings.append(issue("pending_empty", "当前没有待人工补译条目"))
+            warnings.append(issue("pending_empty", "当前没有需要手动填写译文的条目"))
         return AgentReport.from_parts(
             errors=[],
             warnings=warnings,
@@ -709,14 +714,14 @@ class AgentToolkitService:
         )
 
     async def import_manual_translations(self, *, game_title: str, input_path: Path) -> AgentReport:
-        """导入 Agent 人工补齐的译文，并按项目规则校验后入库。"""
+        """导入 Agent 手动填写的译文，并按项目规则校验后保存。"""
         try:
             async with aiofiles.open(input_path, "r", encoding="utf-8-sig") as file:
                 raw_payload = cast(object, json.loads(await file.read()))
             payload = ensure_json_object(coerce_json_value(raw_payload), "manual-translations")
         except Exception as error:
             return AgentReport.from_parts(
-                errors=[issue("manual_translation_file", f"人工补译文件不可读: {type(error).__name__}: {error}")],
+                errors=[issue("manual_translation_file", f"手动填写译文表不可读: {type(error).__name__}: {error}")],
                 warnings=[],
                 summary={"input": str(input_path), "imported_count": 0},
                 details={},
@@ -771,7 +776,7 @@ class AgentToolkitService:
                     errors.append(
                         issue(
                             "manual_translation_invalid",
-                            f"{location_path} 人工补译不可用: {type(error).__name__}: {error}",
+                            f"{location_path} 手动填写译文不可用: {type(error).__name__}: {error}",
                         )
                     )
 
@@ -788,10 +793,31 @@ class AgentToolkitService:
                 )
 
             await session.write_translation_items(valid_items)
+            imported_paths = {item.location_path for item in valid_items}
+            _ = await session.delete_translation_quality_errors_by_paths(imported_paths)
+            latest_run = await session.read_latest_translation_run()
+            if latest_run is not None:
+                remaining_quality_errors = await session.read_translation_quality_errors(latest_run.run_id)
+                llm_failures = await session.read_llm_failures(latest_run.run_id)
+                translated_paths = await session.read_translation_location_paths()
+                current_pending_paths = set(active_items) - translated_paths
+                if not current_pending_paths and not remaining_quality_errors and not llm_failures:
+                    await session.write_translation_run(
+                        latest_run.model_copy(
+                            update={
+                                "status": "completed",
+                                "quality_error_count": 0,
+                                "llm_failure_count": 0,
+                                "finished_at": current_timestamp_text(),
+                                "stop_reason": "",
+                                "last_error": "",
+                            }
+                        )
+                    )
 
         return AgentReport.from_parts(
             errors=[],
-            warnings=[] if valid_items else [issue("manual_translation_empty", "人工补译文件没有可导入条目")],
+            warnings=[] if valid_items else [issue("manual_translation_empty", "手动填写译文表没有可导入条目")],
             summary={
                 "input": str(input_path),
                 "imported_count": len(valid_items),
@@ -1087,21 +1113,55 @@ class AgentToolkitService:
             },
         )
 
-    async def reset_translations(self, *, game_title: str, input_path: Path) -> AgentReport:
-        """按显式定位路径清除已入库译文，使条目回到 pending 状态。"""
-        try:
-            location_paths = await _read_reset_translation_location_paths(input_path)
-        except Exception as error:
+    async def reset_translations(
+        self,
+        *,
+        game_title: str,
+        input_path: Path | None = None,
+        reset_all: bool = False,
+    ) -> AgentReport:
+        """删除已保存译文，使指定条目或当前提取范围全部条目重新交给模型翻译。"""
+        if input_path is not None and reset_all:
             return AgentReport.from_parts(
-                errors=[issue("reset_translation_file", f"重置译文文件不可用: {type(error).__name__}: {error}")],
+                errors=[issue("reset_translation_source", "--input 与 --all 不能同时使用")],
                 warnings=[],
                 summary={
                     "input": str(input_path),
+                    "mode": "invalid",
                     "requested_count": 0,
                     "reset_count": 0,
                 },
                 details={},
             )
+        if input_path is None and not reset_all:
+            return AgentReport.from_parts(
+                errors=[issue("reset_translation_source", "必须通过 --input 或 --all 指定重置范围")],
+                warnings=[],
+                summary={
+                    "input": "",
+                    "mode": "invalid",
+                    "requested_count": 0,
+                    "reset_count": 0,
+                },
+                details={},
+            )
+        if input_path is not None:
+            try:
+                requested_paths = await _read_reset_translation_location_paths(input_path)
+            except Exception as error:
+                return AgentReport.from_parts(
+                    errors=[issue("reset_translation_file", f"重置译文文件不可用: {type(error).__name__}: {error}")],
+                    warnings=[],
+                    summary={
+                        "input": str(input_path),
+                        "mode": "input",
+                        "requested_count": 0,
+                        "reset_count": 0,
+                    },
+                    details={},
+                )
+        else:
+            requested_paths = []
 
         setting = load_setting(self.setting_path)
         async with await self.game_registry.open_game(game_title) as session:
@@ -1116,11 +1176,9 @@ class AgentToolkitService:
                 game_data=game_data,
                 text_rules=text_rules,
             )
-            active_paths = {
-                item.location_path
-                for translation_data in translation_data_map.values()
-                for item in translation_data.translation_items
-            }
+            active_location_paths = _collect_active_translation_location_paths(translation_data_map.values())
+            active_paths = set(active_location_paths)
+            location_paths = active_location_paths if reset_all else requested_paths
             invalid_paths = sorted(set(location_paths) - active_paths)
             if invalid_paths:
                 return AgentReport.from_parts(
@@ -1132,7 +1190,8 @@ class AgentToolkitService:
                     ],
                     warnings=[],
                     summary={
-                        "input": str(input_path),
+                        "input": str(input_path) if input_path is not None else "",
+                        "mode": "all" if reset_all else "input",
                         "requested_count": len(location_paths),
                         "reset_count": 0,
                     },
@@ -1145,18 +1204,28 @@ class AgentToolkitService:
         warnings: list[AgentIssue] = []
         already_pending_count = len(location_paths) - reset_count
         if already_pending_count:
-            warnings.append(issue("reset_translation_already_pending", f"{already_pending_count} 个定位路径当前没有已入库译文"))
+            warnings.append(issue("reset_translation_already_pending", f"{already_pending_count} 个定位路径当前没有已保存译文"))
+        if reset_all and not location_paths:
+            warnings.append(issue("reset_translation_no_active_items", "当前提取范围没有可重置条目"))
+        if reset_all:
+            details: JsonObject = {
+                "location_path_count": len(location_paths),
+                "location_path_samples": _string_lines_to_json_array(location_paths[:20]),
+            }
+        else:
+            details = {
+                "location_paths": _string_lines_to_json_array(location_paths),
+            }
         return AgentReport.from_parts(
             errors=[],
             warnings=warnings,
             summary={
-                "input": str(input_path),
+                "input": str(input_path) if input_path is not None else "",
+                "mode": "all" if reset_all else "input",
                 "requested_count": len(location_paths),
                 "reset_count": reset_count,
             },
-            details={
-                "location_paths": _string_lines_to_json_array(location_paths),
-            },
+            details=details,
         )
 
     async def validate_plugin_rules(self, *, game_title: str, rules_text: str) -> AgentReport:
@@ -1313,11 +1382,28 @@ class AgentToolkitService:
         setting = load_setting(self.setting_path)
         async with await self.game_registry.open_game(game_title) as session:
             game_data = await self._load_game_data(session)
+            name_registry = await session.read_name_context_registry()
+            plugin_rules, stale_plugin_rule_count = await self._read_fresh_plugin_text_rules(
+                session=session,
+                game_data=game_data,
+            )
+            note_tag_rules = await session.read_note_tag_text_rules()
+            event_rules = await session.read_event_command_text_rules()
+            placeholder_records = await session.read_placeholder_rules()
             custom_rules = await self._resolve_custom_rules(session=session, custom_placeholder_rules_text=None)
         text_rules = TextRules.from_setting(setting.text_rules, custom_placeholder_rules=custom_rules)
         name_summary = await export_name_context_artifacts(game_data=game_data, output_dir=target_dir / "name-context")
+        if name_registry is not None:
+            exported_registry = await load_name_context_registry(registry_path=name_summary.registry_path)
+            merged_registry = _merge_name_context_registry(
+                exported_registry=exported_registry,
+                stored_registry=name_registry,
+            )
+            await write_registry_json(name_summary.registry_path, merged_registry)
         plugins_path = target_dir / "plugins.json"
         await export_plugins_json_file(game_data=game_data, output_path=plugins_path)
+        plugin_rules_path = target_dir / "plugin-rules.json"
+        await _write_json_object(plugin_rules_path, _plugin_rule_records_to_import_json(plugin_rules))
         note_tag_candidates_path = target_dir / "note-tag-candidates.json"
         note_tag_report = await export_note_tag_candidates_file(
             game_data=game_data,
@@ -1325,8 +1411,7 @@ class AgentToolkitService:
             text_rules=text_rules,
         )
         note_tag_rules_path = target_dir / "note-tag-rules.json"
-        async with aiofiles.open(note_tag_rules_path, "w", encoding="utf-8") as file:
-            _ = await file.write("{}\n")
+        await _write_json_object(note_tag_rules_path, _note_tag_rule_records_to_import_json(note_tag_rules))
         default_command_codes = None if command_codes is not None else setting.event_command_text.default_command_codes
         effective_codes = resolve_event_command_codes(command_codes=command_codes, default_command_codes=default_command_codes)
         event_commands_path = target_dir / "event-commands.json"
@@ -1335,6 +1420,8 @@ class AgentToolkitService:
             output_path=event_commands_path,
             command_codes=effective_codes,
         )
+        event_rules_path = target_dir / "event-command-rules.json"
+        await _write_json_object(event_rules_path, _event_command_rule_records_to_import_json(event_rules))
         placeholder_candidates = scan_placeholder_candidates(game_data, text_rules)
         placeholder_report = AgentReport.from_parts(
             errors=[],
@@ -1347,23 +1434,34 @@ class AgentToolkitService:
             _ = await file.write(f"{placeholder_report.to_json_text()}\n")
         placeholder_rule_drafts = _build_custom_placeholder_rule_draft(placeholder_candidates)
         placeholder_rules_path = target_dir / "placeholder-rules.json"
-        async with aiofiles.open(placeholder_rules_path, "w", encoding="utf-8") as file:
-            _ = await file.write(f"{json.dumps(placeholder_rule_drafts, ensure_ascii=False, indent=2)}\n")
+        placeholder_rule_payload: JsonObject = (
+            _placeholder_rule_records_to_import_json(placeholder_records)
+            if placeholder_records
+            else {key: value for key, value in placeholder_rule_drafts.items()}
+        )
+        await _write_json_object(placeholder_rules_path, placeholder_rule_payload)
         generated_summary: JsonObject = {
             "speaker_entry_count": name_summary.speaker_entry_count,
             "map_entry_count": name_summary.map_entry_count,
             "plugin_count": len(game_data.plugins_js),
+            "plugin_rule_count": sum(len(rule.path_templates) for rule in plugin_rules),
+            "stale_plugin_rule_count": stale_plugin_rule_count,
             "note_tag_candidate_count": note_tag_report.candidate_tag_count,
+            "note_tag_rule_count": sum(len(rule.tag_names) for rule in note_tag_rules),
             "event_command_count": event_command_count,
+            "event_command_rule_count": sum(len(rule.path_templates) for rule in event_rules),
+            "placeholder_rule_count": len(placeholder_records),
             "placeholder_rule_draft_count": len(placeholder_rule_drafts),
         }
         manifest_files: JsonArray = [
             str(name_summary.registry_path),
             str(name_summary.sample_dir),
             str(plugins_path),
+            str(plugin_rules_path),
             str(note_tag_candidates_path),
             str(note_tag_rules_path),
             str(event_commands_path),
+            str(event_rules_path),
             str(placeholder_path),
             str(placeholder_rules_path),
         ]
@@ -1382,7 +1480,7 @@ class AgentToolkitService:
         )
 
     async def validate_agent_workspace(self, *, game_title: str, workspace: Path) -> AgentReport:
-        """检查 Agent 临时工作区里的可导入产物。"""
+        """检查 Agent 临时工作区里的可导入文件。"""
         errors: list[AgentIssue] = []
         warnings: list[AgentIssue] = []
         details: JsonObject = {}
@@ -1440,7 +1538,7 @@ class AgentToolkitService:
         return AgentReport.from_parts(errors=errors, warnings=warnings, summary={"workspace": str(workspace)}, details=details)
 
     async def cleanup_agent_workspace(self, *, workspace: Path) -> AgentReport:
-        """按 manifest 删除 Agent 临时工作区产物。"""
+        """按 manifest 删除 Agent 临时工作区文件。"""
         manifest_path = workspace / "manifest.json"
         if not manifest_path.exists():
             return AgentReport.from_parts(
@@ -1785,6 +1883,94 @@ def _format_code_points(text: str) -> str:
     return " ".join(f"U+{ord(char):04X}" for char in text)
 
 
+async def _write_json_object(path: Path, payload: JsonObject) -> None:
+    """把 Agent 工作区 JSON 对象写成 UTF-8 可读文件。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    async with aiofiles.open(path, "w", encoding="utf-8") as file:
+        _ = await file.write(f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n")
+
+
+def _merge_name_context_registry(
+    *,
+    exported_registry: NameContextRegistry,
+    stored_registry: NameContextRegistry,
+) -> NameContextRegistry:
+    """把数据库已有译名回填到当前游戏重新导出的术语表键集合。"""
+    return NameContextRegistry(
+        speaker_names={
+            source_text: stored_registry.speaker_names.get(source_text, translated_text)
+            for source_text, translated_text in exported_registry.speaker_names.items()
+        },
+        map_display_names={
+            source_text: stored_registry.map_display_names.get(source_text, translated_text)
+            for source_text, translated_text in exported_registry.map_display_names.items()
+        },
+    )
+
+
+def _plugin_rule_records_to_import_json(records: Sequence[PluginTextRuleRecord]) -> JsonObject:
+    """把数据库插件规则还原为外部 Agent 可编辑的导入 JSON。"""
+    payload: JsonObject = {}
+    for record in sorted(records, key=lambda item: (item.plugin_index, item.plugin_name)):
+        payload[record.plugin_name] = _string_lines_to_json_array(record.path_templates)
+    return payload
+
+
+def _note_tag_rule_records_to_import_json(records: Sequence[NoteTagTextRuleRecord]) -> JsonObject:
+    """把数据库 Note 标签规则还原为外部 Agent 可编辑的导入 JSON。"""
+    payload: JsonObject = {}
+    for record in sorted(records, key=lambda item: item.file_name):
+        payload[record.file_name] = _string_lines_to_json_array(record.tag_names)
+    return payload
+
+
+def _event_command_rule_records_to_import_json(records: Sequence[EventCommandTextRuleRecord]) -> JsonObject:
+    """把数据库事件指令规则还原为外部 Agent 可编辑的导入 JSON。"""
+    payload: JsonObject = {}
+    for record in sorted(records, key=lambda item: (item.command_code, _event_rule_filter_sort_key(item))):
+        command_key = str(record.command_code)
+        specs = payload.get(command_key)
+        if not isinstance(specs, list):
+            specs = []
+            payload[command_key] = specs
+        specs.append(
+            {
+                "match": {
+                    str(parameter_filter.index): parameter_filter.value
+                    for parameter_filter in record.parameter_filters
+                },
+                "paths": _string_lines_to_json_array(record.path_templates),
+            }
+        )
+    return payload
+
+
+def _event_rule_filter_sort_key(record: EventCommandTextRuleRecord) -> tuple[tuple[int, str], ...]:
+    """生成事件指令规则回填时的稳定排序键。"""
+    return tuple((parameter_filter.index, parameter_filter.value) for parameter_filter in record.parameter_filters)
+
+
+def _placeholder_rule_records_to_import_json(records: Sequence[PlaceholderRuleRecord]) -> JsonObject:
+    """把数据库占位符规则还原为外部 Agent 可编辑的导入 JSON。"""
+    return {
+        record.pattern_text: record.placeholder_template
+        for record in records
+    }
+
+
+def _collect_active_translation_location_paths(translation_data_items: Iterable[TranslationData]) -> list[str]:
+    """按提取顺序收集当前活跃正文定位路径并去重。"""
+    location_paths: list[str] = []
+    seen_paths: set[str] = set()
+    for translation_data in translation_data_items:
+        for item in translation_data.translation_items:
+            if item.location_path in seen_paths:
+                continue
+            location_paths.append(item.location_path)
+            seen_paths.add(item.location_path)
+    return location_paths
+
+
 async def _read_reset_translation_location_paths(input_path: Path) -> list[str]:
     """读取 reset-translations 的最小 JSON 输入结构。"""
     async with aiofiles.open(input_path, "r", encoding="utf-8-sig") as file:
@@ -1813,7 +1999,7 @@ def _build_manual_translation_template_entry(
     text_rules: TextRules,
     translation_lines: list[str],
 ) -> JsonObject:
-    """把当前提取条目转换成人工补译 JSON 条目。"""
+    """把当前提取条目转换成手动填写译文表条目。"""
     cloned_item = item.model_copy(deep=True)
     cloned_item.build_placeholders(text_rules)
     return {
@@ -2218,7 +2404,7 @@ def _prepare_manual_translation_item(
     text_rules: TextRules,
     japanese_residual_rule_set: JapaneseResidualRuleSet | None = None,
 ) -> TranslationItem:
-    """把人工译文校验成可写入主译文缓存的条目。"""
+    """把手动译文校验成可保存的正文译文条目。"""
     if not translation_lines or not any(line.strip() for line in translation_lines):
         raise ValueError("translation_lines 不能为空")
     if item.item_type == "short_text" and len(translation_lines) != 1:
@@ -2257,7 +2443,7 @@ def _normalize_manual_translation_lines(
     translation_lines: list[str],
     text_rules: TextRules,
 ) -> list[str]:
-    """人工 long_text 入库前套用与写回一致的行宽兜底。"""
+    """手动填写的 long_text 保存前套用与写回一致的行宽兜底。"""
     normalized_lines = normalize_translated_wrapping_punctuation(
         original_lines=item.original_lines,
         translation_lines=list(translation_lines),
@@ -2325,7 +2511,7 @@ def _build_translation_item_quality_detail(item: TranslationItem) -> JsonObject:
 
 
 def _build_translation_error_quality_detail(item: TranslationErrorItem) -> JsonObject:
-    """把译文质量错误转换为质量报告中可定位、可修复的明细。"""
+    """把没通过项目检查的译文转换为质量报告中可定位、可修复的明细。"""
     return {
         "location_path": item.location_path,
         "item_type": item.item_type,

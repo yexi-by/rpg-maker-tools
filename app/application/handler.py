@@ -1,7 +1,7 @@
 """
 核心 CLI 翻译编排模块。
 
-本模块串起游戏注册、外部规则导入、正文翻译、缓存断点续传与游戏文件回写。
+本模块串起游戏注册、外部规则导入、正文翻译、已保存译文复用与游戏文件回写。
 """
 
 import asyncio
@@ -505,7 +505,7 @@ class TranslationHandler:
             active_translation_paths,
         )
         if deleted_stale_items:
-            logger.warning(f"[tag.warning]已清理不符合当前提取规则的缓存译文[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count] 数量 [tag.count]{deleted_stale_items}[/tag.count]")
+            logger.warning(f"[tag.warning]已清理不符合当前提取规则的已保存译文[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count] 数量 [tag.count]{deleted_stale_items}[/tag.count]")
 
         total_extracted_items = self._count_translation_items(translation_data_map)
         translated_paths = await session.read_translation_location_paths()
@@ -560,7 +560,7 @@ class TranslationHandler:
             batches = batches[: run_limits.max_batches]
         deduplicated_count = sum(len(batch.items) for batch in batches)
         if not batches:
-            blocked_reason = "正文去重后没有可送入模型的批次"
+            blocked_reason = "相同原文合并后，没有可送入模型的批次"
             logger.warning(f"[tag.warning]{blocked_reason}[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count]")
             return TextTranslationSummary(
                 total_extracted_items=total_extracted_items,
@@ -578,8 +578,8 @@ class TranslationHandler:
             deduplicated_count=deduplicated_count,
             batch_count=len(batches),
         )
-        set_status(f"待翻译 {pending_count} 条，去重后 {deduplicated_count} 条，批次 {len(batches)} 个")
-        logger.info(f"[tag.phase]正文翻译开始[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] 提取 [tag.count]{total_extracted_items}[/tag.count] 条，待翻译 [tag.count]{pending_count}[/tag.count] 条，去重后 [tag.count]{deduplicated_count}[/tag.count] 条，批次 [tag.count]{len(batches)}[/tag.count] 个")
+        set_status(f"还没成功保存译文 {pending_count} 条，相同原文合并后 {deduplicated_count} 条，批次 {len(batches)} 个")
+        logger.info(f"[tag.phase]正文翻译开始[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] 提取 [tag.count]{total_extracted_items}[/tag.count] 条，还没成功保存译文 [tag.count]{pending_count}[/tag.count] 条，相同原文合并后 [tag.count]{deduplicated_count}[/tag.count] 条，批次 [tag.count]{len(batches)}[/tag.count] 个")
         japanese_residual_rule_set = JapaneseResidualRuleSet.from_records(
             await session.read_japanese_residual_rules()
         )
@@ -605,7 +605,7 @@ class TranslationHandler:
                     "success_count": success_count,
                     "quality_error_count": error_count,
                     "finished_at": current_timestamp_text(),
-                    "stop_reason": "" if error_count == 0 else "存在最终译文质量错误",
+                    "stop_reason": "" if error_count == 0 else "存在模型翻了但项目检查没通过的译文",
                     "last_error": "" if error_count == 0 else "quality_errors",
                 }
             )
@@ -824,7 +824,7 @@ class TranslationHandler:
             writable_paths,
         )
         if deleted_stale_items:
-            logger.warning(f"[tag.warning]已清理不符合当前提取规则的缓存译文[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count] 数量 [tag.count]{deleted_stale_items}[/tag.count]")
+            logger.warning(f"[tag.warning]已清理不符合当前提取规则的已保存译文[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count] 数量 [tag.count]{deleted_stale_items}[/tag.count]")
             translated_items = await session.read_translated_items()
         writable_items = [
             item
@@ -834,7 +834,7 @@ class TranslationHandler:
         ]
         skipped_count = len(translated_items) - len(writable_items)
         if skipped_count:
-            logger.warning(f"[tag.warning]已跳过不符合当前提取规则的缓存译文[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count] 数量 [tag.count]{skipped_count}[/tag.count]")
+            logger.warning(f"[tag.warning]已跳过不符合当前提取规则的已保存译文[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count] 数量 [tag.count]{skipped_count}[/tag.count]")
         return writable_items
 
     async def _collect_extractable_translation_paths(
@@ -1044,7 +1044,7 @@ class TranslationHandler:
         translation_data_map: dict[str, TranslationData],
         max_items: int | None,
     ) -> dict[str, TranslationData]:
-        """按本轮上限截取待翻译条目，便于 Agent 分批运行。"""
+        """按本轮上限截取还没成功保存译文的条目，便于 Agent 分批运行。"""
         if max_items is None:
             return translation_data_map
         if max_items <= 0:
@@ -1236,7 +1236,7 @@ class TranslationHandler:
         translation_cache: TranslationCache,
         stop_on_error_rate: float | None,
     ) -> int:
-        """消费正文翻译质量错误队列并写入固定质量错误表。"""
+        """消费没通过项目检查的译文队列并写入固定错误表。"""
         game_title = session.game_title
         error_count = 0
         async for error_items in text_translation.iter_error_items():
@@ -1257,12 +1257,12 @@ class TranslationHandler:
                     )
                 )
             advance_progress(len(expanded_error_items))
-            logger.error(f"[tag.failure]已写入译文质量错误[/tag.failure] 游戏 [tag.count]{game_title}[/tag.count] [tag.count]{len(expanded_error_items)}[/tag.count] 条")
+            logger.error(f"[tag.failure]已记录检查没通过的译文[/tag.failure] 游戏 [tag.count]{game_title}[/tag.count] [tag.count]{len(expanded_error_items)}[/tag.count] 条")
             if stop_on_error_rate is not None:
                 processed_count = progress_state.success_count + progress_state.quality_error_count
                 if processed_count > 0 and progress_state.quality_error_count / processed_count >= stop_on_error_rate:
                     raise TranslationRunInterrupted(
-                        reason=f"译文质量错误率达到停止阈值: {stop_on_error_rate}",
+                        reason=f"检查没通过的译文比例达到停止阈值: {stop_on_error_rate}",
                         success_count=progress_state.success_count,
                         quality_error_count=progress_state.quality_error_count,
                     )

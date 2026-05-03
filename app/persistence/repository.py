@@ -61,6 +61,7 @@ from .sql import (
     DELETE_ALL_NOTE_TAG_TEXT_RULES,
     DELETE_ALL_PLACEHOLDER_RULES,
     DELETE_ALL_PLUGIN_TEXT_RULES,
+    DELETE_ALL_TRANSLATION_QUALITY_ERRORS,
     DELETE_TRANSLATION_ITEM_BY_PATH,
     DELETE_TRANSLATION_ITEMS_BY_PREFIX,
     INSERT_EVENT_COMMAND_TEXT_RULE_FILTER,
@@ -90,6 +91,7 @@ from .sql import (
     SELECT_TRANSLATION_RUN,
     SELECT_TRANSLATED_ITEMS,
     SELECT_TRANSLATION_PATHS,
+    TRANSLATION_QUALITY_ERRORS_TABLE_NAME,
     UPSERT_METADATA,
     UPSERT_TRANSLATION_RUN,
 )
@@ -635,6 +637,7 @@ class TargetGameSession:
         batch_count: int,
     ) -> TranslationRunRecord:
         """创建新的正文翻译运行状态。"""
+        _ = await self.connection.execute(DELETE_ALL_TRANSLATION_QUALITY_ERRORS)
         now = current_timestamp_text()
         run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S_%f")
         record = TranslationRunRecord(
@@ -733,7 +736,7 @@ class TargetGameSession:
         run_id: str,
         items: list[TranslationErrorItem],
     ) -> None:
-        """写入最终译文质量错误。"""
+        """写入没通过项目检查的最终译文。"""
         if items:
             serialized_items = [
                 (
@@ -756,7 +759,7 @@ class TargetGameSession:
         await self.connection.commit()
 
     async def read_translation_quality_errors(self, run_id: str) -> list[TranslationErrorItem]:
-        """读取指定运行的最终译文质量错误。"""
+        """读取指定运行中没通过项目检查的最终译文。"""
         async with self.connection.execute(SELECT_TRANSLATION_QUALITY_ERRORS_BY_RUN, (run_id,)) as cursor:
             rows = await cursor.fetchall()
         return [
@@ -775,6 +778,23 @@ class TargetGameSession:
             )
             for row in rows
         ]
+
+    async def delete_translation_quality_errors_by_paths(self, location_paths: set[str]) -> int:
+        """按文本内部位置清理已经修好的译文检查失败明细。"""
+        if not location_paths:
+            return 0
+        sorted_paths = sorted(location_paths)
+        placeholders = ", ".join("?" for _ in sorted_paths)
+        cursor = await self.connection.execute(
+            f"""
+--sql
+                DELETE FROM [{TRANSLATION_QUALITY_ERRORS_TABLE_NAME}]
+                WHERE location_path IN ({placeholders})
+            """,
+            tuple(sorted_paths),
+        )
+        await self.connection.commit()
+        return max(cursor.rowcount, 0)
 
     def _decode_translation_run(self, row: aiosqlite.Row) -> TranslationRunRecord:
         """把 SQLite 行转换成正文翻译运行状态。"""
@@ -890,7 +910,7 @@ def parse_llm_failure_category(value: str, db_path: Path) -> LlmFailureCategory:
 
 
 def parse_error_type(value: str, db_path: Path) -> ErrorType:
-    """校验并收窄数据库中的译文质量错误类型。"""
+    """校验并收窄数据库中的译文检查错误类型。"""
     allowed: set[ErrorType] = {
         "模型返回不可解析",
         "AI漏翻",
@@ -900,7 +920,7 @@ def parse_error_type(value: str, db_path: Path) -> ErrorType:
     }
     if value in allowed:
         return value
-    raise RuntimeError(f"数据库字段 error_type 不是有效译文质量错误类型: {db_path}")
+    raise RuntimeError(f"数据库字段 error_type 不是有效译文检查错误类型: {db_path}")
 
 
 __all__: list[str] = [

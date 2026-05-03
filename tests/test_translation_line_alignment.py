@@ -6,7 +6,7 @@ import json
 import pytest
 
 from app.config.schemas import TextRulesSetting
-from app.rmmz.control_codes import CustomPlaceholderRule
+from app.rmmz.control_codes import CustomPlaceholderRule, LITERAL_LINE_BREAK_PLACEHOLDER
 from app.rmmz.schema import TranslationErrorItem, TranslationItem
 from app.rmmz.text_rules import TextRules
 from app.translation.line_wrap import (
@@ -28,6 +28,25 @@ def _build_text_rules(*, width_limit: int) -> TextRules:
     )
 
 
+def _build_model_response(
+    *,
+    item: TranslationItem,
+    translation_lines: list[str],
+    source_lines: list[str] | None = None,
+    extra_fields: dict[str, object] | None = None,
+) -> str:
+    """构建新数组协议下的模型返回。"""
+    response_item: dict[str, object] = {
+        "id": item.location_path,
+        "role": item.role or "",
+        "source_lines": source_lines if source_lines is not None else list(item.original_lines),
+        "translation_lines": translation_lines,
+    }
+    if extra_fields is not None:
+        response_item.update(extra_fields)
+    return json.dumps([response_item], ensure_ascii=False)
+
+
 async def _verify_single_long_text(
     *,
     original_lines: list[str],
@@ -45,7 +64,10 @@ async def _verify_single_long_text(
     error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
 
     await verify_translation_batch(
-        ai_result=json.dumps({item.location_path: translated_text}, ensure_ascii=False),
+        ai_result=_build_model_response(
+            item=item,
+            translation_lines=translated_text.splitlines(),
+        ),
         items=[item],
         right_queue=right_queue,
         error_queue=error_queue,
@@ -72,7 +94,10 @@ async def test_multiline_short_text_is_wrapped_during_verify() -> None:
     error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
 
     await verify_translation_batch(
-        ai_result=json.dumps({item.location_path: "说明\n「甲乙丙丁戊己，庚辛壬癸」"}, ensure_ascii=False),
+        ai_result=_build_model_response(
+            item=item,
+            translation_lines=["说明", "「甲乙丙丁戊己，庚辛壬癸」"],
+        ),
         items=[item],
         right_queue=right_queue,
         error_queue=error_queue,
@@ -83,6 +108,197 @@ async def test_multiline_short_text_is_wrapped_during_verify() -> None:
     result = await right_queue.get()
     assert result is not None
     assert result[0].translation_lines == ["说明\n「甲乙丙丁戊己，\n　庚辛壬癸」"]
+
+
+@pytest.mark.asyncio
+async def test_literal_line_break_short_text_keeps_literal_marker() -> None:
+    """源文使用字面量反斜杠 n 时，模型给出的真实换行会修回字面量标记。"""
+    text_rules = _build_text_rules(width_limit=8)
+    item = TranslationItem(
+        location_path="plugins.js/1/message",
+        item_type="short_text",
+        original_lines=["第一行\\n第二行"],
+    )
+    item.build_placeholders(text_rules)
+    right_queue: asyncio.Queue[list[TranslationItem] | None] = asyncio.Queue()
+    error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
+
+    await verify_translation_batch(
+        ai_result=_build_model_response(
+            item=item,
+            translation_lines=["甲乙丙丁", "戊己庚辛"],
+        ),
+        items=[item],
+        right_queue=right_queue,
+        error_queue=error_queue,
+        text_rules=text_rules,
+    )
+
+    assert error_queue.empty()
+    result = await right_queue.get()
+    assert result is not None
+    assert result[0].translation_lines == ["甲乙丙丁\\n戊己庚辛"]
+
+
+@pytest.mark.asyncio
+async def test_literal_line_break_placeholder_short_text_still_wraps_overwide_lines() -> None:
+    """模型保留字面量换行占位符时，short_text 行宽兜底仍按显示行生效。"""
+    text_rules = _build_text_rules(width_limit=8)
+    item = TranslationItem(
+        location_path="plugins.js/1/message",
+        item_type="short_text",
+        original_lines=["説明\\n本文"],
+    )
+    item.build_placeholders(text_rules)
+    right_queue: asyncio.Queue[list[TranslationItem] | None] = asyncio.Queue()
+    error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
+
+    await verify_translation_batch(
+        ai_result=_build_model_response(
+            item=item,
+            translation_lines=[f"说明{LITERAL_LINE_BREAK_PLACEHOLDER}甲乙丙丁戊己，庚辛壬癸"],
+        ),
+        items=[item],
+        right_queue=right_queue,
+        error_queue=error_queue,
+        text_rules=text_rules,
+    )
+
+    assert error_queue.empty()
+    result = await right_queue.get()
+    assert result is not None
+    assert result[0].translation_lines == ["说明\\n甲乙丙丁戊己，\\n庚辛壬癸"]
+
+
+@pytest.mark.asyncio
+async def test_translation_response_ignores_source_lines_and_extra_fields() -> None:
+    """模型返回的原文对照和额外字段不参与业务校验。"""
+    text_rules = _build_text_rules(width_limit=40)
+    item = TranslationItem(
+        location_path="Map001.json/1/0/0",
+        item_type="long_text",
+        role="村人",
+        original_lines=["こんにちは"],
+    )
+    item.build_placeholders(text_rules)
+    right_queue: asyncio.Queue[list[TranslationItem] | None] = asyncio.Queue()
+    error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
+
+    await verify_translation_batch(
+        ai_result=_build_model_response(
+            item=item,
+            source_lines=["模型改写的原文"],
+            translation_lines=["你好"],
+            extra_fields={"type": "wrong", "unused": ["ignored"]},
+        ),
+        items=[item],
+        right_queue=right_queue,
+        error_queue=error_queue,
+        text_rules=text_rules,
+    )
+
+    assert error_queue.empty()
+    result = await right_queue.get()
+    assert result is not None
+    assert result[0].translation_lines == ["你好"]
+
+
+@pytest.mark.asyncio
+async def test_translation_response_missing_id_is_recorded_as_missing_key() -> None:
+    """未知 ID 被忽略后，本地未返回条目仍按漏翻处理。"""
+    text_rules = _build_text_rules(width_limit=40)
+    item = TranslationItem(
+        location_path="Map001.json/1/0/0",
+        item_type="long_text",
+        original_lines=["こんにちは"],
+    )
+    item.build_placeholders(text_rules)
+    right_queue: asyncio.Queue[list[TranslationItem] | None] = asyncio.Queue()
+    error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
+    ai_result = json.dumps(
+        [
+            {
+                "id": "Map999.json/1/0/0",
+                "role": "",
+                "source_lines": ["こんにちは"],
+                "translation_lines": ["你好"],
+            }
+        ],
+        ensure_ascii=False,
+    )
+
+    await verify_translation_batch(
+        ai_result=ai_result,
+        items=[item],
+        right_queue=right_queue,
+        error_queue=error_queue,
+        text_rules=text_rules,
+    )
+
+    assert right_queue.empty()
+    error_items = await error_queue.get()
+    assert error_items is not None
+    assert error_items[0].error_type == "AI漏翻"
+
+
+@pytest.mark.asyncio
+async def test_translation_response_duplicate_valid_id_blocks_batch() -> None:
+    """同一批次重复返回有效 ID 时整批作为格式错误处理。"""
+    text_rules = _build_text_rules(width_limit=40)
+    item = TranslationItem(
+        location_path="Map001.json/1/0/0",
+        item_type="long_text",
+        original_lines=["こんにちは"],
+    )
+    item.build_placeholders(text_rules)
+    response_item = {
+        "id": item.location_path,
+        "role": "",
+        "source_lines": ["こんにちは"],
+        "translation_lines": ["你好"],
+    }
+    right_queue: asyncio.Queue[list[TranslationItem] | None] = asyncio.Queue()
+    error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
+
+    await verify_translation_batch(
+        ai_result=json.dumps([response_item, response_item], ensure_ascii=False),
+        items=[item],
+        right_queue=right_queue,
+        error_queue=error_queue,
+        text_rules=text_rules,
+    )
+
+    assert right_queue.empty()
+    error_items = await error_queue.get()
+    assert error_items is not None
+    assert error_items[0].error_type == "模型返回不可解析"
+
+
+@pytest.mark.asyncio
+async def test_array_response_line_count_mismatch_is_recorded() -> None:
+    """array 译文行数仍按本地原文数量校验。"""
+    text_rules = _build_text_rules(width_limit=40)
+    item = TranslationItem(
+        location_path="Map001.json/1/0/2",
+        item_type="array",
+        original_lines=["はい", "いいえ"],
+    )
+    item.build_placeholders(text_rules)
+    right_queue: asyncio.Queue[list[TranslationItem] | None] = asyncio.Queue()
+    error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
+
+    await verify_translation_batch(
+        ai_result=_build_model_response(item=item, translation_lines=["是"]),
+        items=[item],
+        right_queue=right_queue,
+        error_queue=error_queue,
+        text_rules=text_rules,
+    )
+
+    assert right_queue.empty()
+    error_items = await error_queue.get()
+    assert error_items is not None
+    assert error_items[0].error_type == "选项行数不匹配"
 
 
 def test_single_text_value_wraps_embedded_display_lines() -> None:
@@ -97,6 +313,34 @@ def test_single_text_value_wraps_embedded_display_lines() -> None:
     )
 
     assert text == "说明\n「甲乙丙丁戊己，\n　庚辛壬癸」"
+
+
+def test_single_text_value_preserves_literal_line_break_markers() -> None:
+    """源文使用字面量反斜杠 n 时，切宽后仍返回单个字段。"""
+    text_rules = _build_text_rules(width_limit=8)
+
+    text = split_overwide_single_text_value_if_needed(
+        original_lines=["説明\\n「原文」"],
+        translation_text="说明\n「甲乙丙丁戊己，庚辛壬癸」",
+        location_path="plugins.js/1/message",
+        text_rules=text_rules,
+    )
+
+    assert text == "说明\\n「甲乙丙丁戊己，\\n　庚辛壬癸」"
+
+
+def test_single_text_value_splits_by_literal_line_break_placeholder() -> None:
+    """标准换行占位符参与 short_text 的显示行切宽。"""
+    text_rules = _build_text_rules(width_limit=8)
+
+    text = split_overwide_single_text_value_if_needed(
+        original_lines=["説明\\n原文"],
+        translation_text=f"说明{LITERAL_LINE_BREAK_PLACEHOLDER}甲乙丙丁戊己，庚辛壬癸",
+        location_path="plugins.js/1/message",
+        text_rules=text_rules,
+    )
+
+    assert text == f"说明{LITERAL_LINE_BREAK_PLACEHOLDER}甲乙丙丁戊己，{LITERAL_LINE_BREAK_PLACEHOLDER}庚辛壬癸"
 
 
 @pytest.mark.asyncio

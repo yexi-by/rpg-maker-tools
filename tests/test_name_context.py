@@ -115,7 +115,7 @@ async def test_name_context_skips_actor_name_control_variables(
 def test_translation_prompt_injects_filled_name_context() -> None:
     """正文提示词会注入已填写的术语表。"""
     registry = NameContextRegistry(
-        speaker_names={"村人": "村民"},
+        speaker_names={"村人": "村民", "*": "*", ":": "冒号", "同名": "同名"},
         map_display_names={"始まりの町": "起始之镇"},
     )
     data = TranslationData(
@@ -125,7 +125,7 @@ def test_translation_prompt_injects_filled_name_context() -> None:
                 location_path="Map001.json/1/0/0",
                 item_type="long_text",
                 role="村人",
-                original_lines=["こんにちは"],
+                original_lines=["こんにちは", "同名", ":"],
             )
         ],
     )
@@ -143,13 +143,18 @@ def test_translation_prompt_injects_filled_name_context() -> None:
     )
     user_prompt = batches[0].messages[1].text
 
-    assert "[[术语表]]" in user_prompt
+    assert "# 术语表" in user_prompt
+    assert "[[术语表]]" not in user_prompt
+    assert "[[需要翻译的正文]]" not in user_prompt
     assert "name_registry.json" not in user_prompt
     assert "translated_text" not in user_prompt
     assert "位置:" not in user_prompt
     assert "村人 => 村民" in user_prompt
     assert "始まりの町 => 起始之镇" in user_prompt
-    assert "[[需要翻译的正文]]" in user_prompt
+    assert "* => *" not in user_prompt
+    assert ": => 冒号" not in user_prompt
+    assert "同名 => 同名" not in user_prompt
+    assert "# 正文" in user_prompt
 
 
 @pytest.mark.asyncio

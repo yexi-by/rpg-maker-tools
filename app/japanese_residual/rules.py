@@ -172,7 +172,7 @@ def _validate_allowed_terms_appear_in_item(
     active_item: TranslationItem,
     translated_item: TranslationItem | None,
 ) -> None:
-    """确认例外片段来自当前条目的原文或已入库译文。"""
+    """确认例外片段来自当前条目的原文或已保存译文。"""
     visible_text_parts = [*active_item.original_lines]
     if translated_item is not None:
         visible_text_parts.extend(translated_item.translation_lines)

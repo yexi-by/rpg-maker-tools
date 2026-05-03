@@ -11,7 +11,7 @@ from app.config.custom_placeholder_rules import (
     load_custom_placeholder_rules_text,
 )
 from app.config.schemas import TextRulesSetting
-from app.rmmz.control_codes import CustomPlaceholderRule
+from app.rmmz.control_codes import CustomPlaceholderRule, LITERAL_LINE_BREAK_PLACEHOLDER
 from app.rmmz.schema import TranslationItem
 from app.rmmz.text_rules import TextRules, get_default_text_rules
 
@@ -40,6 +40,7 @@ def test_text_rules_replace_and_restore_standard_rmmz_control_sequences() -> Non
         "\\PY[7]",
         "\\FS[8]",
         "%9",
+        "\\n",
     ]
     placeholders = [
         "[RMMZ_VARIABLE_1]",
@@ -62,6 +63,7 @@ def test_text_rules_replace_and_restore_standard_rmmz_control_sequences() -> Non
         "[RMMZ_TEXT_Y_POSITION_7]",
         "[RMMZ_FONT_SIZE_8]",
         "[RMMZ_MESSAGE_ARGUMENT_9]",
+        LITERAL_LINE_BREAK_PLACEHOLDER,
     ]
     item = TranslationItem(
         location_path="Map001.json/1/0/0",
@@ -166,7 +168,7 @@ def test_unprotected_control_sequences_must_stay_exact() -> None:
         item.verify_placeholders(rules)
 
 
-def test_unprotected_control_sequences_report_added_escape() -> None:
+def test_unprotected_control_sequences_report_added_unknown_escape() -> None:
     """译文新增未覆盖反斜杠片段时必须显式失败。"""
     rules = get_default_text_rules()
     item = TranslationItem(
@@ -176,10 +178,30 @@ def test_unprotected_control_sequences_report_added_escape() -> None:
     )
 
     item.build_placeholders(rules)
-    item.translation_lines_with_placeholders = [r"你好\n下一行"]
+    item.translation_lines_with_placeholders = [r"你好\X下一行"]
 
-    with pytest.raises(ValueError, match=r"\\n"):
+    with pytest.raises(ValueError, match=r"\\X"):
         item.verify_placeholders(rules)
+
+
+def test_literal_line_break_placeholder_allows_width_wrap_additions() -> None:
+    """字面量反斜杠 n 是标准换行占位符，允许行宽兜底追加换行。"""
+    rules = get_default_text_rules()
+    item = TranslationItem(
+        location_path="plugins.js/1/message",
+        item_type="short_text",
+        original_lines=["説明\\n本文"],
+    )
+
+    item.build_placeholders(rules)
+    assert item.original_lines_with_placeholders == [f"説明{LITERAL_LINE_BREAK_PLACEHOLDER}本文"]
+
+    item.translation_lines_with_placeholders = [
+        f"说明{LITERAL_LINE_BREAK_PLACEHOLDER}正文{LITERAL_LINE_BREAK_PLACEHOLDER}补充"
+    ]
+    item.verify_placeholders(rules)
+    item.restore_placeholders()
+    assert item.translation_lines == ["说明\\n正文\\n补充"]
 
 
 def test_custom_placeholder_rules_load_from_json_file(tmp_path: Path) -> None:

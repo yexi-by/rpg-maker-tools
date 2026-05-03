@@ -8,9 +8,20 @@ import pytest
 
 from app.agent_toolkit import AgentToolkitService
 from app.llm import LLMHandler
+from app.name_context.schemas import NameContextRegistry
 from app.persistence import GameRegistry
+from app.plugin_text import build_plugin_hash
 from app.rmmz.json_types import JsonObject, coerce_json_value, ensure_json_array, ensure_json_object
-from app.rmmz.schema import NoteTagTextRuleRecord, PluginTextRuleRecord, TranslationErrorItem, TranslationItem
+from app.rmmz.loader import load_game_data
+from app.rmmz.schema import (
+    EventCommandParameterFilter,
+    EventCommandTextRuleRecord,
+    NoteTagTextRuleRecord,
+    PlaceholderRuleRecord,
+    PluginTextRuleRecord,
+    TranslationErrorItem,
+    TranslationItem,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_SETTING_PATH = ROOT / "setting.example.toml"
@@ -143,6 +154,107 @@ async def test_prepare_agent_workspace_includes_placeholder_rule_draft(
     assert note_rules == {}
     assert report.summary["placeholder_rule_draft_count"] == 1
     assert "note-tag-rules.json" in json.dumps(report.details, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_workspace_prefills_imported_database_rules(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """二次翻译工作区会回填当前数据库中已导入的规则和术语表。"""
+    items_path = minimal_game_dir / "data" / "Items.json"
+    raw_items = cast(object, json.loads(items_path.read_text(encoding="utf-8")))
+    items = ensure_json_array(coerce_json_value(raw_items), "Items.json")
+    first_item = ensure_json_object(items[1], "Items.json[1]")
+    first_item["note"] = "<拡張説明:薬草の詳細説明>"
+    _ = items_path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    seed_workspace = tmp_path / "seed-workspace"
+    workspace = tmp_path / "workspace"
+
+    _ = await service.prepare_agent_workspace(
+        game_title="テストゲーム",
+        output_dir=seed_workspace,
+        command_codes=None,
+    )
+    exported_registry = load_json_object(seed_workspace / "name-context" / "name_registry.json")
+    speaker_names = ensure_json_object(coerce_json_value(exported_registry["speaker_names"]), "speaker_names")
+    map_display_names = ensure_json_object(coerce_json_value(exported_registry["map_display_names"]), "map_display_names")
+    filled_registry = NameContextRegistry(
+        speaker_names={source_text: f"{source_text}译" for source_text in speaker_names},
+        map_display_names={source_text: f"{source_text}译" for source_text in map_display_names},
+    )
+    game_data = await load_game_data(minimal_game_dir)
+    async with await registry.open_game("テストゲーム") as session:
+        await session.replace_name_context_registry(filled_registry)
+        await session.replace_plugin_text_rules(
+            [
+                PluginTextRuleRecord(
+                    plugin_index=0,
+                    plugin_name="TestPlugin",
+                    plugin_hash=build_plugin_hash(game_data.plugins_js[0]),
+                    path_templates=["$['parameters']['Message']"],
+                )
+            ]
+        )
+        await session.replace_event_command_text_rules(
+            [
+                EventCommandTextRuleRecord(
+                    command_code=357,
+                    parameter_filters=[EventCommandParameterFilter(index=0, value="TestPlugin")],
+                    path_templates=["$['parameters'][3]['message']"],
+                )
+            ]
+        )
+        await session.replace_note_tag_text_rules(
+            [NoteTagTextRuleRecord(file_name="Items.json", tag_names=["拡張説明"])]
+        )
+        await session.replace_placeholder_rules(
+            [
+                PlaceholderRuleRecord(
+                    pattern_text=r"(?i)\\F\d*\[[^\]\r\n]+\]",
+                    placeholder_template="[CUSTOM_FACE_PORTRAIT_{index}]",
+                )
+            ]
+        )
+
+    report = await service.prepare_agent_workspace(
+        game_title="テストゲーム",
+        output_dir=workspace,
+        command_codes=None,
+    )
+    validation_report = await service.validate_agent_workspace(game_title="テストゲーム", workspace=workspace)
+
+    prepared_registry = load_json_object(workspace / "name-context" / "name_registry.json")
+    plugin_rules = load_json_object(workspace / "plugin-rules.json")
+    event_rules = load_json_object(workspace / "event-command-rules.json")
+    note_rules = load_json_object(workspace / "note-tag-rules.json")
+    placeholder_rules = load_json_object(workspace / "placeholder-rules.json")
+    warning_codes = {warning.code for warning in validation_report.warnings}
+    assert report.status == "ok"
+    assert report.summary["plugin_rule_count"] == 1
+    assert report.summary["event_command_rule_count"] == 1
+    assert report.summary["note_tag_rule_count"] == 1
+    assert report.summary["placeholder_rule_count"] == 1
+    assert prepared_registry["speaker_names"] == filled_registry.speaker_names
+    assert prepared_registry["map_display_names"] == filled_registry.map_display_names
+    assert plugin_rules == {"TestPlugin": ["$['parameters']['Message']"]}
+    assert event_rules == {
+        "357": [
+            {
+                "match": {"0": "TestPlugin"},
+                "paths": ["$['parameters'][3]['message']"],
+            }
+        ]
+    }
+    assert note_rules == {"Items.json": ["拡張説明"]}
+    assert placeholder_rules == {r"(?i)\\F\d*\[[^\]\r\n]+\]": "[CUSTOM_FACE_PORTRAIT_{index}]"}
+    assert validation_report.status == "ok"
+    assert "plugin_rules_missing" not in warning_codes
+    assert "event_command_rules_missing" not in warning_codes
+    assert "name_context_empty_translation" not in warning_codes
 
 
 @pytest.mark.asyncio
@@ -292,13 +404,15 @@ async def test_manual_pending_translation_export_and_import(
     assert status_report.summary["pending_count"] == quality_report.summary["pending_count"]
     assert status_report.summary["run_pending_count"] == 10
     assert status_report.summary["quality_error_count"] == 0
-    assert status_report.summary["run_quality_error_count"] == 1
+    assert status_report.summary["run_quality_error_count"] == 0
     assert quality_report.summary["quality_error_count"] == 0
-    assert quality_report.summary["run_quality_error_count"] == 1
+    assert quality_report.summary["run_quality_error_count"] == 0
     async with await registry.open_game("テストゲーム") as session:
         translated_items = await session.read_translated_items()
+        quality_errors = await session.read_translation_quality_errors(run_record.run_id)
     translated_by_path = {item.location_path: item for item in translated_items}
     assert translated_by_path[target_path].translation_lines == ["你好"]
+    assert quality_errors == []
 
 
 @pytest.mark.asyncio
@@ -530,7 +644,7 @@ async def test_export_quality_fix_template_collects_repairable_items(
     minimal_game_dir: Path,
     tmp_path: Path,
 ) -> None:
-    """质量修复模板会从报告问题导出标准人工补译骨架并预填当前译文。"""
+    """质量修复模板会从报告问题导出标准修复表并预填当前译文。"""
     registry = GameRegistry(tmp_path / "db")
     _ = await registry.register_game(minimal_game_dir)
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
@@ -699,6 +813,56 @@ async def test_reset_translations_validates_paths_before_deleting(
     pending_count = quality_report.summary["pending_count"]
     assert isinstance(pending_count, int)
     assert pending_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_reset_translations_all_deletes_current_active_translation_cache(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """完整重译入口可以清除当前提取范围内全部已入库译文。"""
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    pending_path = tmp_path / "pending-translations.json"
+
+    _ = await service.export_pending_translations(
+        game_title="テストゲーム",
+        output_path=pending_path,
+        limit=2,
+    )
+    payload = load_json_object(pending_path)
+    target_paths = list(payload)[:2]
+    async with await registry.open_game("テストゲーム") as session:
+        await session.write_translation_items(
+            [
+                TranslationItem(
+                    location_path=target_path,
+                    item_type="short_text",
+                    role=None,
+                    original_lines=["こんにちは"],
+                    source_line_paths=[],
+                    translation_lines=["你好"],
+                )
+                for target_path in target_paths
+            ]
+        )
+
+    report = await service.reset_translations(game_title="テストゲーム", reset_all=True)
+    quality_report = await service.quality_report(game_title="テストゲーム")
+    async with await registry.open_game("テストゲーム") as session:
+        remaining_paths = await session.read_translation_location_paths()
+
+    assert report.status == "warning"
+    assert report.summary["mode"] == "all"
+    assert report.summary["reset_count"] == len(target_paths)
+    requested_count = report.summary["requested_count"]
+    assert isinstance(requested_count, int)
+    assert requested_count >= len(target_paths)
+    assert all(target_path not in remaining_paths for target_path in target_paths)
+    pending_count = quality_report.summary["pending_count"]
+    assert isinstance(pending_count, int)
+    assert pending_count >= len(target_paths)
 
 
 @pytest.mark.asyncio

@@ -136,6 +136,18 @@ async def test_registry_and_target_session_use_injected_directory(minimal_game_d
         )
         quality_errors = await session.read_translation_quality_errors(run_record.run_id)
         assert quality_errors[0].model_response == "模型原始返回"
+        await session.write_translation_run(
+            run_record.model_copy(
+                update={
+                    "success_count": 2,
+                    "quality_error_count": 1,
+                }
+            )
+        )
+        quality_errors_after_progress_update = await session.read_translation_quality_errors(
+            run_record.run_id
+        )
+        assert quality_errors_after_progress_update[0].model_response == "模型原始返回"
 
         await session.write_llm_failure(
             LlmFailureRecord(
@@ -150,3 +162,45 @@ async def test_registry_and_target_session_use_injected_directory(minimal_game_d
         )
         llm_failures = await session.read_llm_failures(run_record.run_id)
         assert llm_failures[0].category == "rate_limit"
+
+
+@pytest.mark.asyncio
+async def test_start_translation_run_clears_previous_quality_errors(minimal_game_dir: Path, tmp_path: Path) -> None:
+    """新一轮正文翻译开始时清空上一轮检查失败明细。"""
+    db_dir = tmp_path / "db"
+    registry = GameRegistry(db_dir)
+    record = await registry.register_game(minimal_game_dir)
+
+    async with await registry.open_game(record.game_title) as session:
+        first_run = await session.start_translation_run(
+            total_extracted=10,
+            pending_count=4,
+            deduplicated_count=3,
+            batch_count=2,
+        )
+        await session.write_translation_quality_errors(
+            first_run.run_id,
+            [
+                TranslationErrorItem(
+                    location_path="Map001.json/1/0/0",
+                    item_type="long_text",
+                    role=None,
+                    original_lines=["原文"],
+                    translation_lines=[],
+                    error_type="AI漏翻",
+                    error_detail=["无法解析"],
+                    model_response="上一轮模型原始返回",
+                )
+            ],
+        )
+        assert len(await session.read_translation_quality_errors(first_run.run_id)) == 1
+
+        second_run = await session.start_translation_run(
+            total_extracted=10,
+            pending_count=3,
+            deduplicated_count=2,
+            batch_count=1,
+        )
+
+        assert await session.read_translation_quality_errors(first_run.run_id) == []
+        assert await session.read_translation_quality_errors(second_run.run_id) == []

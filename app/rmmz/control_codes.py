@@ -104,6 +104,8 @@ SYMBOL_STANDARD_PLACEHOLDERS: dict[str, str] = {
     "<": "[RMMZ_INSTANT_TEXT_OFF]",
     "^": "[RMMZ_NO_WAIT]",
 }
+LITERAL_LINE_BREAK_MARKER = "\\n"
+LITERAL_LINE_BREAK_PLACEHOLDER = "[RMMZ_LITERAL_LINE_BREAK]"
 
 INDEXED_STANDARD_CONTROL_PATTERN: re.Pattern[str] = re.compile(
     r"\\(?P<code>V|N|P|C|I|PX|PY|FS)\[(?P<param>\d+)\]",
@@ -119,6 +121,7 @@ SYMBOL_STANDARD_CONTROL_PATTERN: re.Pattern[str] = re.compile(
 TERMS_PERCENT_PLACEHOLDER_PATTERN: re.Pattern[str] = re.compile(
     r"%(?P<param>\d+)"
 )
+LITERAL_LINE_BREAK_PATTERN: re.Pattern[str] = re.compile(re.escape(LITERAL_LINE_BREAK_MARKER))
 STANDARD_PLACEHOLDER_PATTERN: re.Pattern[str] = re.compile(
     "|".join(
         (
@@ -128,6 +131,7 @@ STANDARD_PLACEHOLDER_PATTERN: re.Pattern[str] = re.compile(
                 + r")_\d+\]"
             ),
             r"\[RMMZ_MESSAGE_ARGUMENT_\d+\]",
+            re.escape(LITERAL_LINE_BREAK_PLACEHOLDER),
             *(
                 re.escape(placeholder)
                 for placeholder in [
@@ -161,6 +165,7 @@ def iter_standard_control_spans(text: str) -> list[ControlSequenceSpan]:
     spans.extend(_iter_no_param_standard_control_spans(text))
     spans.extend(_iter_symbol_standard_control_spans(text))
     spans.extend(_iter_terms_percent_spans(text))
+    spans.extend(_iter_literal_line_break_spans(text))
     return spans
 
 
@@ -296,12 +301,32 @@ def _iter_terms_percent_spans(text: str) -> list[ControlSequenceSpan]:
     return spans
 
 
+def _iter_literal_line_break_spans(text: str) -> list[ControlSequenceSpan]:
+    """扫描插件和 Note 文本中用字面量反斜杠 n 表达的游戏内换行。"""
+    spans: list[ControlSequenceSpan] = []
+    for match in LITERAL_LINE_BREAK_PATTERN.finditer(text):
+        spans.append(
+            ControlSequenceSpan(
+                start_index=match.start(),
+                end_index=match.end(),
+                original=match.group(0),
+                source="standard",
+                placeholder=LITERAL_LINE_BREAK_PLACEHOLDER,
+                custom_template=None,
+                priority=0,
+            )
+        )
+    return spans
+
+
 __all__: list[str] = [
     "ALL_PLACEHOLDER_PATTERN",
     "CUSTOM_PLACEHOLDER_PATTERN",
     "ControlSequenceSpan",
     "CustomPlaceholderRule",
     "INDEXED_STANDARD_CODES",
+    "LITERAL_LINE_BREAK_MARKER",
+    "LITERAL_LINE_BREAK_PLACEHOLDER",
     "RawControlSequenceCandidate",
     "STANDARD_PLACEHOLDER_PATTERN",
     "SYMBOL_STANDARD_PLACEHOLDERS",

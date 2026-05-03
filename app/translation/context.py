@@ -13,29 +13,34 @@ from app.rmmz.text_rules import TextRules
 from app.name_context.prompt import NamePromptIndex, format_name_prompt_section
 from app.translation.batch import TranslationBatch
 
-MAP_PROMPT_TEMPLATE = "[[地图名]]\n{display_name}"
-BODY_PROMPT_TEMPLATE = "[[需要翻译的正文]]\n{unit_text}"
+SCENE_PROMPT_TEMPLATE = "# 场景\n\n地图：{display_name}"
+BODY_PROMPT_TEMPLATE = "# 正文\n\n{unit_text}"
 LONG_TEXT_CONTEXT_TEMPLATE = (
-    "[ID]{id}\n"
-    "[类型]{item_type}\n"
-    "[角色]{role}\n"
+    "## {sequence}\n"
     "\n"
-    "[台词]\n"
+    "id: {id}\n"
+    "type: {item_type}\n"
+    "role: {role}\n"
+    "\n"
     "{lines}\n\n"
 )
 ARRAY_CONTEXT_TEMPLATE = (
-    "[ID]{id}\n"
-    "[类型]{item_type}\n"
-    "[输出行数]{line_count}\n"
+    "## {sequence}\n"
     "\n"
-    "[选项列表]\n"
+    "id: {id}\n"
+    "type: {item_type}\n"
+    "role: {role}\n"
+    "line_count: {line_count}\n"
+    "\n"
     "{lines}\n\n"
 )
 SHORT_TEXT_CONTEXT_TEMPLATE = (
-    "[ID]{id}\n"
-    "[类型]{item_type}\n"
+    "## {sequence}\n"
     "\n"
-    "[游戏文本]\n"
+    "id: {id}\n"
+    "type: {item_type}\n"
+    "role: {role}\n"
+    "\n"
     "{lines}\n\n"
 )
 NARRATION_ROLE = "旁白"
@@ -144,7 +149,7 @@ def _build_translation_batch(
 ) -> TranslationBatch:
     """组装单个翻译批次。"""
     user_prompt_sections = [
-        MAP_PROMPT_TEMPLATE.format(display_name=display_name),
+        SCENE_PROMPT_TEMPLATE.format(display_name=display_name),
     ]
     if name_prompt_index is not None:
         name_entries = name_prompt_index.select_for_batch(
@@ -169,10 +174,11 @@ def _build_translation_batch(
     )
 
 
-def _format_translation_item(item: TranslationItem, masked_text: str) -> str:
+def _format_translation_item(item: TranslationItem, masked_text: str, sequence: int) -> str:
     """将单个 `TranslationItem` 格式化成上下文正文块。"""
     if item.item_type == "long_text":
         return LONG_TEXT_CONTEXT_TEMPLATE.format(
+            sequence=sequence,
             id=item.location_path,
             item_type=item.item_type,
             role=item.role or "",
@@ -180,15 +186,19 @@ def _format_translation_item(item: TranslationItem, masked_text: str) -> str:
         )
     if item.item_type == "array":
         return ARRAY_CONTEXT_TEMPLATE.format(
+            sequence=sequence,
             id=item.location_path,
             item_type=item.item_type,
+            role=item.role or "",
             line_count=len(item.original_lines),
             lines=masked_text,
         )
     if item.item_type == "short_text":
         return SHORT_TEXT_CONTEXT_TEMPLATE.format(
+            sequence=sequence,
             id=item.location_path,
             item_type=item.item_type,
+            role=item.role or "",
             lines=masked_text,
         )
     raise ValueError(f"未知的 item_type: {item.item_type}")
@@ -204,9 +214,14 @@ def _append_item_to_batch(
     """将单个正文条目追加到当前批次。"""
     item.build_placeholders(text_rules)
     masked_text = "\n".join(item.original_lines_with_placeholders)
-    main_bodies.append(_format_translation_item(item=item, masked_text=masked_text))
+    formatted_item = _format_translation_item(
+        item=item,
+        masked_text=masked_text,
+        sequence=len(current_items) + 1,
+    )
+    main_bodies.append(formatted_item)
     current_items.append(item)
-    return len(masked_text)
+    return len(formatted_item)
 
 
 __all__: list[str] = ["iter_translation_context_batches"]

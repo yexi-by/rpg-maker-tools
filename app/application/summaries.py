@@ -79,7 +79,7 @@ class TextTranslationSummary:
 
     @property
     def is_blocked(self) -> bool:
-        """判断正文翻译是否被业务前置条件阻断。"""
+        """判断正文翻译是否因为业务前置条件无法继续。"""
         return self.blocked_reason is not None
 
     @property

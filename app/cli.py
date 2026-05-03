@@ -313,16 +313,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     export_pending_parser = subparsers.add_parser(
         "export-pending-translations",
-        help="导出尚未成功入库的正文条目；不传 --limit 时导出全部",
+        help="导出还没成功保存译文的正文条目；不传 --limit 时导出全部",
     )
     add_optional_target_arguments(export_pending_parser)
-    _ = export_pending_parser.add_argument("--output", required=True, help="人工补译 JSON 输出文件")
-    _ = export_pending_parser.add_argument("--limit", type=int, help="最多导出的待补译条目数；省略则导出全部")
+    _ = export_pending_parser.add_argument("--output", required=True, help="手动填写译文表输出文件")
+    _ = export_pending_parser.add_argument("--limit", type=int, help="最多导出的待填写条目数；省略则导出全部")
     _ = export_pending_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
     export_untranslated_parser = subparsers.add_parser(
         "export-untranslated-translations",
-        help="一键导出全部尚未成功入库的正文原文结构，供 Agent 填写 translation_lines",
+        help="一次导出全部还没成功保存译文的正文原文结构，供 Agent 填写 translation_lines，也就是中文译文行",
     )
     add_optional_target_arguments(export_untranslated_parser)
     _ = export_untranslated_parser.add_argument("--output", required=True, help="全部未翻译正文 JSON 输出文件")
@@ -330,7 +330,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     export_quality_fix_parser = subparsers.add_parser(
         "export-quality-fix-template",
-        help="根据 quality-report 的问题明细导出人工修复 JSON 骨架",
+        help="根据 quality-report 的问题明细导出可填写的修复表",
     )
     add_optional_target_arguments(export_quality_fix_parser)
     _ = export_quality_fix_parser.add_argument("--output", required=True, help="质量问题修复 JSON 输出文件")
@@ -338,18 +338,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     import_manual_parser = subparsers.add_parser(
         "import-manual-translations",
-        help="导入 Agent 人工补齐的正文译文，校验并按行宽规范化 long_text 后写入当前游戏数据库",
+        help="导入 Agent 手动填写的正文译文，校验并按行宽规范化 long_text 后保存到当前游戏数据库",
     )
     add_optional_target_arguments(import_manual_parser)
-    _ = import_manual_parser.add_argument("--input", required=True, help="已填写的人工补译 JSON 文件")
+    _ = import_manual_parser.add_argument("--input", required=True, help="已填写的译文表文件")
     _ = import_manual_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
     reset_translations_parser = subparsers.add_parser(
         "reset-translations",
-        help="按 location_paths 清除已入库译文，让指定条目回到 pending 状态",
+        help="删除已保存译文，让指定条目或当前提取范围全部条目重新交给模型翻译",
     )
     add_optional_target_arguments(reset_translations_parser)
-    _ = reset_translations_parser.add_argument("--input", required=True, help='包含 {"location_paths": [...]} 的重置 JSON 文件')
+    reset_translations_source_group = reset_translations_parser.add_mutually_exclusive_group(required=True)
+    _ = reset_translations_source_group.add_argument("--input", help='包含 {"location_paths": [...]} 的重置 JSON 文件')
+    _ = reset_translations_source_group.add_argument(
+        "--all",
+        action="store_true",
+        dest="reset_all",
+        help="重置当前提取范围内的全部已保存译文，用于完整重译",
+    )
     _ = reset_translations_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
     validate_japanese_residual_parser = subparsers.add_parser(
@@ -478,7 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     validate_workspace_parser = subparsers.add_parser(
         "validate-agent-workspace",
-        help="校验 Agent 临时工作区产物是否可导入",
+        help="校验 Agent 临时工作区文件是否可导入",
     )
     add_optional_target_arguments(validate_workspace_parser)
     _ = validate_workspace_parser.add_argument("--workspace", required=True, help="Agent 临时工作区目录")
@@ -486,7 +493,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     cleanup_workspace_parser = subparsers.add_parser(
         "cleanup-agent-workspace",
-        help="按 manifest 清理 Agent 临时工作区产物",
+        help="按 manifest 清理 Agent 临时工作区文件",
     )
     _ = cleanup_workspace_parser.add_argument("--workspace", required=True, help="Agent 临时工作区目录")
     _ = cleanup_workspace_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
@@ -507,10 +514,10 @@ def add_optional_target_arguments(parser: argparse.ArgumentParser, *, required: 
 def add_translation_limit_arguments(parser: argparse.ArgumentParser) -> None:
     """给翻译命令增加单次运行控制参数。"""
     group = parser.add_argument_group("运行控制")
-    _ = group.add_argument("--max-items", type=int, help="本轮最多处理的待翻译条目数")
+    _ = group.add_argument("--max-items", type=int, help="本轮最多处理的还没成功保存译文条目数")
     _ = group.add_argument("--max-batches", type=int, help="本轮最多处理的模型批次数")
     _ = group.add_argument("--time-limit-seconds", type=int, help="本轮翻译最长运行秒数")
-    _ = group.add_argument("--stop-on-error-rate", type=float, help="译文质量错误率达到该值时停止本轮")
+    _ = group.add_argument("--stop-on-error-rate", type=float, help="检查没通过的译文比例达到该值时停止本轮")
     _ = group.add_argument("--stop-on-rate-limit-count", type=int, help="模型限流故障达到该次数时停止本轮")
 
 
@@ -910,7 +917,7 @@ async def run_export_pending_translations_command(args: argparse.Namespace) -> i
         output_path=output_path,
         limit=limit,
     )
-    write_report_outputs(report=report, args=args, title="人工补译导出报告", write_output_file=False)
+    write_report_outputs(report=report, args=args, title="手动填写译文表导出报告", write_output_file=False)
     return 1 if report.status == "error" else 0
 
 
@@ -947,16 +954,17 @@ async def run_import_manual_translations_command(args: argparse.Namespace) -> in
     input_path = read_required_path_arg(args, "input")
     service = AgentToolkitService()
     report = await service.import_manual_translations(game_title=game_title, input_path=input_path)
-    write_report_outputs(report=report, args=args, title="人工补译导入报告")
+    write_report_outputs(report=report, args=args, title="手动填写译文表导入报告")
     return 1 if report.status == "error" else 0
 
 
 async def run_reset_translations_command(args: argparse.Namespace) -> int:
     """执行 `reset-translations` 命令。"""
     game_title = await resolve_target_game_title(args)
-    input_path = read_required_path_arg(args, "input")
+    input_path = read_optional_path_arg(args, "input")
+    reset_all = read_bool_arg(args, "reset_all")
     service = AgentToolkitService()
-    report = await service.reset_translations(game_title=game_title, input_path=input_path)
+    report = await service.reset_translations(game_title=game_title, input_path=input_path, reset_all=reset_all)
     write_report_outputs(report=report, args=args, title="译文重置报告")
     return 1 if report.status == "error" else 0
 
@@ -1132,26 +1140,26 @@ async def write_back_for_handler(
 
 
 async def ensure_write_back_gate(game_title: str) -> None:
-    """回写前执行质量门禁，避免把部分失败结果写入游戏。"""
+    """写回前执行质量检查，避免把部分失败结果写入游戏。"""
     report = await AgentToolkitService().quality_report(game_title=game_title)
     if report.status != "error":
         return
     messages = "；".join(error.message for error in report.errors)
-    raise CliBusinessError(f"回写门禁未通过：{messages}")
+    raise CliBusinessError(f"写进游戏文件前检查没通过：{messages}")
 
 
 def ensure_text_translation_success(summary: TextTranslationSummary) -> None:
     """校验正文翻译摘要是否允许流水线继续。"""
     if summary.is_blocked:
-        raise CliBusinessError(f"正文翻译被阻断：{summary.blocked_reason}")
+        raise CliBusinessError(f"正文翻译不能继续：{summary.blocked_reason}")
     if summary.has_errors:
         raise CliBusinessError(f"正文翻译产生错误条目，已停止后续流程：成功 {summary.success_count} 条，失败 {summary.error_count} 条")
 
 
 def ensure_text_translation_not_blocked(summary: TextTranslationSummary) -> None:
-    """校验单独翻译命令是否遇到阻断级故障。"""
+    """校验单独翻译命令是否遇到不能继续的故障。"""
     if summary.is_blocked:
-        raise CliBusinessError(f"正文翻译被阻断：{summary.blocked_reason}")
+        raise CliBusinessError(f"正文翻译不能继续：{summary.blocked_reason}")
     if summary.has_errors:
         logger.warning(
             f"[tag.warning]正文翻译存在待处理失败项[/tag.warning] 成功 [tag.count]{summary.success_count}[/tag.count] 条，失败 [tag.count]{summary.error_count}[/tag.count] 条；可继续运行 translate 或使用质量报告排查"
@@ -1165,7 +1173,7 @@ def build_translate_summary_report(summary: TextTranslationSummary) -> AgentRepo
         warnings.append(
             issue(
                 "translation_quality_errors",
-                f"本轮翻译产生 {summary.error_count} 条译文质量错误，可续跑或人工补译",
+                f"本轮翻译有 {summary.error_count} 条模型翻了但项目检查没通过的译文；可以继续运行 translate，或导出手动填写译文表修复",
             )
         )
     return AgentReport.from_parts(
@@ -1275,7 +1283,7 @@ def render_agent_report(*, report: AgentReport, title: str) -> None:
     console.print(summary_table)
 
     if report.errors:
-        error_table = Table(title="阻断错误")
+        error_table = Table(title="必须先处理的错误")
         error_table.add_column("代码", style="red")
         error_table.add_column("说明", style="white")
         for item in report.errors:

@@ -2,7 +2,7 @@
 
 A.T.T MZ 是面向 RPG Maker MZ 日文游戏的自动汉化工具。新手只需要准备一个游戏目录、一个 OpenAI 兼容模型服务，以及一个能读取项目文件并运行命令的 Agent，例如 Codex、Claude Code 或其他同类工具。Agent 按本项目 Skill 执行流程：分析规则、翻译、检查质量、写回游戏，最后运行汉化后的游戏。
 
-进阶命令、Agent 协议和人工补译细节见：[进阶使用技术文档](docs/advanced-usage.md)。
+进阶命令、Agent 协议和手动填写译文表的细节见：[进阶使用技术文档](docs/advanced-usage.md)。
 
 ## 准备内容
 
@@ -101,10 +101,10 @@ claude --permission-mode bypassPermissions
 2. 全程按 Skill 的黑盒协议工作，只通过 CLI、工作区 JSON 和游戏目录处理业务数据。
 3. 启动任何翻译前，先扫描并校验占位符规则、术语表、插件规则、事件指令规则和 Note 标签规则。
 4. 先小批量翻译并运行 quality-report，确认没有乱码、占位符风险、超宽行和明显日文残留后，再继续全量翻译。
-5. 质量问题优先用 export-quality-fix-template 导出修复骨架，再用 import-manual-translations 导入。
-6. pending 需要人工补齐时，用 export-untranslated-translations 导出完整结构，只填写 translation_lines。
-7. 不直接修改数据库，不跳过 validate，不在 quality-report 存在阻断问题时 write-back。
-8. write-back 前先向我确认；我确认后再写回游戏目录。
+5. 质量问题优先用 export-quality-fix-template 导出可填写的修复表，再用 import-manual-translations 导入。
+6. 如果还有没成功保存译文的文本，用 export-untranslated-translations 导出完整译文表，只填写 translation_lines，也就是中文译文行。
+7. 不直接修改数据库，不跳过 validate，不在 quality-report 报告错误时执行 write-back，也就是把译文写进游戏文件。
+8. 执行 write-back 前先向我确认；我确认后再写回游戏目录。
 9. 写回完成后告诉我如何启动汉化后的游戏。
 ```
 
@@ -112,7 +112,7 @@ Agent 会在过程中运行 `add-game`，并从游戏数据中识别 `<游戏标
 
 ## 6. 确认写回
 
-当 Agent 告诉你 `quality-report --json` 已经没有阻断问题，并询问是否执行 `write-back` 时，确认后再让它继续。
+当 Agent 告诉你 `quality-report --json` 已经没有错误，并询问是否执行 `write-back` 时，确认后再让它继续。
 
 写回完成后，游戏目录会被更新为汉化文本。工具会尽量保留原始数据备份；但新手仍建议使用复制出来的游戏目录操作。
 
@@ -130,11 +130,11 @@ Start-Process -FilePath "<游戏目录>/Game.exe"
 uv run python main.py --agent-mode quality-report --game <游戏标题> --json
 ```
 
-如果报告里还有 pending、日文残留、占位符风险或超宽行，按报告继续修复后再写回。
+如果报告里还有没成功保存译文的文本、日文残留、游戏控制符风险或太长的行，按报告继续修复后再写回。
 
 ## 常见提醒
 
 - 不要在乱码状态下修译文或规则；先重设 UTF-8，再重跑相关命令。
-- 不要手工改数据库，所有补译都走 CLI 导出和导入。
+- 不要手工改数据库，所有手动填写译文表都走 CLI 导出和导入。
 - 不要跳过小批量翻译；它能提前暴露控制符和规则问题。
 - 不确定某个日文专有名词是否该保留时，让 Agent 使用日文残留例外规则，不要关闭全局检查。

@@ -2,7 +2,7 @@
 
 Autonomous Translation Toolkit for RPG Maker MZ.
 
-A.T.T MZ 是面向 RPG Maker MZ 日文游戏的命令行翻译工具。项目负责确定性提取、缓存、规则导入、质量报告和写回；Agent 或人工负责术语、插件字段、事件指令字段、Note 标签字段和少量失败项的语义判断。
+A.T.T MZ 是面向 RPG Maker MZ 日文游戏的命令行翻译工具。项目负责提取游戏文本、保存译文记录、导入规则、生成质量报告和写回游戏文件；Agent 或人工负责术语、插件字段、事件指令字段、Note 标签字段和少量失败项的语义判断。
 
 ## 环境要求
 
@@ -55,12 +55,12 @@ uv run python main.py --agent-mode translate --game <游戏标题> --json
 uv run python main.py --agent-mode write-back --game <游戏标题> --json
 ```
 
-`translate` 返回 0 表示本轮命令正常结束，不代表所有条目都成功。失败条目、pending 和质量风险由 `translation-status`、`quality-report` 和人工补译命令处理，禁止绕过 CLI 直接修改数据库。
-`translation-status --json` 的 `pending_count` 表示当前数据库实时未翻译数，`run_pending_count` 表示最近一次运行开始时的待处理数。
+`translate` 返回 0 表示本轮命令正常结束，不代表所有文本都已经成功保存译文。没成功保存译文的文本和检查没通过的译文由 `translation-status`、`quality-report` 和手动填写译文表命令处理，禁止绕过 CLI 直接修改数据库。
+`translation-status --json` 的 `pending_count` 表示当前还有多少文本没成功保存译文，`run_pending_count` 表示最近一次运行开始时有多少文本需要处理。
 
 ## Agent 自动翻译示范（以 Claude Code 为例）
 
-下面示范面向第一次使用的 Agent 操作者。A.T.T MZ 不绑定某一个 Agent；Codex、Claude Code 或其他能读取项目文件并运行命令的工具都可以使用。核心思路是：先让 Agent 读取本项目 Skill，再由它按 CLI 协议准备工作区、分析规则、小批量翻译、质量检查、补译和写回。
+下面示范面向第一次使用的 Agent 操作者。A.T.T MZ 不绑定某一个 Agent；Codex、Claude Code 或其他能读取项目文件并运行命令的工具都可以使用。核心思路是：先让 Agent 读取本项目 Skill，再由它按 CLI 协议准备工作区、分析规则、小批量翻译、质量检查、手动填写失败译文和写回。
 
 友情提示：Windows 终端容易把中日文和控制符显示成乱码。启动 Agent 前，先在同一个 PowerShell 会话里设置 UTF-8：
 
@@ -95,9 +95,9 @@ claude --permission-mode bypassPermissions
 2. 先运行 doctor、add-game、prepare-agent-workspace，并确认 <游戏标题>。
 3. 分析并校验占位符规则、术语表、插件规则、事件指令规则和 Note 标签规则；通过 CLI validate 后再 import。
 4. 先执行 translate --max-batches 1 小批量试跑，再查看 translation-status 和 quality-report。
-5. 质量问题优先用 export-quality-fix-template 导出修复骨架，再用 import-manual-translations 导入。
-6. pending 需要人工补齐时，使用 export-untranslated-translations 导出完整结构，只填写 translation_lines。
-7. 不直接修改数据库，不跳过 validate，不在 quality-report 存在阻断问题时 write-back。
+5. 质量问题优先用 export-quality-fix-template 导出可填写的修复表，再用 import-manual-translations 导入。
+6. 如果还有没成功保存译文的文本，使用 export-untranslated-translations 导出完整译文表，只填写 translation_lines，也就是中文译文行。
+7. 不直接修改数据库，不跳过 validate，不在 quality-report 报告错误时执行 write-back，也就是把译文写进游戏文件。
 8. 最终写回前先向我确认；我确认后再执行 write-back --json。
 ```
 
@@ -119,29 +119,35 @@ uv run python main.py --agent-mode import-note-tag-rules --game <游戏标题> -
 
 Note 标签规则用于基础数据库 `note` 字段中由插件显示给玩家的说明文本，例如 `<拡張説明:...>`、`<ExtendDesc:...>`。不要把 `<upgrade:...>`、`<ChainSkill:...>`、`<EquipState:...>` 等机器协议标签加入规则，也不要手工改游戏 `data/*.json`。
 
-## 人工补译
+## 手动填写译文表
 
-全量导出所有尚未成功入库的正文原文结构，Agent 只填写 `translation_lines` 后再导入：
+全量导出所有还没成功保存译文的正文原文结构，Agent 只填写 `translation_lines`，也就是中文译文行，然后再导入：
 
 ```bash
 uv run python main.py --agent-mode export-untranslated-translations --game <游戏标题> --output <工作区>/pending-translations.json --json
 uv run python main.py --agent-mode import-manual-translations --game <游戏标题> --input <工作区>/pending-translations.json --json
 ```
 
-分批或抽样补译时使用 `export-pending-translations --limit N`；省略 `--limit` 时也会导出全部 pending 条目。
-人工补译导入会按当前 `[text_rules]` 行宽配置自动拆短 `long_text` 译文；若仍存在无法安全拆分的超宽行，`quality-report` 会继续阻断写回。
+分批或抽样填写时使用 `export-pending-translations --limit N`；省略 `--limit` 时也会导出全部还没成功保存译文的文本。
+手动填写的译文导入时会按当前 `[text_rules]` 行宽配置自动拆短 `long_text` 译文；若仍存在无法安全拆分的太长行，`quality-report` 会继续报告错误，不能写进游戏文件。
 
-质量报告已经给出可修复明细时，优先导出修复模板，Agent 只改 `translation_lines` 后再导入：
+质量报告已经给出可修复明细时，优先导出可填写的修复表，Agent 只改 `translation_lines`，也就是中文译文行，之后再导入：
 
 ```bash
 uv run python main.py --agent-mode export-quality-fix-template --game <游戏标题> --output <工作区>/quality-fix-template.json --json
 uv run python main.py --agent-mode import-manual-translations --game <游戏标题> --input <工作区>/quality-fix-template.json --json
 ```
 
-确认为坏译文需要回到 pending 重新翻译时，使用显式重置文件，不要用空译文绕过导入校验：
+确认为坏译文需要删除并重新交给模型翻译时，使用显式重置文件，不要用空译文绕过导入校验：
 
 ```bash
 uv run python main.py --agent-mode reset-translations --game <游戏标题> --input <工作区>/reset-translations.json --json
+```
+
+用户明确要求完整重译已完成游戏时，直接重置当前提取范围内全部已保存译文记录：
+
+```bash
+uv run python main.py --agent-mode reset-translations --game <游戏标题> --all --json
 ```
 
 确认为致谢名单、Staff 名、作品名、品牌名或专有名词而需要保留日文片段时，使用显式例外规则，不要关闭全局日文残留检测：

@@ -8,11 +8,11 @@
 import asyncio
 
 from json_repair import repair_json
-from pydantic import RootModel
+from pydantic import BaseModel, RootModel
 
 from app.japanese_residual import JapaneseResidualRuleSet, check_japanese_residual_for_item
 from app.rmmz.schema import ErrorType, TranslationErrorItem, TranslationItem
-from app.rmmz.text_rules import TextRules
+from app.rmmz.text_rules import ControlSequenceSpan, TextRules
 from app.translation.line_wrap import (
     align_long_text_lines,
     normalize_translated_wrapping_punctuation,
@@ -26,7 +26,14 @@ ERR_JAPANESE_RESIDUAL: ErrorType = "日文残留"
 ERR_ARRAY_LINE_COUNT: ErrorType = "选项行数不匹配"
 
 
-class TranslationResponse(RootModel[dict[str, str]]):
+class TranslationResponseItem(BaseModel):
+    """模型返回的单条对照译文。"""
+
+    id: str
+    translation_lines: list[str]
+
+
+class TranslationResponse(RootModel[list[TranslationResponseItem]]):
     """正文翻译返回结果模型。"""
 
 
@@ -46,7 +53,8 @@ async def verify_translation_batch(
     try:
         clean_result = repair_json(ai_result, return_objects=False)
 
-        translation_map = TranslationResponse.model_validate_json(clean_result).root
+        response_items = TranslationResponse.model_validate_json(clean_result).root
+        translation_map = _build_translation_line_map(response_items=response_items, items=items)
     except Exception as error:
         for item in items:
             error_items.append(
@@ -57,7 +65,7 @@ async def verify_translation_batch(
                     original_lines=list(item.original_lines),
                     translation_lines=[],
                     error_type=ERR_PARSE_FAILED,
-                    error_detail=["模型返回无法解析为 JSON 对象", f"详细错误: {error}"],
+                    error_detail=["模型返回无法解析为 JSON 数组", f"详细错误: {error}"],
                     model_response=ai_result,
                 )
             )
@@ -66,8 +74,8 @@ async def verify_translation_batch(
         return
 
     for item in items:
-        translation_text = translation_map.get(item.location_path)
-        if translation_text is None:
+        model_translation_lines = translation_map.get(item.location_path)
+        if model_translation_lines is None:
             error_items.append(
                 TranslationErrorItem(
                     location_path=item.location_path,
@@ -84,14 +92,14 @@ async def verify_translation_batch(
 
         if item.item_type == "long_text":
             translation_lines = align_long_text_lines(
-                text=translation_text,
+                text="\n".join(model_translation_lines),
                 target_lines=len(item.original_lines),
                 location_path=item.location_path,
                 text_rules=text_rules,
                 original_lines=item.original_lines,
             )
         elif item.item_type == "array":
-            translation_lines = translation_text.splitlines()
+            translation_lines = list(model_translation_lines)
             translation_lines = normalize_translated_wrapping_punctuation(
                 original_lines=item.original_lines,
                 translation_lines=translation_lines,
@@ -112,7 +120,7 @@ async def verify_translation_batch(
                 )
                 continue
         else:
-            translation_lines = [translation_text]
+            translation_lines = ["\n".join(model_translation_lines)]
             translation_lines = normalize_translated_wrapping_punctuation(
                 original_lines=item.original_lines,
                 translation_lines=translation_lines,
@@ -126,7 +134,11 @@ async def verify_translation_batch(
                     text_rules=text_rules,
                 )
 
-        item.translation_lines_with_placeholders = list(translation_lines)
+        item.translation_lines_with_placeholders = _mask_known_translation_controls(
+            item=item,
+            translation_lines=translation_lines,
+            text_rules=text_rules,
+        )
         item.translation_lines = []
 
         try:
@@ -174,6 +186,45 @@ async def verify_translation_batch(
         await right_queue.put(right_items)
     if error_items:
         await error_queue.put(error_items)
+
+
+def _build_translation_line_map(
+    *,
+    response_items: list[TranslationResponseItem],
+    items: list[TranslationItem],
+) -> dict[str, list[str]]:
+    """按本地批次条目收窄模型译文，忽略无关字段和未知 ID。"""
+    valid_ids = {item.location_path for item in items}
+    translation_map: dict[str, list[str]] = {}
+    for response_item in response_items:
+        if response_item.id not in valid_ids:
+            continue
+        if response_item.id in translation_map:
+            raise ValueError(f"模型返回重复 ID: {response_item.id}")
+        translation_map[response_item.id] = list(response_item.translation_lines)
+    return translation_map
+
+
+def _mask_known_translation_controls(
+    *,
+    item: TranslationItem,
+    translation_lines: list[str],
+    text_rules: TextRules,
+) -> list[str]:
+    """把模型返回的原始控制符修回本条原文对应的占位符。"""
+    reverse_map = {original: placeholder for placeholder, original in item.placeholder_map.items()}
+
+    def replacer(span: ControlSequenceSpan) -> str:
+        """只修回原文已有的控制符，未知控制符继续交给后续校验。"""
+        placeholder = reverse_map.get(span.original)
+        if placeholder is not None:
+            return placeholder
+        return span.original
+
+    return [
+        text_rules.replace_rm_control_sequences(line, replacer)
+        for line in translation_lines
+    ]
 
 
 __all__: list[str] = ["verify_translation_batch"]

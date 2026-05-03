@@ -40,12 +40,21 @@ def test_translation_context_prompt_contains_map_and_body_without_terms() -> Non
             text_rules=get_default_text_rules(),
         )
     )
-    joined_prompt = "\n".join(message.text for message in batches[0].messages)
+    user_prompt = batches[0].messages[1].text
 
-    assert "术语" not in joined_prompt
-    assert "源语言" not in joined_prompt
-    assert "[建议换行数]" not in joined_prompt
-    assert "こんにちは" in joined_prompt
+    assert "术语" not in user_prompt
+    assert "源语言" not in user_prompt
+    assert "[建议换行数]" not in user_prompt
+    assert "[[地图名]]" not in user_prompt
+    assert "[[需要翻译的正文]]" not in user_prompt
+    assert "# 场景" in user_prompt
+    assert "# 正文" in user_prompt
+    assert "## 1" in user_prompt
+    assert "地图：始まりの町" in user_prompt
+    assert "id: Map001.json/1/0/0" in user_prompt
+    assert "type: long_text" in user_prompt
+    assert "role: 村人" in user_prompt
+    assert "こんにちは" in user_prompt
 
 
 def test_translation_context_keeps_array_output_line_count_hint() -> None:
@@ -71,6 +80,6 @@ def test_translation_context_keeps_array_output_line_count_hint() -> None:
             text_rules=get_default_text_rules(),
         )
     )
-    joined_prompt = "\n".join(message.text for message in batches[0].messages)
+    user_prompt = batches[0].messages[1].text
 
-    assert "[输出行数]2" in joined_prompt
+    assert "line_count: 2" in user_prompt
