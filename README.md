@@ -117,11 +117,13 @@ Agent 会在过程中运行 `add-game`，并从游戏数据中识别 `<游戏标
 
 默认写回只更新游戏文本，不会因为配置里有候选字体就自动覆盖字体引用。只有你明确同意覆盖字体时，Agent 才能使用 `--confirm-font-overwrite`。
 
-如果曾经确认覆盖字体，项目会记录被改过的字体引用。需要把这些引用还原时运行：
+如果曾经确认覆盖字体，需要把这些引用按原件留档还原时运行：
 
 ```powershell
 uv run python main.py --agent-mode restore-font --game <游戏标题> --json
 ```
+
+字体还原会对比 `data/*.json` 与 `data_origin/*.json`、`js/plugins.js` 与 `js/plugins_origin.js`，只把候选覆盖字体名替回同路径原件里的实际旧字体引用，不回滚已写入的译文。
 
 写回完成后，游戏目录会被更新为汉化文本。工具会尽量保留原始数据备份；但新手仍建议使用复制出来的游戏目录操作。
 

@@ -64,7 +64,7 @@ uv run python main.py --agent-mode write-back --game <游戏标题> --json
 uv run python main.py --agent-mode restore-font --game <游戏标题> --json
 ```
 
-字体还原只使用项目先前记录过的字段位置和原始值；没有记录时不会猜测原字体。
+字体还原会对比 `data/*.json` 与 `data_origin/*.json`、`js/plugins.js` 与 `js/plugins_origin.js`，只把候选覆盖字体名替回同路径原件里的实际旧字体引用，不回滚已写入的译文。若需要临时指定候选覆盖字体名，可追加 `--replacement-font-path <字体文件>`。
 
 ## Agent 自动翻译示范（以 Claude Code 为例）
 

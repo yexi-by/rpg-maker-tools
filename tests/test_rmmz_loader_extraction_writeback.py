@@ -8,7 +8,11 @@ import pytest
 
 from app.application.file_writer import reset_writable_copies
 from app.application.file_writer import write_game_files
-from app.application.font_replacement import apply_font_replacement, restore_font_references
+from app.application.font_replacement import (
+    apply_font_replacement,
+    read_plugins_js_file,
+    restore_font_references_from_origin_backups,
+)
 from app.config.schemas import TextRulesSetting
 from app.note_tag_text import NoteTagTextExtraction, build_note_tag_rule_records_from_import
 from app.note_tag_text.exporter import collect_note_tag_candidates
@@ -742,14 +746,86 @@ async def test_font_replacement_updates_only_writable_outputs(
     assert old_font not in original_system
     assert another_font not in original_system
 
-    restored_count = restore_font_references(game_data=game_data, records=summary.records)
+    assert replacement_name not in original_system
 
-    assert restored_count == len(summary.records)
-    restored_system = json.dumps(game_data.writable_data["System.json"], ensure_ascii=False)
-    restored_plugins = str(game_data.writable_data[PLUGINS_FILE_NAME])
-    assert old_font in restored_system
-    assert another_font in restored_system
-    assert old_font in restored_plugins
-    assert another_font in restored_plugins
-    assert Path(old_font).stem in restored_plugins
-    assert replacement_name not in restored_system
+
+@pytest.mark.asyncio
+async def test_restore_font_references_uses_origin_backups_without_rolling_back_text(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """字体还原按原件留档替回旧字体引用，不回滚已经写入的译文。"""
+    fonts_dir = minimal_game_dir / "fonts"
+    fonts_dir.mkdir()
+    old_font = "OldFont.woff"
+    another_font = "AnotherFont.woff"
+    _ = (fonts_dir / old_font).write_bytes(b"old font")
+    _ = (fonts_dir / another_font).write_bytes(b"another font")
+    replacement_font = tmp_path / "NotoSansSC-Regular.ttf"
+    _ = replacement_font.write_bytes(b"new font")
+
+    system_path = minimal_game_dir / "data" / "System.json"
+    raw_system = _read_test_json(system_path)
+    system = ensure_json_object(raw_system, "System.json")
+    system["advanced"] = {
+        "mainFontFilename": old_font,
+        "numberFontFilename": another_font,
+    }
+    _rewrite_json(system_path, raw_system)
+
+    base_game_data = await load_game_data(minimal_game_dir)
+    plugin = ensure_json_object(base_game_data.plugins_js[0], "plugins[0]")
+    parameters = ensure_json_object(plugin["parameters"], "plugins[0].parameters")
+    parameters["FontFace"] = old_font
+    parameters["FontStem"] = Path(old_font).stem
+    parameters["Nested"] = json.dumps(
+        {"font": another_font, "text": "プラグイン本文"},
+        ensure_ascii=False,
+    )
+    plugins_path = minimal_game_dir / "js" / "plugins.js"
+    _ = plugins_path.write_text(
+        f"var $plugins = {json.dumps(base_game_data.plugins_js, ensure_ascii=False, indent=2)};\n",
+        encoding="utf-8",
+    )
+
+    game_data = await load_game_data(minimal_game_dir)
+    reset_writable_copies(game_data)
+    writable_system = ensure_json_object(game_data.writable_data["System.json"], "System")
+    writable_system["gameTitle"] = "翻译标题"
+    writable_plugin = ensure_json_object(game_data.writable_plugins_js[0], "plugins[0]")
+    writable_parameters = ensure_json_object(writable_plugin["parameters"], "plugins[0].parameters")
+    writable_parameters["Nested"] = json.dumps(
+        {"font": another_font, "text": "插件正文"},
+        ensure_ascii=False,
+    )
+
+    replacement_name = replacement_font.name
+    _ = apply_font_replacement(
+        game_data=game_data,
+        game_root=minimal_game_dir,
+        replacement_font_path=str(replacement_font),
+    )
+    write_game_files(game_data, minimal_game_dir)
+
+    restore_summary = restore_font_references_from_origin_backups(
+        game_root=minimal_game_dir,
+        replacement_font_names=[replacement_name],
+    )
+
+    assert restore_summary.restored_reference_count == 5
+    active_system = ensure_json_object(_read_test_json(system_path), "System.json")
+    active_advanced = ensure_json_object(active_system["advanced"], "System.advanced")
+    assert active_system["gameTitle"] == "翻译标题"
+    assert active_advanced["mainFontFilename"] == old_font
+    assert active_advanced["numberFontFilename"] == another_font
+
+    restored_plugins = read_plugins_js_file(plugins_path)
+    restored_plugin = ensure_json_object(restored_plugins[0], "plugins[0]")
+    restored_parameters = ensure_json_object(restored_plugin["parameters"], "plugins[0].parameters")
+    assert restored_parameters["FontFace"] == old_font
+    assert restored_parameters["FontStem"] == Path(old_font).stem
+    nested_text = restored_parameters["Nested"]
+    assert isinstance(nested_text, str)
+    nested_value = ensure_json_object(coerce_json_value(cast(object, json.loads(nested_text))), "Nested")
+    assert nested_value["font"] == another_font
+    assert nested_value["text"] == "插件正文"

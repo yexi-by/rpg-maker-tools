@@ -213,7 +213,7 @@ class JapaneseResidualRuleRecord(BaseModel):
 
 
 class FontReplacementRecord(BaseModel):
-    """一次字体覆盖写回中可安全还原的字段记录。"""
+    """一次字体覆盖写回中被替换的字段记录。"""
 
     file_name: str
     value_path: str

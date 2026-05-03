@@ -8,7 +8,7 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from app.application.file_writer import reset_writable_copies
-from app.cli import build_parser, read_bool_arg, read_int_set_arg
+from app.cli import build_parser, read_bool_arg, read_int_set_arg, read_optional_str_arg
 from app.config.schemas import EventCommandTextSetting
 from app.event_command_text import (
     EventCommandTextExtraction,
@@ -123,11 +123,14 @@ def test_restore_font_parser_accepts_json_output() -> None:
             "restore-font",
             "--game",
             "テストゲーム",
+            "--replacement-font-path",
+            "fonts/NotoSansSC-Regular.ttf",
             "--json",
         ]
     )
 
     assert read_bool_arg(args, "json_output") is True
+    assert read_optional_str_arg(args, "replacement_font_path") == "fonts/NotoSansSC-Regular.ttf"
 
 
 @pytest.mark.asyncio

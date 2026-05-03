@@ -3,17 +3,35 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-from app.rmmz.schema import FontReplacementRecord, GameData, PLUGINS_FILE_NAME
-from app.rmmz.text_rules import JsonObject, JsonValue
+import demjson3
+
+from app.application.file_writer import replace_json_file, replace_plugins_file
+from app.rmmz.schema import (
+    DATA_DIRECTORY_NAME,
+    DATA_ORIGIN_DIRECTORY_NAME,
+    FontReplacementRecord,
+    GameData,
+    JS_DIRECTORY_NAME,
+    PLUGINS_FILE_NAME,
+    PLUGINS_JS_PATTERN,
+    PLUGINS_ORIGIN_FILE_NAME,
+)
+from app.rmmz.text_rules import JsonObject, JsonValue, coerce_json_value
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FONTS_DIRECTORY_NAME = "fonts"
 FONT_FILE_SUFFIXES = frozenset({".ttf", ".otf", ".woff", ".woff2"})
+FONT_FILE_REFERENCE_PATTERN: re.Pattern[str] = re.compile(
+    r"[\w .+\-\u0080-\uffff]+?\.(?:ttf|otf|woff2?)",
+    re.IGNORECASE,
+)
+SIMPLE_FONT_REFERENCE_PATTERN: re.Pattern[str] = re.compile(r"[\w .+\-\u0080-\uffff]{1,128}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +43,15 @@ class FontReplacementSummary:
     replaced_reference_count: int
     copied: bool
     records: list[FontReplacementRecord]
+
+
+@dataclass(frozen=True, slots=True)
+class OriginFontRestoreSummary:
+    """按原件留档对比还原字体引用的执行摘要。"""
+
+    target_font_names: list[str]
+    restored_field_count: int
+    restored_reference_count: int
 
 
 def build_empty_font_replacement_summary() -> FontReplacementSummary:
@@ -196,7 +223,7 @@ def replace_font_names_in_plugins_with_records(
     old_font_names: list[str],
     replacement_font_name: str,
 ) -> tuple[list[dict[str, JsonValue]], int, list[FontReplacementRecord]]:
-    """替换插件配置对象中的字体引用，并记录可还原字段。"""
+    """替换插件配置对象中的字体引用，并记录本次覆盖的新字体名。"""
     replaced_plugins: list[dict[str, JsonValue]] = []
     replaced_count = 0
     records: list[FontReplacementRecord] = []
@@ -239,7 +266,7 @@ def replace_font_names_in_json_object_with_records(
     file_name: str,
     value_path: str,
 ) -> tuple[JsonObject, int, list[FontReplacementRecord]]:
-    """替换 JSON 对象值里的旧字体文件名，并记录可还原字段。"""
+    """替换 JSON 对象值里的旧字体文件名，并记录本次覆盖的新字体名。"""
     replaced_value, replaced_count, records = replace_font_names_in_json_value_with_records(
         value=value,
         old_font_names=old_font_names,
@@ -303,7 +330,7 @@ def replace_font_names_in_json_value_with_records(
     file_name: str,
     value_path: str,
 ) -> tuple[JsonValue, int, list[FontReplacementRecord]]:
-    """递归替换 JSON 值中的字体引用，并记录每个被改写的字符串字段。"""
+    """递归替换 JSON 值中的字体引用，并记录被覆盖的新字体名。"""
     if isinstance(value, str):
         replaced_text, replaced_count = replace_font_names_in_text(
             text=value,
@@ -379,50 +406,233 @@ def replace_font_names_in_text(
     return replaced_text, replaced_count
 
 
-def restore_font_references(
+def collect_replacement_font_names(
     *,
-    game_data: GameData,
+    replacement_font_path: str | None,
     records: list[FontReplacementRecord],
-) -> int:
-    """按数据库记录把字体引用还原到覆盖前文本。"""
-    restored_count = 0
-    plugins_changed = False
-    for record in records:
-        root_value = resolve_record_root(game_data=game_data, file_name=record.file_name)
-        current_value = get_json_pointer_value(root_value, record.value_path)
-        if not isinstance(current_value, str):
-            raise ValueError(
-                f"字体还原失败：{record.file_name}{record.value_path} 当前不是字符串，不能安全还原"
-            )
-        if current_value != record.replaced_text:
-            raise ValueError(
-                f"字体还原失败：{record.file_name}{record.value_path} 当前字体引用和记录不一致，不能安全还原"
-            )
+) -> list[str]:
+    """收集本次字体还原应识别的新字体文件名。"""
+    font_names: list[str] = []
+    if replacement_font_path is not None and replacement_font_path.strip():
+        font_names.append(Path(replacement_font_path).name)
+    font_names.extend(record.replacement_font_name for record in records)
+    return normalize_font_name_list(font_names)
 
-        updated_root = set_json_pointer_value(
-            root=root_value,
-            value_path=record.value_path,
-            new_value=record.original_text,
+
+def restore_font_references_from_origin_backups(
+    *,
+    game_root: Path,
+    replacement_font_names: list[str],
+) -> OriginFontRestoreSummary:
+    """对比激活版和原件留档，把覆盖字体引用替回原来的字体引用。"""
+    target_font_names = normalize_font_name_list(
+        build_font_reference_tokens(replacement_font_names)
+    )
+    if not target_font_names:
+        raise ValueError("字体还原缺少候选覆盖字体名称")
+
+    active_data_dir = game_root / DATA_DIRECTORY_NAME
+    origin_data_dir = game_root / DATA_ORIGIN_DIRECTORY_NAME
+    active_plugins_path = game_root / JS_DIRECTORY_NAME / PLUGINS_FILE_NAME
+    origin_plugins_path = game_root / JS_DIRECTORY_NAME / PLUGINS_ORIGIN_FILE_NAME
+    if not origin_data_dir.exists() and not origin_plugins_path.exists():
+        raise FileNotFoundError("字体还原需要 data_origin 或 plugins_origin.js 原件留档")
+
+    restored_field_count = 0
+    restored_reference_count = 0
+    if origin_data_dir.exists():
+        if not origin_data_dir.is_dir():
+            raise NotADirectoryError(f"原件数据留档不是目录: {origin_data_dir}")
+        for origin_file_path in sorted(origin_data_dir.glob("*.json"), key=lambda path: path.name):
+            active_file_path = active_data_dir / origin_file_path.name
+            if not active_file_path.exists():
+                raise FileNotFoundError(f"激活数据文件不存在，无法对比还原字体: {active_file_path}")
+            active_value = read_json_value_file(active_file_path)
+            origin_value = read_json_value_file(origin_file_path)
+            updated_value, field_count, reference_count = restore_font_references_in_json_value_by_origin(
+                active_value=active_value,
+                origin_value=origin_value,
+                target_font_names=target_font_names,
+            )
+            if field_count == 0:
+                continue
+            replace_json_file(
+                target_path=active_file_path,
+                data=updated_value,
+                temp_dir=game_root,
+            )
+            restored_field_count += field_count
+            restored_reference_count += reference_count
+
+    if origin_plugins_path.exists():
+        if not active_plugins_path.exists():
+            raise FileNotFoundError(f"激活插件配置不存在，无法对比还原字体: {active_plugins_path}")
+        active_plugins = read_plugins_js_file(active_plugins_path)
+        origin_plugins = read_plugins_js_file(origin_plugins_path)
+        updated_plugins_value, field_count, reference_count = restore_font_references_in_json_value_by_origin(
+            active_value=cast(JsonValue, active_plugins),
+            origin_value=cast(JsonValue, origin_plugins),
+            target_font_names=target_font_names,
         )
-        if record.file_name == PLUGINS_FILE_NAME:
-            plugins_changed = True
-        else:
-            game_data.writable_data[record.file_name] = updated_root
-        restored_count += 1
+        if field_count > 0:
+            if not isinstance(updated_plugins_value, list):
+                raise TypeError("字体还原后的插件配置不是数组")
+            updated_plugins: list[dict[str, JsonValue]] = []
+            for index, plugin_value in enumerate(updated_plugins_value):
+                if not isinstance(plugin_value, dict):
+                    raise TypeError(f"字体还原后的第 {index} 个插件不是对象")
+                updated_plugins.append(plugin_value)
+            replace_plugins_file(
+                plugins_path=active_plugins_path,
+                data=serialize_plugins_js(updated_plugins),
+                temp_dir=active_plugins_path.parent,
+            )
+            restored_field_count += field_count
+            restored_reference_count += reference_count
 
-    if plugins_changed:
-        game_data.writable_data[PLUGINS_FILE_NAME] = serialize_plugins_js(game_data.writable_plugins_js)
-    return restored_count
+    return OriginFontRestoreSummary(
+        target_font_names=target_font_names,
+        restored_field_count=restored_field_count,
+        restored_reference_count=restored_reference_count,
+    )
 
 
-def resolve_record_root(*, game_data: GameData, file_name: str) -> JsonValue:
-    """根据字体记录定位当前可写 JSON 根对象。"""
-    if file_name == PLUGINS_FILE_NAME:
-        return cast(JsonValue, game_data.writable_plugins_js)
-    root_value = game_data.writable_data.get(file_name)
-    if root_value is None:
-        raise ValueError(f"字体还原失败：游戏数据缺少文件 {file_name}")
-    return root_value
+def normalize_font_name_list(font_names: list[str]) -> list[str]:
+    """清理字体名列表并保持稳定去重顺序。"""
+    normalized_names: list[str] = []
+    seen_names: set[str] = set()
+    for font_name in font_names:
+        normalized_name = font_name.strip()
+        if not normalized_name or normalized_name in seen_names:
+            continue
+        normalized_names.append(normalized_name)
+        seen_names.add(normalized_name)
+    return normalized_names
+
+
+def read_json_value_file(file_path: Path) -> JsonValue:
+    """读取 JSON 文件并收窄为项目 JSON 值。"""
+    raw_text = file_path.read_text(encoding="utf-8")
+    decoded = cast(object, json.loads(raw_text))
+    return coerce_json_value(decoded)
+
+
+def read_plugins_js_file(file_path: Path) -> list[dict[str, JsonValue]]:
+    """读取并解析 RPG Maker MZ 的 `plugins.js`。"""
+    plugins_text = file_path.read_text(encoding="utf-8")
+    match = PLUGINS_JS_PATTERN.search(plugins_text)
+    if match is None:
+        raise ValueError(f"plugins.js 中未找到标准 $plugins 数组: {file_path}")
+    decoded = coerce_json_value(demjson3.decode(match.group(1)))
+    if not isinstance(decoded, list):
+        raise ValueError(f"plugins.js 顶层不是数组: {file_path}")
+    plugins: list[dict[str, JsonValue]] = []
+    for index, plugin_value in enumerate(decoded):
+        if not isinstance(plugin_value, dict):
+            raise TypeError(f"plugins.js 第 {index} 个插件不是对象: {file_path}")
+        plugins.append(plugin_value)
+    return plugins
+
+
+def restore_font_references_in_json_value_by_origin(
+    *,
+    active_value: JsonValue,
+    origin_value: JsonValue,
+    target_font_names: list[str],
+) -> tuple[JsonValue, int, int]:
+    """递归对比同路径 JSON 值，并只还原字符串里的字体引用。"""
+    if isinstance(active_value, str) and isinstance(origin_value, str):
+        restored_text, reference_count = restore_font_references_in_text_by_origin(
+            active_text=active_value,
+            origin_text=origin_value,
+            target_font_names=target_font_names,
+        )
+        return restored_text, 1 if reference_count > 0 else 0, reference_count
+
+    if isinstance(active_value, list) and isinstance(origin_value, list):
+        restored_items: list[JsonValue] = []
+        restored_field_count = 0
+        restored_reference_count = 0
+        for index, active_item in enumerate(active_value):
+            if index >= len(origin_value):
+                restored_items.append(active_item)
+                continue
+            restored_item, field_count, reference_count = restore_font_references_in_json_value_by_origin(
+                active_value=active_item,
+                origin_value=origin_value[index],
+                target_font_names=target_font_names,
+            )
+            restored_items.append(restored_item)
+            restored_field_count += field_count
+            restored_reference_count += reference_count
+        return restored_items, restored_field_count, restored_reference_count
+
+    if isinstance(active_value, dict) and isinstance(origin_value, dict):
+        restored_object: JsonObject = {}
+        restored_field_count = 0
+        restored_reference_count = 0
+        for key, active_item in active_value.items():
+            if key not in origin_value:
+                restored_object[key] = active_item
+                continue
+            restored_item, field_count, reference_count = restore_font_references_in_json_value_by_origin(
+                active_value=active_item,
+                origin_value=origin_value[key],
+                target_font_names=target_font_names,
+            )
+            restored_object[key] = restored_item
+            restored_field_count += field_count
+            restored_reference_count += reference_count
+        return restored_object, restored_field_count, restored_reference_count
+
+    return active_value, 0, 0
+
+
+def restore_font_references_in_text_by_origin(
+    *,
+    active_text: str,
+    origin_text: str,
+    target_font_names: list[str],
+) -> tuple[str, int]:
+    """把当前文本里的覆盖字体名按原文本中的字体引用替回。"""
+    target_pattern = build_target_font_pattern(target_font_names)
+    target_matches = list(target_pattern.finditer(active_text))
+    if not target_matches:
+        return active_text, 0
+
+    origin_font_references = collect_origin_font_references(origin_text)
+    if not origin_font_references:
+        return active_text, 0
+
+    parts: list[str] = []
+    last_end = 0
+    for index, match in enumerate(target_matches):
+        parts.append(active_text[last_end : match.start()])
+        replacement_index = min(index, len(origin_font_references) - 1)
+        parts.append(origin_font_references[replacement_index])
+        last_end = match.end()
+    parts.append(active_text[last_end:])
+    return "".join(parts), len(target_matches)
+
+
+def build_target_font_pattern(target_font_names: list[str]) -> re.Pattern[str]:
+    """构造覆盖字体名查找正则。"""
+    normalized_names = normalize_font_name_list(target_font_names)
+    if not normalized_names:
+        raise ValueError("字体还原缺少候选覆盖字体名称")
+    pattern_text = "|".join(re.escape(name) for name in sorted(normalized_names, key=len, reverse=True))
+    return re.compile(pattern_text)
+
+
+def collect_origin_font_references(text: str) -> list[str]:
+    """从原文本字段中提取实际使用的旧字体引用。"""
+    references = [match.group(0).strip() for match in FONT_FILE_REFERENCE_PATTERN.finditer(text)]
+    if references:
+        return references
+    stripped_text = text.strip()
+    if SIMPLE_FONT_REFERENCE_PATTERN.fullmatch(stripped_text):
+        return [stripped_text]
+    return []
 
 
 def append_json_pointer_part(value_path: str, part: str) -> str:
@@ -435,87 +645,6 @@ def escape_json_pointer_part(part: str) -> str:
     return part.replace("~", "~0").replace("/", "~1")
 
 
-def unescape_json_pointer_part(part: str) -> str:
-    """还原 JSON Pointer 路径片段。"""
-    return part.replace("~1", "/").replace("~0", "~")
-
-
-def split_json_pointer(value_path: str) -> list[str]:
-    """拆分 JSON Pointer 路径。"""
-    if value_path == "":
-        return []
-    if not value_path.startswith("/"):
-        raise ValueError(f"字体还原记录路径不是合法 JSON Pointer: {value_path}")
-    return [unescape_json_pointer_part(part) for part in value_path[1:].split("/")]
-
-
-def get_json_pointer_value(root: JsonValue, value_path: str) -> JsonValue:
-    """读取 JSON Pointer 指向的值。"""
-    current_value = root
-    for part in split_json_pointer(value_path):
-        if isinstance(current_value, list):
-            index = parse_json_pointer_index(part, len(current_value), value_path)
-            current_value = current_value[index]
-        elif isinstance(current_value, dict):
-            if part not in current_value:
-                raise ValueError(f"字体还原记录路径不存在: {value_path}")
-            current_value = current_value[part]
-        else:
-            raise ValueError(f"字体还原记录路径穿过了非容器值: {value_path}")
-    return current_value
-
-
-def set_json_pointer_value(root: JsonValue, value_path: str, new_value: str) -> JsonValue:
-    """设置 JSON Pointer 指向的字符串值，并返回更新后的根对象。"""
-    parts = split_json_pointer(value_path)
-    if not parts:
-        return new_value
-
-    parent = get_json_pointer_value_by_parts(root, parts[:-1], value_path)
-    final_part = parts[-1]
-    if isinstance(parent, list):
-        index = parse_json_pointer_index(final_part, len(parent), value_path)
-        parent[index] = new_value
-        return root
-    if isinstance(parent, dict):
-        if final_part not in parent:
-            raise ValueError(f"字体还原记录路径不存在: {value_path}")
-        parent[final_part] = new_value
-        return root
-    raise ValueError(f"字体还原记录路径父级不是容器: {value_path}")
-
-
-def get_json_pointer_value_by_parts(
-    root: JsonValue,
-    parts: list[str],
-    full_path: str,
-) -> JsonValue:
-    """按已拆分路径读取 JSON 值。"""
-    current_value = root
-    for part in parts:
-        if isinstance(current_value, list):
-            index = parse_json_pointer_index(part, len(current_value), full_path)
-            current_value = current_value[index]
-        elif isinstance(current_value, dict):
-            if part not in current_value:
-                raise ValueError(f"字体还原记录路径不存在: {full_path}")
-            current_value = current_value[part]
-        else:
-            raise ValueError(f"字体还原记录路径穿过了非容器值: {full_path}")
-    return current_value
-
-
-def parse_json_pointer_index(part: str, item_count: int, full_path: str) -> int:
-    """把 JSON Pointer 数组下标转成整数并校验范围。"""
-    try:
-        index = int(part)
-    except ValueError as error:
-        raise ValueError(f"字体还原记录数组下标非法: {full_path}") from error
-    if index < 0 or index >= item_count:
-        raise ValueError(f"字体还原记录数组下标越界: {full_path}")
-    return index
-
-
 def serialize_plugins_js(plugins: list[dict[str, JsonValue]]) -> str:
     """序列化插件配置为 RPG Maker MZ 使用的 JavaScript 文本。"""
     plugins_text = json.dumps(plugins, ensure_ascii=False, indent=2)
@@ -524,11 +653,13 @@ def serialize_plugins_js(plugins: list[dict[str, JsonValue]]) -> str:
 
 __all__ = [
     "FontReplacementSummary",
+    "OriginFontRestoreSummary",
     "apply_font_replacement",
     "build_font_reference_tokens",
     "build_empty_font_replacement_summary",
+    "collect_replacement_font_names",
     "collect_existing_font_names",
     "replace_font_names_in_json_value",
     "resolve_replacement_font_path",
-    "restore_font_references",
+    "restore_font_references_from_origin_backups",
 ]

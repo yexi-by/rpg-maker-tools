@@ -402,10 +402,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     restore_font_parser = subparsers.add_parser(
         "restore-font",
-        help="按最近一次覆盖记录还原游戏数据中的字体引用",
+        help="按原件留档对比还原游戏数据中的字体引用",
     )
     add_optional_target_arguments(restore_font_parser)
     _ = restore_font_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+    add_setting_override_arguments(restore_font_parser)
 
     export_name_parser = subparsers.add_parser(
         "export-name-context",
@@ -1064,8 +1065,12 @@ async def run_write_back_command(args: argparse.Namespace) -> int:
 async def run_restore_font_command(args: argparse.Namespace) -> int:
     """执行 `restore-font` 命令。"""
     game_title = await resolve_target_game_title(args)
+    setting_overrides = build_setting_overrides(args)
     async with HandlerSession() as handler:
-        summary = await handler.restore_font_replacement(game_title=game_title)
+        summary = await handler.restore_font_replacement(
+            game_title=game_title,
+            setting_overrides=setting_overrides,
+        )
     if read_bool_arg(args, "json_output"):
         report = build_font_restore_summary_report(summary)
         print(report.to_json_text())
@@ -1252,13 +1257,15 @@ def build_write_back_summary_report(summary: WriteBackSummary) -> AgentReport:
 def build_font_restore_summary_report(summary: FontRestoreSummary) -> AgentReport:
     """把字体还原摘要转换为稳定 JSON 报告。"""
     warnings: list[AgentIssue] = []
-    if summary.restored_record_count == 0:
-        warnings.append(issue("font_restore", "没有可还原字体记录；项目不会猜测原字体"))
+    if summary.target_font_name is None:
+        warnings.append(issue("font_restore", "没有候选覆盖字体名称，无法判断需要还原哪个新字体引用"))
+    elif summary.restored_reference_count == 0:
+        warnings.append(issue("font_restore", "没有找到需要还原的覆盖字体引用"))
     return AgentReport.from_parts(
         errors=[],
         warnings=warnings,
         summary={
-            "restored_record_count": summary.restored_record_count,
+            "restored_field_count": summary.restored_field_count,
             "restored_reference_count": summary.restored_reference_count,
             "target_font_name": summary.target_font_name or "",
         },

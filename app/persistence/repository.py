@@ -638,7 +638,7 @@ class TargetGameSession:
         self,
         records: Sequence[FontReplacementRecord],
     ) -> None:
-        """用本次字体覆盖记录替换当前游戏的可还原字体记录。"""
+        """用本次字体覆盖记录替换当前游戏的候选覆盖字体记录。"""
         _ = await self.connection.execute(DELETE_ALL_FONT_REPLACEMENT_RECORDS)
         if records:
             serialized_records = [
@@ -658,7 +658,7 @@ class TargetGameSession:
         await self.connection.commit()
 
     async def read_font_replacement_records(self) -> list[FontReplacementRecord]:
-        """读取当前游戏最近一次字体覆盖产生的可还原记录。"""
+        """读取当前游戏最近一次字体覆盖产生的候选覆盖字体记录。"""
         async with self.connection.execute(SELECT_FONT_REPLACEMENT_RECORDS) as cursor:
             rows = await cursor.fetchall()
         return [
@@ -673,7 +673,7 @@ class TargetGameSession:
         ]
 
     async def clear_font_replacement_records(self) -> int:
-        """清空当前游戏已经完成还原的字体覆盖记录。"""
+        """清空当前游戏已经完成处理的字体覆盖记录。"""
         cursor = await self.connection.execute(DELETE_ALL_FONT_REPLACEMENT_RECORDS)
         await self.connection.commit()
         return max(cursor.rowcount, 0)

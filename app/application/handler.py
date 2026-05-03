@@ -14,7 +14,8 @@ from app.application.file_writer import reset_writable_copies, write_game_files
 from app.application.font_replacement import (
     apply_font_replacement,
     build_empty_font_replacement_summary,
-    restore_font_references,
+    collect_replacement_font_names,
+    restore_font_references_from_origin_backups,
 )
 from app.application.runtime import load_runtime_setting
 from app.application.summaries import (
@@ -824,29 +825,38 @@ class TranslationHandler:
             logger.success(f"[tag.success]标准名写回完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 写回 [tag.count]{written_count}[/tag.count] 条，保留已有正文译文 [tag.count]{len(translated_items)}[/tag.count] 条")
             return NameContextWriteSummary(written_count=written_count, preserved_translation_count=len(translated_items))
 
-    async def restore_font_replacement(self, game_title: str) -> FontRestoreSummary:
-        """按最近一次字体覆盖记录还原游戏数据中的字体引用。"""
+    async def restore_font_replacement(
+        self,
+        game_title: str,
+        setting_overrides: SettingOverrides | None = None,
+    ) -> FontRestoreSummary:
+        """按原件留档对比还原游戏数据中的字体引用。"""
+        setting = self._load_setting(setting_overrides=setting_overrides)
         async with await self.game_registry.open_game(game_title) as session:
             records = await session.read_font_replacement_records()
-            if not records:
-                logger.warning(f"[tag.warning]没有可还原字体记录[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count]；项目不会猜测原字体")
+            target_font_names = collect_replacement_font_names(
+                replacement_font_path=setting.write_back.replacement_font_path,
+                records=records,
+            )
+            if not target_font_names:
+                logger.warning(f"[tag.warning]没有候选覆盖字体名称，无法判断需要还原哪个新字体引用[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count]")
                 return FontRestoreSummary(
-                    restored_record_count=0,
+                    restored_field_count=0,
                     restored_reference_count=0,
                     target_font_name=None,
                 )
 
-            game_data = await self._load_session_game_data(session)
-            reset_writable_copies(game_data)
-            restored_count = restore_font_references(game_data=game_data, records=records)
-            write_game_files(game_data=game_data, game_root=session.game_path)
-            _ = await session.clear_font_replacement_records()
-            font_names = sorted({record.replacement_font_name for record in records})
-            target_font_name = "、".join(font_names) if font_names else None
-            logger.success(f"[tag.success]字体引用还原完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 还原字段 [tag.count]{restored_count}[/tag.count] 个")
+            restore_summary = restore_font_references_from_origin_backups(
+                game_root=session.game_path,
+                replacement_font_names=target_font_names,
+            )
+            if records:
+                _ = await session.clear_font_replacement_records()
+            target_font_name = "、".join(restore_summary.target_font_names)
+            logger.success(f"[tag.success]字体引用还原完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 还原字段 [tag.count]{restore_summary.restored_field_count}[/tag.count] 个，引用 [tag.count]{restore_summary.restored_reference_count}[/tag.count] 处")
             return FontRestoreSummary(
-                restored_record_count=len(records),
-                restored_reference_count=restored_count,
+                restored_field_count=restore_summary.restored_field_count,
+                restored_reference_count=restore_summary.restored_reference_count,
                 target_font_name=target_font_name,
             )
 

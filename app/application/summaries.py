@@ -113,7 +113,7 @@ class WriteBackSummary:
 class FontRestoreSummary:
     """字体引用还原任务摘要。"""
 
-    restored_record_count: int
+    restored_field_count: int
     restored_reference_count: int
     target_font_name: str | None
 
