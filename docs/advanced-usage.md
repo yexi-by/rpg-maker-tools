@@ -2,7 +2,7 @@
 
 Autonomous Translation Toolkit for RPG Maker MZ.
 
-A.T.T MZ 是面向 RPG Maker MZ 日文游戏的命令行翻译工具。项目负责确定性提取、缓存、规则导入、质量报告和写回；Agent 或人工负责术语、插件字段、事件指令字段和少量失败项的语义判断。
+A.T.T MZ 是面向 RPG Maker MZ 日文游戏的命令行翻译工具。项目负责确定性提取、缓存、规则导入、质量报告和写回；Agent 或人工负责术语、插件字段、事件指令字段、Note 标签字段和少量失败项的语义判断。
 
 ## 环境要求
 
@@ -45,6 +45,8 @@ uv run python main.py --agent-mode doctor --game <游戏标题> --json
 uv run python main.py --agent-mode prepare-agent-workspace --game <游戏标题> --output-dir <工作区> --json
 uv run python main.py --agent-mode validate-placeholder-rules --game <游戏标题> --input <工作区>/placeholder-rules.json --json
 uv run python main.py --agent-mode import-placeholder-rules --game <游戏标题> --input <工作区>/placeholder-rules.json
+uv run python main.py --agent-mode validate-note-tag-rules --game <游戏标题> --input <工作区>/note-tag-rules.json --json
+uv run python main.py --agent-mode import-note-tag-rules --game <游戏标题> --input <工作区>/note-tag-rules.json --json
 uv run python main.py --agent-mode validate-agent-workspace --game <游戏标题> --workspace <工作区> --json
 uv run python main.py --agent-mode translate --game <游戏标题> --max-batches 1 --json
 uv run python main.py --agent-mode translation-status --game <游戏标题> --json
@@ -91,7 +93,7 @@ claude --permission-mode bypassPermissions
 要求：
 1. 全程按 Skill 的黑盒协议工作，只通过 CLI、工作区 JSON 和游戏目录处理业务数据。
 2. 先运行 doctor、add-game、prepare-agent-workspace，并确认 <游戏标题>。
-3. 分析并校验占位符规则、术语表、插件规则和事件指令规则；通过 CLI validate 后再 import。
+3. 分析并校验占位符规则、术语表、插件规则、事件指令规则和 Note 标签规则；通过 CLI validate 后再 import。
 4. 先执行 translate --max-batches 1 小批量试跑，再查看 translation-status 和 quality-report。
 5. 质量问题优先用 export-quality-fix-template 导出修复骨架，再用 import-manual-translations 导入。
 6. pending 需要人工补齐时，使用 export-untranslated-translations 导出完整结构，只填写 translation_lines。
@@ -111,7 +113,11 @@ uv run python main.py --agent-mode validate-plugin-rules --game <游戏标题> -
 uv run python main.py --agent-mode import-plugin-rules --game <游戏标题> --input <工作区>/plugin-rules.json
 uv run python main.py --agent-mode validate-event-command-rules --game <游戏标题> --input <工作区>/event-command-rules.json --json
 uv run python main.py --agent-mode import-event-command-rules --game <游戏标题> --input <工作区>/event-command-rules.json
+uv run python main.py --agent-mode validate-note-tag-rules --game <游戏标题> --input <工作区>/note-tag-rules.json --json
+uv run python main.py --agent-mode import-note-tag-rules --game <游戏标题> --input <工作区>/note-tag-rules.json --json
 ```
+
+Note 标签规则用于基础数据库 `note` 字段中由插件显示给玩家的说明文本，例如 `<拡張説明:...>`、`<ExtendDesc:...>`。不要把 `<upgrade:...>`、`<ChainSkill:...>`、`<EquipState:...>` 等机器协议标签加入规则，也不要手工改游戏 `data/*.json`。
 
 ## 人工补译
 

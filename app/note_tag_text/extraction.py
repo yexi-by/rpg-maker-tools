@@ -1,0 +1,68 @@
+"""Note 标签规则驱动提取模块。"""
+
+from app.note_tag_text.parser import iter_note_tag_matches
+from app.rmmz.schema import (
+    GameData,
+    NoteTagTextRuleRecord,
+    TranslationData,
+    TranslationItem,
+)
+from app.rmmz.text_rules import TextRules, get_default_text_rules
+
+
+class NoteTagTextExtraction:
+    """从基础数据库 `note` 字段提取已授权标签文本。"""
+
+    def __init__(
+        self,
+        game_data: GameData,
+        rule_records: list[NoteTagTextRuleRecord],
+        text_rules: TextRules | None = None,
+    ) -> None:
+        """初始化 Note 标签文本提取器。"""
+        self.game_data: GameData = game_data
+        self.rule_records: list[NoteTagTextRuleRecord] = rule_records
+        self.text_rules: TextRules = text_rules if text_rules is not None else get_default_text_rules()
+
+    def extract_all_text(self) -> dict[str, TranslationData]:
+        """按数据库规则全量提取 Note 标签值。"""
+        translation_data_map: dict[str, TranslationData] = {}
+        for rule_record in self.rule_records:
+            file_items = self.game_data.base_data.get(rule_record.file_name)
+            if file_items is None:
+                continue
+            tag_names = set(rule_record.tag_names)
+            translation_data = TranslationData(display_name=None, translation_items=[])
+            for base_item in file_items:
+                if base_item is None or not base_item.note:
+                    continue
+                matches_by_tag: dict[str, list[str]] = {}
+                for match in iter_note_tag_matches(base_item.note):
+                    if match.tag_name not in tag_names or match.value_span is None:
+                        continue
+                    matches_by_tag.setdefault(match.tag_name, []).append(match.value)
+
+                for tag_name in rule_record.tag_names:
+                    values = matches_by_tag.get(tag_name, [])
+                    if not values:
+                        continue
+                    if len(values) > 1:
+                        raise ValueError(
+                            f"{rule_record.file_name}/{base_item.id}/note/{tag_name} 标签重复，无法生成唯一定位路径"
+                        )
+                    normalized_value = self.text_rules.normalize_extraction_text(values[0])
+                    if not self.text_rules.should_translate_source_text(normalized_value):
+                        continue
+                    translation_data.translation_items.append(
+                        TranslationItem(
+                            location_path=f"{rule_record.file_name}/{base_item.id}/note/{tag_name}",
+                            item_type="short_text",
+                            original_lines=[normalized_value],
+                        )
+                    )
+            if translation_data.translation_items:
+                translation_data_map[rule_record.file_name] = translation_data
+        return translation_data_map
+
+
+__all__: list[str] = ["NoteTagTextExtraction"]

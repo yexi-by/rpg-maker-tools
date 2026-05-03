@@ -38,6 +38,24 @@ class EventCommandRuleImportSummary:
 
 
 @dataclass(slots=True)
+class NoteTagJsonExportSummary:
+    """Note 标签候选 JSON 导出任务摘要。"""
+
+    output_path: str
+    candidate_tag_count: int
+    translatable_value_count: int
+
+
+@dataclass(slots=True)
+class NoteTagRuleImportSummary:
+    """Note 标签规则导入任务摘要。"""
+
+    imported_file_count: int
+    imported_tag_count: int
+    deleted_translation_items: int
+
+
+@dataclass(slots=True)
 class NameContextImportSummary:
     """外部术语表导入任务摘要。"""
 
@@ -96,6 +114,8 @@ __all__: list[str] = [
     "EventCommandRuleImportSummary",
     "NameContextImportSummary",
     "NameContextWriteSummary",
+    "NoteTagJsonExportSummary",
+    "NoteTagRuleImportSummary",
     "PluginJsonExportSummary",
     "PluginRuleImportSummary",
     "TextTranslationSummary",

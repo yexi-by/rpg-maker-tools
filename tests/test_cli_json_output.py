@@ -119,6 +119,36 @@ def test_rule_validation_commands_accept_input_files() -> None:
             "--json",
         ]
     )
+    note_export_args = parser.parse_args(
+        [
+            "export-note-tag-candidates",
+            "--game",
+            "demo",
+            "--output",
+            "note-tag-candidates.json",
+            "--json",
+        ]
+    )
+    note_validate_args = parser.parse_args(
+        [
+            "validate-note-tag-rules",
+            "--game",
+            "demo",
+            "--input",
+            "note-tag-rules.json",
+            "--json",
+        ]
+    )
+    note_import_args = parser.parse_args(
+        [
+            "import-note-tag-rules",
+            "--game",
+            "demo",
+            "--input",
+            "note-tag-rules.json",
+            "--json",
+        ]
+    )
     residual_args = parser.parse_args(
         [
             "validate-japanese-residual-rules",
@@ -146,6 +176,11 @@ def test_rule_validation_commands_accept_input_files() -> None:
     assert namespace_optional_str(plugin_args, "rules") is None
     assert namespace_optional_str(event_args, "input") == "event-command-rules.json"
     assert namespace_optional_str(event_args, "rules") is None
+    assert namespace_optional_str(note_export_args, "output") == "note-tag-candidates.json"
+    assert namespace_optional_str(note_validate_args, "input") == "note-tag-rules.json"
+    assert getattr(note_validate_args, "json_output") is True
+    assert namespace_optional_str(note_import_args, "input") == "note-tag-rules.json"
+    assert getattr(note_import_args, "json_output") is True
     assert namespace_optional_str(residual_args, "input") == "japanese-residual-rules.json"
     assert namespace_optional_str(residual_args, "rules") is None
     assert namespace_optional_str(residual_import_args, "input") == "japanese-residual-rules.json"

@@ -239,6 +239,30 @@ def build_parser() -> argparse.ArgumentParser:
     add_optional_target_arguments(import_event_command_parser)
     _ = import_event_command_parser.add_argument("--input", required=True, help="外部事件指令规则 JSON 文件")
 
+    export_note_tag_parser = subparsers.add_parser(
+        "export-note-tag-candidates",
+        help="导出基础数据库 note 字段中的 Note 标签候选",
+    )
+    add_optional_target_arguments(export_note_tag_parser)
+    _ = export_note_tag_parser.add_argument("--output", required=True, help="Note 标签候选 JSON 输出文件")
+    _ = export_note_tag_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+
+    validate_note_tag_parser = subparsers.add_parser(
+        "validate-note-tag-rules",
+        help="校验 Note 标签文本规则 JSON",
+    )
+    add_optional_target_arguments(validate_note_tag_parser)
+    _ = validate_note_tag_parser.add_argument("--input", required=True, help="Note 标签规则 JSON 文件")
+    _ = validate_note_tag_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+
+    import_note_tag_parser = subparsers.add_parser(
+        "import-note-tag-rules",
+        help="把外部 Note 标签文本规则 JSON 导入游戏数据库",
+    )
+    add_optional_target_arguments(import_note_tag_parser)
+    _ = import_note_tag_parser.add_argument("--input", required=True, help="Note 标签规则 JSON 文件")
+    _ = import_note_tag_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+
     scan_placeholder_parser = subparsers.add_parser(
         "scan-placeholder-candidates",
         help="扫描疑似自定义控制符候选",
@@ -569,6 +593,12 @@ async def dispatch_command(args: argparse.Namespace) -> int:
         return await run_export_event_commands_json_command(args)
     if command == "import-event-command-rules":
         return await run_import_event_command_rules_command(args)
+    if command == "export-note-tag-candidates":
+        return await run_export_note_tag_candidates_command(args)
+    if command == "validate-note-tag-rules":
+        return await run_validate_note_tag_rules_command(args)
+    if command == "import-note-tag-rules":
+        return await run_import_note_tag_rules_command(args)
     if command == "scan-placeholder-candidates":
         return await run_scan_placeholder_candidates_command(args)
     if command == "validate-placeholder-rules":
@@ -724,6 +754,39 @@ async def run_import_event_command_rules_command(args: argparse.Namespace) -> in
     async with HandlerSession() as handler:
         _ = await handler.import_event_command_rules(game_title=game_title, input_path=input_path)
     return 0
+
+
+async def run_export_note_tag_candidates_command(args: argparse.Namespace) -> int:
+    """执行 `export-note-tag-candidates` 命令。"""
+    game_title = await resolve_target_game_title(args)
+    output_path = read_required_path_arg(args, "output")
+    service = AgentToolkitService()
+    report = await service.export_note_tag_candidates(
+        game_title=game_title,
+        output_path=output_path,
+    )
+    write_report_outputs(report=report, args=args, title="Note 标签候选导出报告", write_output_file=False)
+    return 1 if report.status == "error" else 0
+
+
+async def run_validate_note_tag_rules_command(args: argparse.Namespace) -> int:
+    """执行 `validate-note-tag-rules` 命令。"""
+    game_title = await resolve_target_game_title(args)
+    rules_text = await read_text_file(read_required_path_arg(args, "input"))
+    service = AgentToolkitService()
+    report = await service.validate_note_tag_rules(game_title=game_title, rules_text=rules_text)
+    write_report_outputs(report=report, args=args, title="Note 标签规则校验报告")
+    return 1 if report.status == "error" else 0
+
+
+async def run_import_note_tag_rules_command(args: argparse.Namespace) -> int:
+    """执行 `import-note-tag-rules` 命令。"""
+    game_title = await resolve_target_game_title(args)
+    rules_text = await read_text_file(read_required_path_arg(args, "input"))
+    service = AgentToolkitService()
+    report = await service.import_note_tag_rules(game_title=game_title, rules_text=rules_text)
+    write_report_outputs(report=report, args=args, title="Note 标签规则导入报告")
+    return 1 if report.status == "error" else 0
 
 
 async def run_scan_placeholder_candidates_command(args: argparse.Namespace) -> int:

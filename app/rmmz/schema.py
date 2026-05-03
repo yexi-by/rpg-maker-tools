@@ -252,6 +252,13 @@ class PluginTextRuleRecord(BaseModel):
     path_templates: list[str] = Field(default_factory=list)
 
 
+class NoteTagTextRuleRecord(BaseModel):
+    """单个基础数据库文件的 Note 标签文本规则快照。"""
+
+    file_name: str
+    tag_names: list[str] = Field(default_factory=list)
+
+
 class EventCommandParameterFilter(BaseModel):
     """事件指令参数匹配条件。"""
 
@@ -337,6 +344,7 @@ __all__: list[str] = [
     "JS_DIRECTORY_NAME",
     "MAP_INFOS_FILE_NAME",
     "MAP_PATTERN",
+    "NoteTagTextRuleRecord",
     "PluginTextRuleRecord",
     "PlaceholderRuleRecord",
     "PLUGINS_FILE_NAME",

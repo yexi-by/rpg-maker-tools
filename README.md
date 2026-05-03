@@ -99,7 +99,7 @@ claude --permission-mode bypassPermissions
 目标：
 1. 从注册游戏开始，完成规则分析、正文翻译、质量检查、必要补译和最终写回。
 2. 全程按 Skill 的黑盒协议工作，只通过 CLI、工作区 JSON 和游戏目录处理业务数据。
-3. 启动任何翻译前，先扫描并校验占位符规则、术语表、插件规则和事件指令规则。
+3. 启动任何翻译前，先扫描并校验占位符规则、术语表、插件规则、事件指令规则和 Note 标签规则。
 4. 先小批量翻译并运行 quality-report，确认没有乱码、占位符风险、超宽行和明显日文残留后，再继续全量翻译。
 5. 质量问题优先用 export-quality-fix-template 导出修复骨架，再用 import-manual-translations 导入。
 6. pending 需要人工补齐时，用 export-untranslated-translations 导出完整结构，只填写 translation_lines。

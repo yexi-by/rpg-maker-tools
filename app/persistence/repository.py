@@ -20,6 +20,7 @@ from app.rmmz.schema import (
     JapaneseResidualRuleRecord,
     LlmFailureCategory,
     LlmFailureRecord,
+    NoteTagTextRuleRecord,
     PlaceholderRuleRecord,
     PluginTextRuleRecord,
     TranslationErrorItem,
@@ -46,6 +47,7 @@ from .sql import (
     CREATE_LLM_FAILURES_TABLE,
     CREATE_METADATA_TABLE,
     CREATE_NAME_CONTEXT_TERMS_TABLE,
+    CREATE_NOTE_TAG_TEXT_RULES_TABLE,
     CREATE_PLACEHOLDER_RULES_TABLE,
     CREATE_PLUGIN_TEXT_RULES_TABLE,
     CREATE_TRANSLATION_QUALITY_ERRORS_TABLE,
@@ -56,6 +58,7 @@ from .sql import (
     DELETE_ALL_EVENT_COMMAND_TEXT_RULE_PATHS,
     DELETE_ALL_JAPANESE_RESIDUAL_RULES,
     DELETE_ALL_NAME_CONTEXT_TERMS,
+    DELETE_ALL_NOTE_TAG_TEXT_RULES,
     DELETE_ALL_PLACEHOLDER_RULES,
     DELETE_ALL_PLUGIN_TEXT_RULES,
     DELETE_TRANSLATION_ITEM_BY_PATH,
@@ -66,6 +69,7 @@ from .sql import (
     INSERT_JAPANESE_RESIDUAL_RULE,
     INSERT_LLM_FAILURE,
     INSERT_NAME_CONTEXT_TERM,
+    INSERT_NOTE_TAG_TEXT_RULE,
     INSERT_PLACEHOLDER_RULE,
     INSERT_PLUGIN_TEXT_RULE,
     INSERT_TRANSLATION_QUALITY_ERROR,
@@ -79,6 +83,7 @@ from .sql import (
     SELECT_EVENT_COMMAND_TEXT_RULE_PATHS,
     SELECT_METADATA,
     SELECT_NAME_CONTEXT_TERMS,
+    SELECT_NOTE_TAG_TEXT_RULES,
     SELECT_PLACEHOLDER_RULES,
     SELECT_PLUGIN_TEXT_RULES,
     SELECT_TRANSLATION_QUALITY_ERRORS_BY_RUN,
@@ -132,6 +137,7 @@ async def create_static_tables(connection: aiosqlite.Connection) -> None:
     _ = await connection.execute(CREATE_TRANSLATION_TABLE)
     _ = await connection.execute(CREATE_METADATA_TABLE)
     _ = await connection.execute(CREATE_PLUGIN_TEXT_RULES_TABLE)
+    _ = await connection.execute(CREATE_NOTE_TAG_TEXT_RULES_TABLE)
     _ = await connection.execute(CREATE_EVENT_COMMAND_TEXT_RULE_GROUPS_TABLE)
     _ = await connection.execute(CREATE_EVENT_COMMAND_TEXT_RULE_FILTERS_TABLE)
     _ = await connection.execute(CREATE_EVENT_COMMAND_TEXT_RULE_PATHS_TABLE)
@@ -422,6 +428,38 @@ class TargetGameSession:
                         rule_record.plugin_name,
                         rule_record.plugin_hash,
                         path_template,
+                    ),
+                )
+        await self.connection.commit()
+
+    async def read_note_tag_text_rules(self) -> list[NoteTagTextRuleRecord]:
+        """读取当前游戏保存的 Note 标签文本规则。"""
+        async with self.connection.execute(SELECT_NOTE_TAG_TEXT_RULES) as cursor:
+            rows = await cursor.fetchall()
+
+        grouped_records: dict[str, NoteTagTextRuleRecord] = {}
+        for row in rows:
+            file_name = row_str(row, "file_name", self.db_path)
+            record = grouped_records.get(file_name)
+            if record is None:
+                record = NoteTagTextRuleRecord(file_name=file_name, tag_names=[])
+                grouped_records[file_name] = record
+            record.tag_names.append(row_str(row, "tag_name", self.db_path))
+        return list(grouped_records.values())
+
+    async def replace_note_tag_text_rules(
+        self,
+        rule_records: list[NoteTagTextRuleRecord],
+    ) -> None:
+        """用一次外部导入结果替换当前游戏的 Note 标签文本规则。"""
+        _ = await self.connection.execute(DELETE_ALL_NOTE_TAG_TEXT_RULES)
+        for rule_record in rule_records:
+            for tag_name in rule_record.tag_names:
+                _ = await self.connection.execute(
+                    INSERT_NOTE_TAG_TEXT_RULE,
+                    (
+                        rule_record.file_name,
+                        tag_name,
                     ),
                 )
         await self.connection.commit()

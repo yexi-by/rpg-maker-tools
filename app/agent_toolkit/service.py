@@ -65,6 +65,12 @@ from app.event_command_text import (
     resolve_event_command_codes,
 )
 from app.name_context import export_name_context_artifacts, load_name_context_registry
+from app.note_tag_text import (
+    NoteTagTextExtraction,
+    build_note_tag_rule_records_from_import,
+    export_note_tag_candidates_file,
+    parse_note_tag_rule_import_text,
+)
 
 type LlmCheckFunc = Callable[[LLMHandler, str], Awaitable[None]]
 
@@ -455,17 +461,14 @@ class AgentToolkitService:
                 game_data=game_data,
             )
             event_rules = await session.read_event_command_text_rules()
+            note_tag_rules = await session.read_note_tag_text_rules()
             japanese_residual_rules = await session.read_japanese_residual_rules()
             name_registry = await session.read_name_context_registry()
             latest_run = await session.read_latest_translation_run()
-            translation_data_map = DataTextExtraction(game_data, text_rules).extract_all_text()
-            _merge_translation_data_map(
-                translation_data_map,
-                EventCommandTextExtraction(game_data, event_rules, text_rules).extract_all_text(),
-            )
-            _merge_translation_data_map(
-                translation_data_map,
-                PluginTextExtraction(game_data, plugin_rules, text_rules).extract_all_text(),
+            translation_data_map = await self._extract_active_translation_data_map(
+                session=session,
+                game_data=game_data,
+                text_rules=text_rules,
             )
             active_paths = {
                 item.location_path
@@ -555,6 +558,7 @@ class AgentToolkitService:
                 "plugin_rule_count": sum(len(rule.path_templates) for rule in plugin_rules),
                 "stale_plugin_rule_count": stale_plugin_rule_count,
                 "event_command_rule_count": sum(len(rule.path_templates) for rule in event_rules),
+                "note_tag_rule_count": sum(len(rule.tag_names) for rule in note_tag_rules),
                 "japanese_residual_rule_count": len(japanese_residual_rules),
                 "stale_japanese_residual_rule_count": len(stale_japanese_residual_rule_paths),
                 "name_context_total_count": total_name_count,
@@ -821,6 +825,193 @@ class AgentToolkitService:
                 "output": str(output_path),
             },
             details={"rules": {key: value for key, value in draft_rules.items()}},
+        )
+
+    async def export_note_tag_candidates(
+        self,
+        *,
+        game_title: str,
+        output_path: Path,
+    ) -> AgentReport:
+        """导出基础数据库 Note 标签候选，供外部 Agent 判断可见文本标签。"""
+        setting = load_setting(self.setting_path)
+        async with await self.game_registry.open_game(game_title) as session:
+            custom_rules = await self._resolve_custom_rules(
+                session=session,
+                custom_placeholder_rules_text=None,
+            )
+            text_rules = TextRules.from_setting(setting.text_rules, custom_placeholder_rules=custom_rules)
+            game_data = await self._load_game_data(session)
+        report = await export_note_tag_candidates_file(
+            game_data=game_data,
+            output_path=output_path,
+            text_rules=text_rules,
+        )
+        warnings: list[AgentIssue] = []
+        if report.candidate_tag_count == 0:
+            warnings.append(issue("note_tag_candidates_empty", "当前游戏没有发现基础数据库 Note 标签候选"))
+        return AgentReport.from_parts(
+            errors=[],
+            warnings=warnings,
+            summary={
+                "candidate_tag_count": report.candidate_tag_count,
+                "candidate_value_count": report.candidate_value_count,
+                "translatable_value_count": report.translatable_value_count,
+                "output": str(output_path),
+            },
+            details=report.details,
+        )
+
+    async def validate_note_tag_rules(self, *, game_title: str, rules_text: str) -> AgentReport:
+        """校验 Note 标签规则 JSON 文本并报告命中情况。"""
+        errors: list[AgentIssue] = []
+        warnings: list[AgentIssue] = []
+        details: JsonObject = {"rules": []}
+        try:
+            import_file = parse_note_tag_rule_import_text(rules_text)
+            setting = load_setting(self.setting_path)
+            async with await self.game_registry.open_game(game_title) as session:
+                custom_rules = await self._resolve_custom_rules(
+                    session=session,
+                    custom_placeholder_rules_text=None,
+                )
+                text_rules = TextRules.from_setting(setting.text_rules, custom_placeholder_rules=custom_rules)
+                game_data = await self._load_game_data(session)
+            records = build_note_tag_rule_records_from_import(
+                game_data=game_data,
+                import_file=import_file,
+                text_rules=text_rules,
+            )
+            extracted_map = NoteTagTextExtraction(
+                game_data=game_data,
+                rule_records=records,
+                text_rules=text_rules,
+            ).extract_all_text()
+            extracted_items = [
+                item
+                for translation_data in extracted_map.values()
+                for item in translation_data.translation_items
+            ]
+            try:
+                _preview_event_command_write_back(
+                    game_data=game_data,
+                    extracted_items=extracted_items,
+                    text_rules=text_rules,
+                )
+                details["write_back_preview"] = {
+                    "checked_item_count": len(extracted_items),
+                    "status": "ok",
+                }
+            except Exception as error:
+                errors.append(
+                    issue(
+                        "note_tag_write_back_invalid",
+                        f"Note 标签规则命中项无法回写: {type(error).__name__}: {error}",
+                    )
+                )
+                details["write_back_preview"] = {
+                    "checked_item_count": len(extracted_items),
+                    "status": "error",
+                    "reason": f"{type(error).__name__}: {error}",
+                }
+            details["rules"] = [
+                {
+                    "file_name": record.file_name,
+                    "tag_count": len(record.tag_names),
+                    "tag_names": list(record.tag_names),
+                    "hit_count": sum(
+                        1
+                        for item in extracted_items
+                        if item.location_path.startswith(f"{record.file_name}/")
+                        and "/note/" in item.location_path
+                    ),
+                    "samples": _first_original_line_samples(
+                        item
+                        for item in extracted_items
+                        if item.location_path.startswith(f"{record.file_name}/")
+                        and "/note/" in item.location_path
+                    ),
+                }
+                for record in records
+            ]
+            if not records:
+                warnings.append(issue("note_tag_rules_empty", "Note 标签规则为空"))
+        except Exception as error:
+            errors.append(issue("note_tag_rules_invalid", f"Note 标签规则不可导入: {type(error).__name__}: {error}"))
+            records = []
+            extracted_items = []
+        return AgentReport.from_parts(
+            errors=errors,
+            warnings=warnings,
+            summary={
+                "file_count": len(records),
+                "tag_count": sum(len(record.tag_names) for record in records),
+                "hit_count": len(extracted_items),
+            },
+            details=details,
+        )
+
+    async def import_note_tag_rules(self, *, game_title: str, rules_text: str) -> AgentReport:
+        """校验并导入当前游戏的 Note 标签文本规则。"""
+        try:
+            import_file = parse_note_tag_rule_import_text(rules_text)
+            setting = load_setting(self.setting_path)
+            async with await self.game_registry.open_game(game_title) as session:
+                custom_rules = await self._resolve_custom_rules(
+                    session=session,
+                    custom_placeholder_rules_text=None,
+                )
+                text_rules = TextRules.from_setting(setting.text_rules, custom_placeholder_rules=custom_rules)
+                game_data = await self._load_game_data(session)
+                records = build_note_tag_rule_records_from_import(
+                    game_data=game_data,
+                    import_file=import_file,
+                    text_rules=text_rules,
+                )
+                old_records = await session.read_note_tag_text_rules()
+                old_note_paths = _collect_translation_paths(
+                    NoteTagTextExtraction(
+                        game_data=game_data,
+                        rule_records=old_records,
+                        text_rules=text_rules,
+                    ).extract_all_text()
+                )
+                new_note_paths = _collect_translation_paths(
+                    NoteTagTextExtraction(
+                        game_data=game_data,
+                        rule_records=records,
+                        text_rules=text_rules,
+                    ).extract_all_text()
+                )
+                stale_paths = sorted(old_note_paths - new_note_paths)
+                deleted_translation_items = 0
+                if stale_paths:
+                    deleted_translation_items = await session.delete_translation_items_by_paths(stale_paths)
+                await session.replace_note_tag_text_rules(records)
+        except Exception as error:
+            return AgentReport.from_parts(
+                errors=[issue("note_tag_rules_invalid", f"Note 标签规则不可导入: {type(error).__name__}: {error}")],
+                warnings=[],
+                summary={"file_count": 0, "tag_count": 0, "deleted_translation_items": 0},
+                details={},
+            )
+        return AgentReport.from_parts(
+            errors=[],
+            warnings=[] if records else [issue("note_tag_rules_empty", "已导入空 Note 标签规则")],
+            summary={
+                "file_count": len(records),
+                "tag_count": sum(len(record.tag_names) for record in records),
+                "deleted_translation_items": deleted_translation_items,
+            },
+            details={
+                "rules": [
+                    {
+                        "file_name": record.file_name,
+                        "tag_names": list(record.tag_names),
+                    }
+                    for record in records
+                ]
+            },
         )
 
     async def validate_japanese_residual_rules(self, *, game_title: str, rules_text: str) -> AgentReport:
@@ -1122,6 +1313,15 @@ class AgentToolkitService:
         name_summary = await export_name_context_artifacts(game_data=game_data, output_dir=target_dir / "name-context")
         plugins_path = target_dir / "plugins.json"
         await export_plugins_json_file(game_data=game_data, output_path=plugins_path)
+        note_tag_candidates_path = target_dir / "note-tag-candidates.json"
+        note_tag_report = await export_note_tag_candidates_file(
+            game_data=game_data,
+            output_path=note_tag_candidates_path,
+            text_rules=text_rules,
+        )
+        note_tag_rules_path = target_dir / "note-tag-rules.json"
+        async with aiofiles.open(note_tag_rules_path, "w", encoding="utf-8") as file:
+            _ = await file.write("{}\n")
         default_command_codes = None if command_codes is not None else setting.event_command_text.default_command_codes
         effective_codes = resolve_event_command_codes(command_codes=command_codes, default_command_codes=default_command_codes)
         event_commands_path = target_dir / "event-commands.json"
@@ -1148,6 +1348,7 @@ class AgentToolkitService:
             "speaker_entry_count": name_summary.speaker_entry_count,
             "map_entry_count": name_summary.map_entry_count,
             "plugin_count": len(game_data.plugins_js),
+            "note_tag_candidate_count": note_tag_report.candidate_tag_count,
             "event_command_count": event_command_count,
             "placeholder_rule_draft_count": len(placeholder_rule_drafts),
         }
@@ -1155,6 +1356,8 @@ class AgentToolkitService:
             str(name_summary.registry_path),
             str(name_summary.sample_dir),
             str(plugins_path),
+            str(note_tag_candidates_path),
+            str(note_tag_rules_path),
             str(event_commands_path),
             str(placeholder_path),
             str(placeholder_rules_path),
@@ -1180,6 +1383,7 @@ class AgentToolkitService:
         details: JsonObject = {}
         name_path = workspace / "name-context" / "name_registry.json"
         plugin_rules_path = workspace / "plugin-rules.json"
+        note_tag_rules_path = workspace / "note-tag-rules.json"
         event_rules_path = workspace / "event-command-rules.json"
         placeholder_rules_path = workspace / "placeholder-rules.json"
         if name_path.exists():
@@ -1200,6 +1404,14 @@ class AgentToolkitService:
             details["plugin_rules"] = plugin_report.details
         else:
             warnings.append(issue("plugin_rules_missing", "工作区缺少 plugin-rules.json"))
+        if note_tag_rules_path.exists():
+            async with aiofiles.open(note_tag_rules_path, "r", encoding="utf-8") as file:
+                note_tag_report = await self.validate_note_tag_rules(game_title=game_title, rules_text=await file.read())
+            errors.extend(note_tag_report.errors)
+            warnings.extend(note_tag_report.warnings)
+            details["note_tag_rules"] = note_tag_report.details
+        else:
+            errors.append(issue("note_tag_rules_missing", "工作区缺少 note-tag-rules.json"))
         if event_rules_path.exists():
             async with aiofiles.open(event_rules_path, "r", encoding="utf-8") as file:
                 event_report = await self.validate_event_command_rules(game_title=game_title, rules_text=await file.read())
@@ -1300,12 +1512,14 @@ class AgentToolkitService:
                     game_data=game_data,
                 )
                 event_rules = await session.read_event_command_text_rules()
+                note_tag_rules = await session.read_note_tag_text_rules()
                 name_registry = await session.read_name_context_registry()
                 placeholder_rules = await session.read_placeholder_rules()
                 summary["game_registered"] = True
                 summary["plugin_rule_count"] = sum(len(rule.path_templates) for rule in plugin_rules)
                 summary["stale_plugin_rule_count"] = stale_plugin_rule_count
                 summary["event_command_rule_count"] = sum(len(rule.path_templates) for rule in event_rules)
+                summary["note_tag_rule_count"] = sum(len(rule.tag_names) for rule in note_tag_rules)
                 summary["placeholder_rule_count"] = len(placeholder_rules)
                 summary["name_context_imported"] = name_registry is not None
                 if not plugin_rules and stale_plugin_rule_count == 0:
@@ -1314,6 +1528,8 @@ class AgentToolkitService:
                     warnings.append(issue("stale_plugin_rules", f"发现 {stale_plugin_rule_count} 个过期插件规则，请重新导出并导入插件规则"))
                 if not event_rules:
                     warnings.append(issue("event_command_rules", "当前游戏尚未导入事件指令文本规则"))
+                if not note_tag_rules:
+                    warnings.append(issue("note_tag_rules", "当前游戏尚未导入 Note 标签文本规则"))
                 if name_registry is None:
                     warnings.append(issue("name_context", "当前游戏尚未导入术语表"))
                 if not placeholder_rules:
@@ -1377,6 +1593,7 @@ class AgentToolkitService:
             game_data=game_data,
         )
         event_rules = await session.read_event_command_text_rules()
+        note_tag_rules = await session.read_note_tag_text_rules()
         translation_data_map = DataTextExtraction(game_data, text_rules).extract_all_text()
         _merge_translation_data_map(
             translation_data_map,
@@ -1385,6 +1602,10 @@ class AgentToolkitService:
         _merge_translation_data_map(
             translation_data_map,
             PluginTextExtraction(game_data, plugin_rules, text_rules).extract_all_text(),
+        )
+        _merge_translation_data_map(
+            translation_data_map,
+            NoteTagTextExtraction(game_data, note_tag_rules, text_rules).extract_all_text(),
         )
         return translation_data_map
 
@@ -1752,6 +1973,15 @@ def _merge_translation_data_map(
             existing_data.translation_items.extend(translation_data.translation_items)
         else:
             target[file_name] = translation_data
+
+
+def _collect_translation_paths(translation_data_map: dict[str, TranslationData]) -> set[str]:
+    """收集翻译数据中的全部定位路径。"""
+    return {
+        item.location_path
+        for translation_data in translation_data_map.values()
+        for item in translation_data.translation_items
+    }
 
 
 CUSTOM_MARKER_WITH_PARAMS_PATTERN: re.Pattern[str] = re.compile(

@@ -18,6 +18,8 @@ from app.application.summaries import (
     EventCommandRuleImportSummary,
     NameContextImportSummary,
     NameContextWriteSummary,
+    NoteTagJsonExportSummary,
+    NoteTagRuleImportSummary,
     PluginJsonExportSummary,
     PluginRuleImportSummary,
     TextTranslationSummary,
@@ -44,6 +46,12 @@ from app.name_context import (
     export_name_context_artifacts,
     load_name_context_registry,
 )
+from app.note_tag_text import (
+    NoteTagTextExtraction,
+    build_note_tag_rule_records_from_import,
+    export_note_tag_candidates_file,
+    load_note_tag_rule_import_file,
+)
 from app.japanese_residual import JapaneseResidualRuleSet
 from app.persistence import GameRegistry, TargetGameSession
 from app.persistence.repository import current_timestamp_text
@@ -60,6 +68,7 @@ from app.rmmz.schema import (
     GameData,
     EventCommandTextRuleRecord,
     LlmFailureRecord,
+    NoteTagTextRuleRecord,
     PlaceholderRuleRecord,
     PLUGINS_FILE_NAME,
     PluginTextRuleRecord,
@@ -279,6 +288,32 @@ class TranslationHandler:
                 command_count=command_count,
             )
 
+    async def export_note_tag_candidates(
+        self,
+        game_title: str,
+        output_path: Path,
+    ) -> NoteTagJsonExportSummary:
+        """把当前游戏基础数据库 Note 标签候选导出为 JSON。"""
+        setting = self._load_setting()
+        async with await self.game_registry.open_game(game_title) as session:
+            game_data = await self._load_session_game_data(session)
+            text_rules = self._load_text_rules(
+                setting=setting,
+                placeholder_rule_records=await session.read_placeholder_rules(),
+            )
+            resolved_output_path = output_path.resolve()
+            report = await export_note_tag_candidates_file(
+                game_data=game_data,
+                output_path=resolved_output_path,
+                text_rules=text_rules,
+            )
+        logger.success(f"[tag.success]Note 标签候选 JSON 导出完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 候选标签 [tag.count]{report.candidate_tag_count}[/tag.count] 个 文件 [tag.path]{resolved_output_path}[/tag.path]")
+        return NoteTagJsonExportSummary(
+            output_path=str(resolved_output_path),
+            candidate_tag_count=report.candidate_tag_count,
+            translatable_value_count=report.translatable_value_count,
+        )
+
     async def import_event_command_rules(
         self,
         game_title: str,
@@ -309,6 +344,62 @@ class TranslationHandler:
         return EventCommandRuleImportSummary(
             imported_rule_group_count=len(rule_records),
             imported_path_rule_count=imported_path_rule_count,
+            deleted_translation_items=deleted_translation_items,
+        )
+
+    async def import_note_tag_rules(
+        self,
+        game_title: str,
+        input_path: Path,
+    ) -> NoteTagRuleImportSummary:
+        """把外部 Note 标签规则 JSON 导入当前游戏数据库。"""
+        setting = self._load_setting()
+        async with await self.game_registry.open_game(game_title) as session:
+            game_data = await self._load_session_game_data(session)
+            text_rules = self._load_text_rules(
+                setting=setting,
+                placeholder_rule_records=await session.read_placeholder_rules(),
+            )
+            import_file = await load_note_tag_rule_import_file(input_path)
+            rule_records = build_note_tag_rule_records_from_import(
+                game_data=game_data,
+                import_file=import_file,
+                text_rules=text_rules,
+            )
+            old_rules = {
+                rule.file_name: rule
+                for rule in await session.read_note_tag_text_rules()
+            }
+            old_note_paths = self._collect_translation_data_paths(
+                NoteTagTextExtraction(
+                    game_data=game_data,
+                    rule_records=list(old_rules.values()),
+                    text_rules=text_rules,
+                ).extract_all_text()
+            )
+            new_note_paths = self._collect_translation_data_paths(
+                NoteTagTextExtraction(
+                    game_data=game_data,
+                    rule_records=rule_records,
+                    text_rules=text_rules,
+                ).extract_all_text()
+            )
+            changed_rule_count = sum(
+                1
+                for rule_record in rule_records
+                if self._should_refresh_note_tag_translation_items(old_rules.get(rule_record.file_name), rule_record)
+            )
+            removed_rule_count = len(set(old_rules) - {rule.file_name for rule in rule_records})
+            stale_paths = sorted(old_note_paths - new_note_paths)
+            deleted_translation_items = 0
+            if stale_paths and (changed_rule_count or removed_rule_count):
+                deleted_translation_items = await session.delete_translation_items_by_paths(stale_paths)
+            await session.replace_note_tag_text_rules(rule_records)
+        imported_tag_count = sum(len(record.tag_names) for record in rule_records)
+        logger.success(f"[tag.success]Note 标签规则导入完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 文件 [tag.count]{len(rule_records)}[/tag.count] 个，标签 [tag.count]{imported_tag_count}[/tag.count] 个，清理失效译文 [tag.count]{deleted_translation_items}[/tag.count] 条")
+        return NoteTagRuleImportSummary(
+            imported_file_count=len(rule_records),
+            imported_tag_count=imported_tag_count,
             deleted_translation_items=deleted_translation_items,
         )
 
@@ -389,6 +480,7 @@ class TranslationHandler:
             game_data=game_data,
         )
         event_command_rules = await session.read_event_command_text_rules()
+        note_tag_rules = await session.read_note_tag_text_rules()
         translation_data_map = DataTextExtraction(game_data, text_rules).extract_all_text()
         event_command_translation_data_map = EventCommandTextExtraction(
             game_data=game_data,
@@ -400,8 +492,14 @@ class TranslationHandler:
             plugin_rule_records=plugin_rules,
             text_rules=text_rules,
         ).extract_all_text()
+        note_tag_translation_data_map = NoteTagTextExtraction(
+            game_data=game_data,
+            rule_records=note_tag_rules,
+            text_rules=text_rules,
+        ).extract_all_text()
         self._merge_translation_data_map(translation_data_map, event_command_translation_data_map)
         self._merge_translation_data_map(translation_data_map, plugin_translation_data_map)
+        self._merge_translation_data_map(translation_data_map, note_tag_translation_data_map)
         active_translation_paths = self._collect_translation_data_paths(translation_data_map)
         deleted_stale_items = await session.delete_translation_items_except_paths(
             active_translation_paths,
@@ -752,6 +850,7 @@ class TranslationHandler:
             game_data=game_data,
         )
         event_command_rules = await session.read_event_command_text_rules()
+        note_tag_rules = await session.read_note_tag_text_rules()
 
         translation_data_map = DataTextExtraction(game_data, text_rules).extract_all_text()
         self._merge_translation_data_map(
@@ -767,6 +866,14 @@ class TranslationHandler:
             PluginTextExtraction(
                 game_data=game_data,
                 plugin_rule_records=plugin_rules,
+                text_rules=text_rules,
+            ).extract_all_text(),
+        )
+        self._merge_translation_data_map(
+            translation_data_map,
+            NoteTagTextExtraction(
+                game_data=game_data,
+                rule_records=note_tag_rules,
                 text_rules=text_rules,
             ).extract_all_text(),
         )
@@ -853,6 +960,19 @@ class TranslationHandler:
             old_rule.command_code != new_rule.command_code
             or old_rule.parameter_filters != new_rule.parameter_filters
             or old_rule.path_templates != new_rule.path_templates
+        )
+
+    @staticmethod
+    def _should_refresh_note_tag_translation_items(
+        old_rule: NoteTagTextRuleRecord | None,
+        new_rule: NoteTagTextRuleRecord,
+    ) -> bool:
+        """判断 Note 标签规则变化后是否需要清理失效译文。"""
+        if old_rule is None:
+            return False
+        return (
+            old_rule.file_name != new_rule.file_name
+            or old_rule.tag_names != new_rule.tag_names
         )
 
     @staticmethod

@@ -118,7 +118,7 @@ async def test_prepare_agent_workspace_includes_placeholder_rule_draft(
     minimal_game_dir: Path,
     tmp_path: Path,
 ) -> None:
-    """Agent 工作区会携带占位符规则草稿，避免重复手写解析脚本。"""
+    """Agent 工作区会携带占位符和 Note 标签规则草稿，避免重复手写解析脚本。"""
     registry = GameRegistry(tmp_path / "db")
     _ = await registry.register_game(minimal_game_dir)
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
@@ -132,10 +132,100 @@ async def test_prepare_agent_workspace_includes_placeholder_rule_draft(
 
     assert report.status == "ok"
     rules_path = workspace / "placeholder-rules.json"
+    note_candidates_path = workspace / "note-tag-candidates.json"
+    note_rules_path = workspace / "note-tag-rules.json"
     assert rules_path.exists()
+    assert note_candidates_path.exists()
+    assert note_rules_path.exists()
     rules = load_json_object(rules_path)
+    note_rules = load_json_object(note_rules_path)
     assert rules == {r"(?i)\\F\d*\[[^\]\r\n]+\]": "[CUSTOM_FACE_PORTRAIT_{index}]"}
+    assert note_rules == {}
     assert report.summary["placeholder_rule_draft_count"] == 1
+    assert "note-tag-rules.json" in json.dumps(report.details, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_validate_agent_workspace_blocks_missing_note_tag_rules(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Note 标签规则是第五类强制子代理产物，缺失时工作区校验阻断。"""
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    workspace = tmp_path / "workspace"
+
+    _ = await service.prepare_agent_workspace(
+        game_title="テストゲーム",
+        output_dir=workspace,
+        command_codes=None,
+    )
+    (workspace / "note-tag-rules.json").unlink()
+    report = await service.validate_agent_workspace(game_title="テストゲーム", workspace=workspace)
+
+    assert report.status == "error"
+    assert "note_tag_rules_missing" in {error.code for error in report.errors}
+
+
+@pytest.mark.asyncio
+async def test_note_tag_rule_validation_import_and_pending_export(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Note 标签规则校验后会让目标标签值进入 pending，机器协议标签会被拒绝。"""
+    items_path = minimal_game_dir / "data" / "Items.json"
+    raw_items = cast(object, json.loads(items_path.read_text(encoding="utf-8")))
+    items = ensure_json_array(coerce_json_value(raw_items), "Items.json")
+    item = ensure_json_object(items[1], "Items.json[1]")
+    item["note"] = "<拡張説明:一行目\n二行目>\n<upgrade:1,2,3>\n<ExtendDesc:別説明>"
+    items.append({"id": 2, "name": "空タグ項目", "note": "<拡張説明:>", "description": ""})
+    _ = items_path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    candidates_path = tmp_path / "note-tag-candidates.json"
+    pending_path = tmp_path / "pending-translations.json"
+    rules_text = json.dumps(
+        {"Items.json": ["拡張説明", "ExtendDesc"]},
+        ensure_ascii=False,
+    )
+    machine_rules_text = json.dumps({"Items.json": ["upgrade"]}, ensure_ascii=False)
+
+    candidate_report = await service.export_note_tag_candidates(
+        game_title="テストゲーム",
+        output_path=candidates_path,
+    )
+    validate_report = await service.validate_note_tag_rules(
+        game_title="テストゲーム",
+        rules_text=rules_text,
+    )
+    rejected_report = await service.validate_note_tag_rules(
+        game_title="テストゲーム",
+        rules_text=machine_rules_text,
+    )
+    import_report = await service.import_note_tag_rules(
+        game_title="テストゲーム",
+        rules_text=rules_text,
+    )
+    export_report = await service.export_pending_translations(
+        game_title="テストゲーム",
+        output_path=pending_path,
+        limit=None,
+    )
+
+    payload = load_json_object(pending_path)
+    assert candidate_report.status == "ok"
+    assert candidates_path.exists()
+    assert validate_report.status == "ok"
+    assert validate_report.summary["hit_count"] == 2
+    assert rejected_report.status == "error"
+    assert "机器协议" in rejected_report.errors[0].message
+    assert import_report.status == "ok"
+    assert export_report.status == "ok"
+    assert "Items.json/1/note/拡張説明" in payload
+    assert "Items.json/1/note/ExtendDesc" in payload
+    assert "Items.json/2/note/拡張説明" not in payload
 
 
 @pytest.mark.asyncio

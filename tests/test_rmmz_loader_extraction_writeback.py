@@ -10,9 +10,10 @@ from app.application.file_writer import reset_writable_copies
 from app.application.file_writer import write_game_files
 from app.application.font_replacement import apply_font_replacement
 from app.config.schemas import TextRulesSetting
+from app.note_tag_text import NoteTagTextExtraction
 from app.rmmz import DataTextExtraction, load_game_data
 from app.rmmz.control_codes import CustomPlaceholderRule
-from app.rmmz.schema import PLUGINS_FILE_NAME
+from app.rmmz.schema import NoteTagTextRuleRecord, PLUGINS_FILE_NAME
 from app.rmmz.text_rules import JsonValue, TextRules, coerce_json_value, ensure_json_array, ensure_json_object, get_default_text_rules
 from app.rmmz.write_back import write_data_text
 
@@ -68,6 +69,51 @@ async def test_data_extraction_covers_core_text_sources(minimal_game_dir: Path) 
     assert "Actors.json/1/name" in paths
     assert "Items.json/1/description" in paths
     assert "Skills.json/1/message1" in paths
+
+
+@pytest.mark.asyncio
+async def test_note_tag_rules_extract_and_write_back_only_target_values(minimal_game_dir: Path) -> None:
+    """Note 标签只有导入规则后才进入正文提取，回写只替换目标标签值。"""
+    items_path = minimal_game_dir / "data" / "Items.json"
+    raw_items = _read_test_json(items_path)
+    items = ensure_json_array(raw_items, "Items.json")
+    item = ensure_json_object(items[1], "Items.json[1]")
+    item["note"] = "<拡張説明:一行目\n二行目>\n<upgrade:1,2,3>\n<ExtendDesc:別説明>"
+    _rewrite_json(items_path, raw_items)
+
+    game_data = await load_game_data(minimal_game_dir)
+    standard_extracted = DataTextExtraction(game_data, get_default_text_rules()).extract_all_text()
+    standard_paths = {
+        candidate.location_path
+        for data in standard_extracted.values()
+        for candidate in data.translation_items
+    }
+    note_extracted = NoteTagTextExtraction(
+        game_data=game_data,
+        rule_records=[
+            NoteTagTextRuleRecord(
+                file_name="Items.json",
+                tag_names=["拡張説明", "ExtendDesc"],
+            )
+        ],
+        text_rules=get_default_text_rules(),
+    ).extract_all_text()
+    note_items = note_extracted["Items.json"].translation_items
+
+    assert "Items.json/1/note/拡張説明" not in standard_paths
+    assert [candidate.location_path for candidate in note_items] == [
+        "Items.json/1/note/拡張説明",
+        "Items.json/1/note/ExtendDesc",
+    ]
+    assert note_items[0].original_lines == ["一行目\n二行目"]
+
+    note_items[0].translation_lines = ["第一行\n第二行"]
+    reset_writable_copies(game_data)
+    write_data_text(game_data, [note_items[0]])
+    writable_items = ensure_json_array(game_data.writable_data["Items.json"], "Items.json")
+    writable_item = ensure_json_object(writable_items[1], "Items.json[1]")
+
+    assert writable_item["note"] == "<拡張説明:第一行\n第二行>\n<upgrade:1,2,3>\n<ExtendDesc:別説明>"
 
 
 @pytest.mark.asyncio

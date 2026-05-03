@@ -8,6 +8,7 @@
 import json
 from typing import cast
 
+from app.note_tag_text import replace_note_tag_value
 from app.rmmz.schema import (
     Code,
     COMMON_EVENTS_FILE_NAME,
@@ -504,7 +505,13 @@ def _write_base_item(game_data: GameData, item: TranslationItem) -> None:
     if item_id < len(data):
         target = data[item_id]
         if isinstance(target, dict) and target.get("id") == item_id:
-            target[key] = translated_text
+            _write_base_item_value(
+                target=target,
+                key=key,
+                parts=parts,
+                translated_text=translated_text,
+                location_path=item.location_path,
+            )
             return
 
     for target_value in data:
@@ -512,10 +519,43 @@ def _write_base_item(game_data: GameData, item: TranslationItem) -> None:
             continue
         if target_value.get("id") != item_id:
             continue
-        target_value[key] = translated_text
+        _write_base_item_value(
+            target=target_value,
+            key=key,
+            parts=parts,
+            translated_text=translated_text,
+            location_path=item.location_path,
+        )
         return
 
     raise ValueError(f"基础数据库条目不存在: {item.location_path}")
+
+
+def _write_base_item_value(
+    *,
+    target: JsonObject,
+    key: str,
+    parts: list[str],
+    translated_text: str,
+    location_path: str,
+) -> None:
+    """写回基础数据库条目的普通字段或 Note 标签值。"""
+    if key == "note" and len(parts) == 4:
+        note_value = target.get("note")
+        if not isinstance(note_value, str):
+            raise ValueError(f"基础数据库 note 字段不是字符串: {location_path}")
+        target["note"] = replace_note_tag_value(
+            note_text=note_value,
+            tag_name=parts[3],
+            translated_text=translated_text,
+        )
+        return
+
+    if len(parts) == 3:
+        target[key] = translated_text
+        return
+
+    raise ValueError(f"无法识别的基础数据库路径: {location_path}")
 
 
 def _ensure_command_list(value: JsonValue, context: str) -> list[JsonObject]:
