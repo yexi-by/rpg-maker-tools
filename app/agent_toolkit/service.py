@@ -55,7 +55,12 @@ from app.rmmz.text_rules import JsonArray, JsonObject, JsonValue, TextRules
 from app.rmmz.json_types import coerce_json_value, ensure_json_array, ensure_json_object, ensure_json_string_list
 from app.rmmz.control_codes import ControlSequenceSpan
 from app.rmmz.write_back import write_data_text
-from app.translation.line_wrap import count_line_width_chars, normalize_translated_wrapping_punctuation, split_overwide_lines
+from app.translation.line_wrap import (
+    count_line_width_chars,
+    normalize_translated_wrapping_punctuation,
+    split_overwide_lines,
+    split_overwide_single_text_value_if_needed,
+)
 from app.utils.config_loader_utils import load_setting, resolve_setting_path
 from app.event_command_text import (
     EventCommandTextExtraction,
@@ -2258,6 +2263,14 @@ def _normalize_manual_translation_lines(
         translation_lines=list(translation_lines),
         text_rules=text_rules,
     )
+    if item.item_type == "short_text" and normalized_lines:
+        normalized_lines[0] = split_overwide_single_text_value_if_needed(
+            original_lines=item.original_lines,
+            translation_text=normalized_lines[0],
+            location_path=item.location_path,
+            text_rules=text_rules,
+        )
+        return normalized_lines
     if item.item_type != "long_text":
         return normalized_lines
     return split_overwide_lines(
@@ -2268,13 +2281,11 @@ def _normalize_manual_translation_lines(
 
 
 def _collect_overwide_line_items(items: list[TranslationItem], text_rules: TextRules) -> JsonArray:
-    """收集超过当前行宽上限的长文本译文行明细。"""
+    """收集超过当前行宽上限的多行显示译文明细。"""
     limit = text_rules.setting.long_text_line_width_limit
     details: JsonArray = []
     for item in items:
-        if item.item_type != "long_text":
-            continue
-        for index, line in enumerate(item.translation_lines):
+        for index, line in enumerate(_iter_line_width_check_lines(item=item)):
             if not line:
                 continue
             width = count_line_width_chars(line, text_rules)
@@ -2287,6 +2298,19 @@ def _collect_overwide_line_items(items: list[TranslationItem], text_rules: TextR
             detail["line_width_limit"] = limit
             details.append(detail)
     return details
+
+
+def _iter_line_width_check_lines(*, item: TranslationItem) -> list[str]:
+    """返回需要按显示行宽检查的译文行。"""
+    if item.item_type == "long_text":
+        return list(item.translation_lines)
+    if item.item_type != "short_text" or not item.translation_lines:
+        return []
+    original_has_line_break = any("\n" in line for line in item.original_lines)
+    translated_text = item.translation_lines[0]
+    if "\n" not in translated_text and not original_has_line_break:
+        return []
+    return translated_text.split("\n")
 
 
 def _build_translation_item_quality_detail(item: TranslationItem) -> JsonObject:

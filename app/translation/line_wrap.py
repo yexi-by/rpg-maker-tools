@@ -124,6 +124,30 @@ def split_overwide_lines(
     return split_lines
 
 
+def split_overwide_single_text_value_if_needed(
+    *,
+    original_lines: list[str],
+    translation_text: str,
+    location_path: str | None,
+    text_rules: TextRules,
+) -> str:
+    """对承载多行显示内容的单值文本执行行宽兜底。
+
+    Note 标签、插件参数等来源在数据库里可能只能作为一个字符串写回，但字符串
+    内部的换行会被游戏窗口当作多行显示。只要源文或译文已经带有换行，就按
+    显示行拆开执行与 long_text 相同的宽度保护，再重新拼回单个字符串。
+    """
+    if "\n" not in translation_text and not _has_embedded_line_break(original_lines):
+        return translation_text
+    return "\n".join(
+        split_overwide_lines(
+            lines=translation_text.split("\n"),
+            location_path=location_path,
+            text_rules=text_rules,
+        )
+    )
+
+
 def count_line_width_chars(text: str, text_rules: TextRules) -> int:
     """统计参与长文本行宽判断的可见字符数量。"""
     protected_spans = _collect_protected_spans(text=text, text_rules=text_rules)
@@ -326,6 +350,11 @@ def _build_alternative_wrapping_pairs(source_pairs: tuple[tuple[str, str], ...])
     """生成可被自动修回源文包裹标点的译文替代引号对。"""
     source_pair_set = set(source_pairs)
     return tuple(pair for pair in TRANSLATED_WRAPPING_QUOTE_PAIRS if pair not in source_pair_set)
+
+
+def _has_embedded_line_break(lines: list[str]) -> bool:
+    """判断文本行列表中是否存在作为字段内容保存的换行。"""
+    return any("\n" in line for line in lines)
 
 
 def _has_unpaired_wrapping_chars(
@@ -675,13 +704,57 @@ def _find_hard_split_position(text: str, text_rules: TextRules) -> int | None:
             position=index + 1,
             protected_spans=protected_spans,
         )
-        return _extend_split_position_through_trailing_punctuation(
+        extended_position = _extend_split_position_through_trailing_punctuation(
             text=text,
             position=split_position,
             text_rules=text_rules,
             protected_spans=protected_spans,
         )
+        if extended_position >= len(text) and count_line_width_chars(text, text_rules) > limit:
+            readable_position = _find_readable_hard_split_position(
+                text=text,
+                max_position=split_position,
+                text_rules=text_rules,
+                protected_spans=protected_spans,
+            )
+            if readable_position is not None:
+                return readable_position
+        return extended_position
     return None
+
+
+def _find_readable_hard_split_position(
+    *,
+    text: str,
+    max_position: int,
+    text_rules: TextRules,
+    protected_spans: list[ProtectedSpan],
+) -> int | None:
+    """尾部标点导致硬切失败时，回退到能保留可读尾段的位置。"""
+    min_tail_width = min(4, max(1, text_rules.setting.long_text_line_width_limit // 4))
+    punctuations = set(text_rules.setting.line_split_punctuations)
+    candidates: list[int] = []
+    for index, char in enumerate(text):
+        position = index + 1
+        if position > max_position:
+            break
+        if position >= len(text):
+            break
+        if _is_inside_protected_span(index=index, protected_spans=protected_spans):
+            continue
+        if not text_rules.is_line_width_counted_char(char):
+            continue
+        tail = text[position:].lstrip()
+        if not tail:
+            continue
+        if tail[0] in punctuations:
+            continue
+        if count_line_width_chars(tail, text_rules) < min_tail_width:
+            continue
+        candidates.append(position)
+    if not candidates:
+        return None
+    return candidates[-1]
 
 
 def _extend_split_position_through_trailing_punctuation(
@@ -757,5 +830,6 @@ __all__: list[str] = [
     "count_line_width_chars",
     "normalize_translated_outer_wrapping_punctuation",
     "normalize_translated_wrapping_punctuation",
+    "split_overwide_single_text_value_if_needed",
     "split_overwide_lines",
 ]

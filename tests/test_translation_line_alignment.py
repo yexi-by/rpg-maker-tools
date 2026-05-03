@@ -9,7 +9,12 @@ from app.config.schemas import TextRulesSetting
 from app.rmmz.control_codes import CustomPlaceholderRule
 from app.rmmz.schema import TranslationErrorItem, TranslationItem
 from app.rmmz.text_rules import TextRules
-from app.translation.line_wrap import align_long_text_lines, count_line_width_chars, split_overwide_lines
+from app.translation.line_wrap import (
+    align_long_text_lines,
+    count_line_width_chars,
+    split_overwide_lines,
+    split_overwide_single_text_value_if_needed,
+)
 from app.translation.verify import verify_translation_batch
 
 
@@ -51,6 +56,47 @@ async def _verify_single_long_text(
     result = await right_queue.get()
     assert result is not None
     return result[0]
+
+
+@pytest.mark.asyncio
+async def test_multiline_short_text_is_wrapped_during_verify() -> None:
+    """单值多行显示文本在入库前也执行行宽兜底。"""
+    text_rules = _build_text_rules(width_limit=8)
+    item = TranslationItem(
+        location_path="Items.json/1/note/拡張説明",
+        item_type="short_text",
+        original_lines=["説明\n「原文」"],
+    )
+    item.build_placeholders(text_rules)
+    right_queue: asyncio.Queue[list[TranslationItem] | None] = asyncio.Queue()
+    error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
+
+    await verify_translation_batch(
+        ai_result=json.dumps({item.location_path: "说明\n「甲乙丙丁戊己，庚辛壬癸」"}, ensure_ascii=False),
+        items=[item],
+        right_queue=right_queue,
+        error_queue=error_queue,
+        text_rules=text_rules,
+    )
+
+    assert error_queue.empty()
+    result = await right_queue.get()
+    assert result is not None
+    assert result[0].translation_lines == ["说明\n「甲乙丙丁戊己，\n　庚辛壬癸」"]
+
+
+def test_single_text_value_wraps_embedded_display_lines() -> None:
+    """单值文本内部换行按显示行切宽后仍作为一个字段返回。"""
+    text_rules = _build_text_rules(width_limit=8)
+
+    text = split_overwide_single_text_value_if_needed(
+        original_lines=["説明\n「原文」"],
+        translation_text="说明\n「甲乙丙丁戊己，庚辛壬癸」",
+        location_path="Items.json/1/note/拡張説明",
+        text_rules=text_rules,
+    )
+
+    assert text == "说明\n「甲乙丙丁戊己，\n　庚辛壬癸」"
 
 
 @pytest.mark.asyncio
@@ -159,6 +205,22 @@ def test_line_width_split_uses_punctuation_near_limit() -> None:
     )
 
     assert lines == ["甲乙丙丁戊己，", "庚辛壬癸"]
+
+
+def test_hard_split_backs_off_when_only_trailing_punctuation_exceeds_limit() -> None:
+    """只有句末标点越界时，硬切回退到可读尾段而不是保留超宽行。"""
+    text_rules = _build_text_rules(width_limit=26)
+
+    lines = split_overwide_lines(
+        lines=["地下之国阿格尼卡从遗迹出土品中发展出了超常的机械技术。"],
+        location_path="Weapons.json/1/note/拡張説明",
+        text_rules=text_rules,
+    )
+
+    assert len(lines) == 2
+    assert all(count_line_width_chars(line, text_rules) <= 26 for line in lines)
+    assert not lines[1].startswith("。")
+    assert lines[1].endswith("。")
 
 
 def test_wrapping_punctuation_continuation_line_gets_visual_indent() -> None:

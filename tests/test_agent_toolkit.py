@@ -10,7 +10,7 @@ from app.agent_toolkit import AgentToolkitService
 from app.llm import LLMHandler
 from app.persistence import GameRegistry
 from app.rmmz.json_types import JsonObject, coerce_json_value, ensure_json_array, ensure_json_object
-from app.rmmz.schema import PluginTextRuleRecord, TranslationErrorItem, TranslationItem
+from app.rmmz.schema import NoteTagTextRuleRecord, PluginTextRuleRecord, TranslationErrorItem, TranslationItem
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_SETTING_PATH = ROOT / "setting.example.toml"
@@ -915,4 +915,50 @@ async def test_quality_report_counts_errors_and_model_response(
     assert quality_error_detail["error_type"] == "AI漏翻"
     assert placeholder_detail["location_path"] == "CommonEvents.json/1/0"
     assert overwide_detail["location_path"] == "CommonEvents.json/1/0"
+    assert overwide_detail["line_width"] == 30
+
+
+@pytest.mark.asyncio
+async def test_quality_report_flags_multiline_short_text_overwide_line(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """质量报告按单值文本的实际显示行检查 Note 标签超宽风险。"""
+    items_path = minimal_game_dir / "data" / "Items.json"
+    raw_value = coerce_json_value(cast(object, json.loads(items_path.read_text(encoding="utf-8"))))
+    items = ensure_json_array(raw_value, "Items.json")
+    item = ensure_json_object(items[1], "Items.json[1]")
+    item["note"] = "<拡張説明:説明\n原文>"
+    _ = items_path.write_text(json.dumps(raw_value, ensure_ascii=False, indent=2), encoding="utf-8")
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    async with await registry.open_game("テストゲーム") as session:
+        await session.replace_note_tag_text_rules(
+            [
+                NoteTagTextRuleRecord(
+                    file_name="Items.json",
+                    tag_names=["拡張説明"],
+                )
+            ]
+        )
+        await session.write_translation_items(
+            [
+                TranslationItem(
+                    location_path="Items.json/1/note/拡張説明",
+                    item_type="short_text",
+                    original_lines=["説明\n原文"],
+                    translation_lines=["说明\n甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲"],
+                )
+            ]
+        )
+
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    report = await service.quality_report(game_title="テストゲーム")
+
+    overwide_items = ensure_json_array(report.details["overwide_line_items"], "overwide_line_items")
+    overwide_detail = ensure_json_object(overwide_items[0], "overwide_line_items[0]")
+    assert report.summary["overwide_line_count"] == 1
+    assert overwide_detail["location_path"] == "Items.json/1/note/拡張説明"
+    assert overwide_detail["item_type"] == "short_text"
+    assert overwide_detail["line_index"] == 1
     assert overwide_detail["line_width"] == 30

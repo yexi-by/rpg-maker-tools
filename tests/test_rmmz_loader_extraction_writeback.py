@@ -117,6 +117,43 @@ async def test_note_tag_rules_extract_and_write_back_only_target_values(minimal_
 
 
 @pytest.mark.asyncio
+async def test_note_tag_multiline_value_splits_overwide_lines_before_write_back(minimal_game_dir: Path) -> None:
+    """Note 标签单字段内的多行显示文本在写回前执行行宽兜底。"""
+    items_path = minimal_game_dir / "data" / "Items.json"
+    raw_items = _read_test_json(items_path)
+    items = ensure_json_array(raw_items, "Items.json")
+    item = ensure_json_object(items[1], "Items.json[1]")
+    item["note"] = "<拡張説明:説明\n「原文」>"
+    _rewrite_json(items_path, raw_items)
+    text_rules = TextRules.from_setting(
+        TextRulesSetting(
+            long_text_line_width_limit=8,
+            line_split_punctuations=["，", "。"],
+        )
+    )
+
+    game_data = await load_game_data(minimal_game_dir)
+    note_items = NoteTagTextExtraction(
+        game_data=game_data,
+        rule_records=[
+            NoteTagTextRuleRecord(
+                file_name="Items.json",
+                tag_names=["拡張説明"],
+            )
+        ],
+        text_rules=text_rules,
+    ).extract_all_text()["Items.json"].translation_items
+    note_items[0].translation_lines = ["说明\n「甲乙丙丁戊己，庚辛壬癸」"]
+
+    reset_writable_copies(game_data)
+    write_data_text(game_data, [note_items[0]], text_rules)
+
+    writable_items = ensure_json_array(game_data.writable_data["Items.json"], "Items.json")
+    writable_item = ensure_json_object(writable_items[1], "Items.json[1]")
+    assert writable_item["note"] == "<拡張説明:说明\n「甲乙丙丁戊己，\n　庚辛壬癸」>"
+
+
+@pytest.mark.asyncio
 async def test_fixture_custom_control_sequences_can_be_protected(minimal_game_dir: Path) -> None:
     """测试夹具里的自定义控制符可通过外部规则保护。"""
     text_rules = TextRules.from_setting(
