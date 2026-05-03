@@ -28,3 +28,5 @@ data/
 tmp/
 # Local secrets and machine-specific settings
 setting.toml
+
+outputs/
