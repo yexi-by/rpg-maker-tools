@@ -184,12 +184,15 @@ class TextRules:
             if not segments:
                 continue
 
+            has_non_japanese_content = self._has_non_japanese_content(cleaned_line)
             real_residual: list[str] = []
             for segment in segments:
                 filtered_segment = [char for char in segment if char not in allowed_chars]
                 if not filtered_segment:
+                    if not has_non_japanese_content:
+                        real_residual.extend(segment)
                     continue
-                if all(char in allowed_tail_chars for char in filtered_segment):
+                if has_non_japanese_content and all(char in allowed_tail_chars for char in filtered_segment):
                     continue
                 real_residual.extend(filtered_segment)
 
@@ -201,6 +204,11 @@ class TextRules:
         cleaned_text = self.strip_rm_control_sequences(text)
         cleaned_text = self.placeholder_token_pattern.sub("", cleaned_text)
         return self.residual_escape_sequence_pattern.sub(" ", cleaned_text)
+
+    def _has_non_japanese_content(self, text: str) -> bool:
+        """判断残留检查文本中是否存在日文片段之外的正文内容。"""
+        text_without_japanese = self.japanese_segment_pattern.sub("", text)
+        return any(char.isalnum() for char in text_without_japanese)
 
 
 _DEFAULT_TEXT_RULES = TextRules.from_setting(TextRulesSetting())

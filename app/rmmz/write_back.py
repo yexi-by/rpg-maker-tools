@@ -20,7 +20,7 @@ from app.rmmz.schema import (
     TranslationItem,
 )
 from app.rmmz.text_rules import JsonArray, JsonObject, JsonValue, TextRules, coerce_json_value, ensure_json_array, ensure_json_object
-from app.translation.line_wrap import split_overwide_lines
+from app.translation.line_wrap import normalize_translated_wrapping_punctuation, split_overwide_lines
 
 
 def write_data_text(game_data: GameData, items: list[TranslationItem], text_rules: TextRules | None = None) -> None:
@@ -31,12 +31,12 @@ def write_data_text(game_data: GameData, items: list[TranslationItem], text_rule
         if file_name == PLUGINS_FILE_NAME:
             continue
         if file_name == SYSTEM_FILE_NAME:
-            _write_system_item(game_data=game_data, item=item)
+            _write_system_item(game_data=game_data, item=item, text_rules=text_rules)
             continue
         if MAP_PATTERN.fullmatch(file_name) or file_name in {COMMON_EVENTS_FILE_NAME, TROOPS_FILE_NAME}:
             command_items.append(item)
             continue
-        _write_base_item(game_data=game_data, item=item)
+        _write_base_item(game_data=game_data, item=item, text_rules=text_rules)
 
     for item in sorted(command_items, key=_command_item_sort_key, reverse=True):
         _write_command_item(game_data=game_data, item=item, text_rules=text_rules)
@@ -68,7 +68,7 @@ def _write_command_item(game_data: GameData, item: TranslationItem, text_rules: 
     command = commands[command_index]
 
     if item.item_type == "short_text":
-        _write_event_command_text_item(command=command, item=item)
+        _write_event_command_text_item(command=command, item=item, text_rules=text_rules)
         return
 
     if item.item_type == "long_text":
@@ -97,10 +97,12 @@ def _write_command_item(game_data: GameData, item: TranslationItem, text_rules: 
         if command.get("code") != Code.CHOICES:
             raise RuntimeError(f"路径 {item.location_path} 不是 CHOICES 指令")
         parameters = _ensure_command_parameters(command, item.location_path)
+        translation_lines = _prepare_text_write_lines(item=item, text_rules=text_rules)
+        translation_values: JsonArray = [line for line in translation_lines]
         if parameters:
-            parameters[0] = list(item.translation_lines)
+            parameters[0] = translation_values
         else:
-            parameters.append(list(item.translation_lines))
+            parameters.append(translation_values)
         return
 
     raise ValueError(f"事件指令 item_type 无法处理: {item.item_type}")
@@ -203,11 +205,37 @@ def _prepare_long_text_write_lines(
     """在写回前按当前配置再次执行长文本行宽兜底。"""
     if text_rules is None:
         return _strip_trailing_empty_lines(list(item.translation_lines))
+    translation_lines = _prepare_text_write_lines(item=item, text_rules=text_rules)
     return _strip_trailing_empty_lines(split_overwide_lines(
-        lines=list(item.translation_lines),
+        lines=translation_lines,
         location_path=item.location_path,
         text_rules=text_rules,
     ))
+
+
+def _prepare_text_write_lines(
+    *,
+    item: TranslationItem,
+    text_rules: TextRules | None,
+) -> list[str]:
+    """写回前修复源文外层包裹标点被模型改写的译文。"""
+    if text_rules is None:
+        return list(item.translation_lines)
+    return normalize_translated_wrapping_punctuation(
+        original_lines=item.original_lines,
+        translation_lines=list(item.translation_lines),
+        text_rules=text_rules,
+    )
+
+
+def _prepare_single_text_write_value(
+    *,
+    item: TranslationItem,
+    text_rules: TextRules | None,
+) -> str:
+    """读取单值文本写回内容，并套用外层包裹标点修复。"""
+    translation_lines = _prepare_text_write_lines(item=item, text_rules=text_rules)
+    return translation_lines[0] if translation_lines else ""
 
 
 def _strip_trailing_empty_lines(lines: list[str]) -> list[str]:
@@ -271,7 +299,7 @@ def _ensure_source_paths_share_command_list(source_line_paths: list[str], locati
         raise ValueError(f"长文本逐行路径跨事件列表，无法插入额外行: {location_path}")
 
 
-def _write_event_command_text_item(command: JsonObject, item: TranslationItem) -> None:
+def _write_event_command_text_item(command: JsonObject, item: TranslationItem, text_rules: TextRules | None) -> None:
     """将外部规则命中的事件指令短文本译文写回参数容器。"""
     path_parts = _extract_command_value_path_parts(item.location_path)
     if len(path_parts) < 2 or path_parts[0] != "parameters":
@@ -282,7 +310,7 @@ def _write_event_command_text_item(command: JsonObject, item: TranslationItem) -
     if param_index >= len(parameters):
         raise ValueError(f"事件指令参数索引越界: {item.location_path}")
 
-    translated_text = item.translation_lines[0] if item.translation_lines else ""
+    translated_text = _prepare_single_text_write_value(item=item, text_rules=text_rules)
     parameters[param_index] = _set_event_command_value(
         current_value=parameters[param_index],
         path_parts=path_parts[2:],
@@ -460,11 +488,11 @@ def _write_first_parameter(command: JsonObject, text: str) -> None:
         parameters.append(text)
 
 
-def _write_system_item(game_data: GameData, item: TranslationItem) -> None:
+def _write_system_item(game_data: GameData, item: TranslationItem, text_rules: TextRules | None) -> None:
     """将 `System.json` 文本写回数据副本。"""
     parts = item.location_path.split("/")
     system_data = ensure_json_object(game_data.writable_data[SYSTEM_FILE_NAME], SYSTEM_FILE_NAME)
-    translated_text = item.translation_lines[0] if item.translation_lines else ""
+    translated_text = _prepare_single_text_write_value(item=item, text_rules=text_rules)
 
     if len(parts) == 2:
         system_data[parts[1]] = translated_text
@@ -493,13 +521,13 @@ def _write_system_item(game_data: GameData, item: TranslationItem) -> None:
     raise ValueError(f"无法识别的 System 路径: {item.location_path}")
 
 
-def _write_base_item(game_data: GameData, item: TranslationItem) -> None:
+def _write_base_item(game_data: GameData, item: TranslationItem, text_rules: TextRules | None) -> None:
     """将基础数据库条目文本写回数据副本。"""
     parts = item.location_path.split("/")
     file_name = parts[0]
     item_id = int(parts[1])
     key = parts[2]
-    translated_text = item.translation_lines[0] if item.translation_lines else ""
+    translated_text = _prepare_single_text_write_value(item=item, text_rules=text_rules)
     data = ensure_json_array(game_data.writable_data[file_name], file_name)
 
     if item_id < len(data):

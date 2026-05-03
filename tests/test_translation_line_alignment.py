@@ -6,9 +6,10 @@ import json
 import pytest
 
 from app.config.schemas import TextRulesSetting
+from app.rmmz.control_codes import CustomPlaceholderRule
 from app.rmmz.schema import TranslationErrorItem, TranslationItem
 from app.rmmz.text_rules import TextRules
-from app.translation.line_wrap import count_line_width_chars, split_overwide_lines
+from app.translation.line_wrap import align_long_text_lines, count_line_width_chars, split_overwide_lines
 from app.translation.verify import verify_translation_batch
 
 
@@ -171,6 +172,123 @@ def test_wrapping_punctuation_continuation_line_gets_visual_indent() -> None:
     )
 
     assert lines == ["「甲乙丙。", "　丁戊己」"]
+
+
+def test_source_corner_quote_converted_to_curly_quote_is_restored_before_indent() -> None:
+    """源文外层日文引号被模型改成中文弯引号时先修回再补缩进。"""
+    text_rules = _build_text_rules(width_limit=40)
+
+    lines = align_long_text_lines(
+        text="“啊啊，是啊。我才被狼袭击了。还以为要死了，\n累得要命。”",
+        target_lines=3,
+        location_path="CommonEvents.json/1/0",
+        text_rules=text_rules,
+        original_lines=[
+            "「ああ、そうだよ。",
+            "こっちは狼に襲われたばっかりだ。",
+            "死ぬかと思ったし、めちゃくちゃ疲れてる」",
+        ],
+    )
+
+    assert lines == ["「啊啊，是啊。我才被狼袭击了。还以为要死了，", "　累得要命。」"]
+
+
+def test_source_corner_quote_fix_ignores_edge_control_sequences() -> None:
+    """外层引号修复忽略行首行尾控制符，避免漏掉带头像控制符的对白。"""
+    text_rules = TextRules.from_setting(
+        TextRulesSetting(
+            long_text_line_width_limit=40,
+            line_split_punctuations=["，", "。"],
+        ),
+        custom_placeholder_rules=(
+            CustomPlaceholderRule.create(r"\\F\d*\[[^\]\r\n]+\]", "[CUSTOM_FACE_PORTRAIT_{index}]"),
+        ),
+    )
+
+    lines = align_long_text_lines(
+        text=r"\F1[2]“甲乙丙。\n丁戊己。”\C[0]".replace(r"\n", "\n"),
+        target_lines=2,
+        location_path="Map001.json/1/0/0",
+        text_rules=text_rules,
+        original_lines=[r"\F1[2]「あ。", r"い」\C[0]"],
+    )
+
+    assert lines == [r"\F1[2]「甲乙丙。", r"　丁戊己。」\C[0]"]
+
+
+def test_source_corner_quote_fix_keeps_unquoted_translation_unchanged() -> None:
+    """译文没有成对引号时不强行补引号，避免误改普通正文。"""
+    text_rules = _build_text_rules(width_limit=40)
+
+    lines = align_long_text_lines(
+        text="甲乙丙。\n丁戊己。",
+        target_lines=2,
+        location_path="Map001.json/1/0/0",
+        text_rules=text_rules,
+        original_lines=["「あ。", "い」"],
+    )
+
+    assert lines == ["甲乙丙。", "丁戊己。"]
+
+
+def test_inner_corner_quote_converted_to_curly_quote_is_restored() -> None:
+    """源文内部日文引号被模型改成中文弯引号时修回日文引号。"""
+    text_rules = _build_text_rules(width_limit=40)
+
+    lines = align_long_text_lines(
+        text="上面绣着“莉亚”。",
+        target_lines=1,
+        location_path="Items.json/1/note/拡張説明",
+        text_rules=text_rules,
+        original_lines=["「リア」と刺繍がある"],
+    )
+
+    assert lines == ["上面绣着「莉亚」。"]
+
+
+def test_inner_corner_quote_converted_to_straight_quotes_is_restored() -> None:
+    """多个内部日文引号被模型改成直引号时按顺序修回。"""
+    text_rules = _build_text_rules(width_limit=40)
+
+    lines = align_long_text_lines(
+        text='部分患者报告"能看到声音""主就在身边"。',
+        target_lines=1,
+        location_path="CommonEvents.json/1/0",
+        text_rules=text_rules,
+        original_lines=["患者の一部は「声が見える」「主が近い」と報告。"],
+    )
+
+    assert lines == ["部分患者报告「能看到声音」「主就在身边」。"]
+
+
+def test_inner_corner_quote_fix_skips_ambiguous_extra_translation_quotes() -> None:
+    """译文引号数量无法和源文一一对应时保持原样，避免误改新增引号。"""
+    text_rules = _build_text_rules(width_limit=40)
+
+    lines = align_long_text_lines(
+        text="所谓“记录”，上面绣着“莉亚”。",
+        target_lines=1,
+        location_path="Items.json/1/note/拡張説明",
+        text_rules=text_rules,
+        original_lines=["「リア」と刺繍がある"],
+    )
+
+    assert lines == ["所谓“记录”，上面绣着“莉亚”。"]
+
+
+def test_inner_corner_quote_fix_skips_unpaired_translation_quote() -> None:
+    """译文存在未配对引号时不自动修复，避免制造重复引号。"""
+    text_rules = _build_text_rules(width_limit=40)
+
+    lines = align_long_text_lines(
+        text="“所以……求你了。做夫妻之事吧？”」",
+        target_lines=2,
+        location_path="CommonEvents.json/1/0",
+        text_rules=text_rules,
+        original_lines=["「だから……お願い。", "ふうふのいとなみ」、しよ？"],
+    )
+
+    assert lines == ["“所以……求你了。做夫妻之事吧？”」"]
 
 
 def test_wrapping_punctuation_split_tail_gets_visual_indent() -> None:

@@ -55,7 +55,7 @@ from app.rmmz.text_rules import JsonArray, JsonObject, JsonValue, TextRules
 from app.rmmz.json_types import coerce_json_value, ensure_json_array, ensure_json_object, ensure_json_string_list
 from app.rmmz.control_codes import ControlSequenceSpan
 from app.rmmz.write_back import write_data_text
-from app.translation.line_wrap import count_line_width_chars, split_overwide_lines
+from app.translation.line_wrap import count_line_width_chars, normalize_translated_wrapping_punctuation, split_overwide_lines
 from app.utils.config_loader_utils import load_setting, resolve_setting_path
 from app.event_command_text import (
     EventCommandTextExtraction,
@@ -2253,10 +2253,15 @@ def _normalize_manual_translation_lines(
     text_rules: TextRules,
 ) -> list[str]:
     """人工 long_text 入库前套用与写回一致的行宽兜底。"""
+    normalized_lines = normalize_translated_wrapping_punctuation(
+        original_lines=item.original_lines,
+        translation_lines=list(translation_lines),
+        text_rules=text_rules,
+    )
     if item.item_type != "long_text":
-        return list(translation_lines)
+        return normalized_lines
     return split_overwide_lines(
-        lines=list(translation_lines),
+        lines=normalized_lines,
         location_path=item.location_path,
         text_rules=text_rules,
     )

@@ -86,6 +86,19 @@ def test_text_rules_filter_resource_and_japanese_residual() -> None:
         rules.check_japanese_residual(["你好カ"])
 
 
+def test_japanese_tail_allowlist_does_not_hide_untranslated_short_lines() -> None:
+    """整行只剩日文尾音时仍按未翻译残留处理。"""
+    rules = get_default_text_rules()
+
+    with pytest.raises(ValueError, match="日文残留"):
+        rules.check_japanese_residual(["「なっ……」"])
+
+    with pytest.raises(ValueError, match="日文残留"):
+        rules.check_japanese_residual(['"え？"'])
+
+    rules.check_japanese_residual(["已经好了よ"])
+
+
 def test_text_rules_requires_configured_source_characters_for_translation() -> None:
     """原文必须包含平假名、片假名或汉字才进入正文翻译。"""
     rules = get_default_text_rules()

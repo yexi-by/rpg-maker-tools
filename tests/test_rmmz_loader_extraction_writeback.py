@@ -366,6 +366,30 @@ async def test_write_data_text_indents_wrapping_punctuation_continuation_lines(m
 
 
 @pytest.mark.asyncio
+async def test_write_data_text_restores_converted_outer_quote_before_indent(minimal_game_dir: Path) -> None:
+    """写回阶段先修复被模型改写的外层引号，再补跨行视觉缩进。"""
+    game_data = await load_game_data(minimal_game_dir)
+    extracted = DataTextExtraction(game_data, get_default_text_rules()).extract_all_text()
+    item = next(
+        candidate
+        for candidate in extracted["CommonEvents.json"].translation_items
+        if candidate.location_path == "CommonEvents.json/1/0"
+    )
+    item.original_lines = ["「甲。", "乙」"]
+    item.translation_lines = ["“甲乙丙。", "丁戊己。”"]
+
+    reset_writable_copies(game_data)
+    write_data_text(game_data, [item], text_rules=get_default_text_rules())
+
+    common_events = ensure_json_array(game_data.writable_data["CommonEvents.json"], "CommonEvents")
+    common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
+    commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
+
+    assert ensure_json_array(ensure_json_object(commands[1], "command1")["parameters"], "command1.parameters")[0] == "「甲乙丙。"
+    assert ensure_json_array(ensure_json_object(commands[2], "command2")["parameters"], "command2.parameters")[0] == "　丁戊己。」"
+
+
+@pytest.mark.asyncio
 async def test_scroll_text_commands_are_grouped_by_adjacent_405(minimal_game_dir: Path) -> None:
     """连续 405 滚动文本作为一个翻译单元提取，并支持额外译文行写回。"""
     common_events_path = minimal_game_dir / "data" / "CommonEvents.json"

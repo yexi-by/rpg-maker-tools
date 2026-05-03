@@ -13,7 +13,7 @@ from pydantic import RootModel
 from app.japanese_residual import JapaneseResidualRuleSet, check_japanese_residual_for_item
 from app.rmmz.schema import ErrorType, TranslationErrorItem, TranslationItem
 from app.rmmz.text_rules import TextRules
-from app.translation.line_wrap import align_long_text_lines
+from app.translation.line_wrap import align_long_text_lines, normalize_translated_wrapping_punctuation
 
 ERR_PARSE_FAILED: ErrorType = "模型返回不可解析"
 ERR_MISSING_KEY: ErrorType = "AI漏翻"
@@ -84,9 +84,15 @@ async def verify_translation_batch(
                 target_lines=len(item.original_lines),
                 location_path=item.location_path,
                 text_rules=text_rules,
+                original_lines=item.original_lines,
             )
         elif item.item_type == "array":
             translation_lines = translation_text.splitlines()
+            translation_lines = normalize_translated_wrapping_punctuation(
+                original_lines=item.original_lines,
+                translation_lines=translation_lines,
+                text_rules=text_rules,
+            )
             if len(translation_lines) != len(item.original_lines):
                 error_items.append(
                     TranslationErrorItem(
@@ -103,6 +109,11 @@ async def verify_translation_batch(
                 continue
         else:
             translation_lines = [translation_text]
+            translation_lines = normalize_translated_wrapping_punctuation(
+                original_lines=item.original_lines,
+                translation_lines=translation_lines,
+                text_rules=text_rules,
+            )
 
         item.translation_lines_with_placeholders = list(translation_lines)
         item.translation_lines = []
