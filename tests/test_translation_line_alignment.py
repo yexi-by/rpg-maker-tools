@@ -261,6 +261,21 @@ def test_inner_corner_quote_converted_to_straight_quotes_is_restored() -> None:
     assert lines == ["部分患者报告「能看到声音」「主就在身边」。"]
 
 
+def test_inner_corner_quote_converted_to_single_quotes_is_restored() -> None:
+    """内部日文引号被模型改成英文单引号时也按顺序修回。"""
+    text_rules = _build_text_rules(width_limit=40)
+
+    lines = align_long_text_lines(
+        text="上面绣着'莉亚'。",
+        target_lines=1,
+        location_path="Items.json/1/note/拡張説明",
+        text_rules=text_rules,
+        original_lines=["「リア」と刺繍がある"],
+    )
+
+    assert lines == ["上面绣着「莉亚」。"]
+
+
 def test_inner_corner_quote_fix_skips_ambiguous_extra_translation_quotes() -> None:
     """译文引号数量无法和源文一一对应时保持原样，避免误改新增引号。"""
     text_rules = _build_text_rules(width_limit=40)
