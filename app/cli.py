@@ -576,6 +576,13 @@ def add_setting_override_arguments(parser: argparse.ArgumentParser) -> None:
         help="提取时剥离的成对包裹标点，可重复传入",
     )
     _ = group.add_argument(
+        "--preserve-wrapping-punctuation-pair",
+        action="append",
+        nargs=2,
+        metavar=("LEFT", "RIGHT"),
+        help="译文必须按源文保留的成对包裹标点，可重复传入",
+    )
+    _ = group.add_argument(
         "--allowed-japanese-char",
         action="extend",
         nargs="+",
@@ -1399,6 +1406,10 @@ def build_setting_overrides(args: argparse.Namespace) -> SettingOverrides:
         strip_wrapping_punctuation_pairs=read_optional_pair_list_arg(
             args,
             "strip_wrapping_punctuation_pair",
+        ),
+        preserve_wrapping_punctuation_pairs=read_optional_pair_list_arg(
+            args,
+            "preserve_wrapping_punctuation_pair",
         ),
         allowed_japanese_chars=read_optional_str_list_arg(args, "allowed_japanese_chars"),
         allowed_japanese_tail_chars=read_optional_str_list_arg(

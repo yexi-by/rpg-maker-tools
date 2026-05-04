@@ -86,6 +86,10 @@ class TextRulesSetting(StrictBaseModel):
         default_factory=lambda: [("「", "」")],
         title="提取时剥离的成对标点",
     )
+    preserve_wrapping_punctuation_pairs: list[tuple[str, str]] = Field(
+        default_factory=lambda: [("「", "」"), ("『", "』")],
+        title="译文必须按源文保留的成对包裹标点",
+    )
     allowed_japanese_chars: list[str] = Field(
         default_factory=lambda: ["っ", "ッ", "ー", "・", "。", "～", "…"]
     )

@@ -67,6 +67,7 @@ residual_escape_sequence_pattern = "\\\\[nrt]"
         text_translation_system_prompt="直接传入的系统提示词",
         event_command_default_codes=[357, 355],
         strip_wrapping_punctuation_pairs=[("《", "》")],
+        preserve_wrapping_punctuation_pairs=[("『", "』")],
         allowed_japanese_chars=["ー"],
         allowed_japanese_tail_chars=["よ"],
         line_split_punctuations=["，", "。"],
@@ -95,6 +96,7 @@ residual_escape_sequence_pattern = "\\\\[nrt]"
     assert setting.text_translation.system_prompt == "直接传入的系统提示词"
     assert setting.event_command_text.default_command_codes == [357, 355]
     assert setting.text_rules.strip_wrapping_punctuation_pairs == [("《", "》")]
+    assert setting.text_rules.preserve_wrapping_punctuation_pairs == [("『", "』")]
     assert setting.text_rules.allowed_japanese_chars == ["ー"]
     assert setting.text_rules.allowed_japanese_tail_chars == ["よ"]
     assert setting.text_rules.line_split_punctuations == ["，", "。"]

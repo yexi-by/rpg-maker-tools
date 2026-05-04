@@ -582,6 +582,73 @@ def test_inner_corner_quote_converted_to_single_quotes_is_restored() -> None:
     assert lines == ["上面绣着「莉亚」。"]
 
 
+def test_inner_book_title_quote_converted_to_straight_quotes_is_restored() -> None:
+    """内部日文书名号被模型改成英文直引号时也按顺序修回。"""
+    text_rules = _build_text_rules(width_limit=40)
+
+    lines = align_long_text_lines(
+        text='莉可开了个叫"莉可银行"的地方。',
+        target_lines=1,
+        location_path="plugins.js/1/message",
+        text_rules=text_rules,
+        original_lines=["リコは『リコの銀行』なるものを始めたようだ。"],
+    )
+
+    assert lines == ["莉可开了个叫『莉可银行』的地方。"]
+
+
+@pytest.mark.asyncio
+async def test_short_text_inner_book_title_quote_converted_to_curly_quote_is_restored() -> None:
+    """单值多行文本中的内部日文书名号被模型改写时修回源文符号。"""
+    text_rules = _build_text_rules(width_limit=80)
+    original_text = (
+        r"\C[2]イベント完了"
+        "\n\n"
+        r"\C[24]【詳細】\C[0]"
+        "\n研究室を手に入れた。"
+        "\nリコはちゃっかりと『リコの銀行』なるものを始めたようだ。"
+    )
+    translated_text = (
+        r"\C[2]事件完成"
+        "\n\n"
+        r"\C[24]【详情】\C[0]"
+        "\n得到了研究室。"
+        "\n莉可倒是很精明地搞了个叫“莉可银行”的玩意儿。"
+    )
+    item = TranslationItem(
+        location_path="plugins.js/1/message",
+        item_type="short_text",
+        original_lines=[original_text],
+    )
+    item.build_placeholders(text_rules)
+    right_queue: asyncio.Queue[list[TranslationItem] | None] = asyncio.Queue()
+    error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
+
+    await verify_translation_batch(
+        ai_result=_build_model_response(
+            item=item,
+            translation_lines=[translated_text],
+        ),
+        items=[item],
+        right_queue=right_queue,
+        error_queue=error_queue,
+        text_rules=text_rules,
+    )
+
+    assert error_queue.empty()
+    result = await right_queue.get()
+    assert result is not None
+    assert result[0].translation_lines == [
+        (
+            r"\C[2]事件完成"
+            "\n\n"
+            r"\C[24]【详情】\C[0]"
+            "\n得到了研究室。"
+            "\n莉可倒是很精明地搞了个叫『莉可银行』的玩意儿。"
+        )
+    ]
+
+
 def test_inner_corner_quote_fix_skips_ambiguous_extra_translation_quotes() -> None:
     """译文引号数量无法和源文一一对应时保持原样，避免误改新增引号。"""
     text_rules = _build_text_rules(width_limit=40)

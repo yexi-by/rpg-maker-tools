@@ -260,7 +260,7 @@ def _normalize_aligned_wrapping_spans(
     text_rules: TextRules,
 ) -> list[str]:
     """在可安全一一对应时修复文本内部被替换的包裹标点。"""
-    source_pairs = tuple(text_rules.setting.strip_wrapping_punctuation_pairs)
+    source_pairs = tuple(text_rules.setting.preserve_wrapping_punctuation_pairs)
     source_spans = _collect_wrapping_spans(
         lines=original_lines,
         pair_definitions=source_pairs,
@@ -522,7 +522,7 @@ def _find_source_outer_wrapping_pair(
     last_boundary = _find_last_visible_boundary(lines=original_lines, text_rules=text_rules)
     if first_boundary is None or last_boundary is None:
         return None
-    for left, right in text_rules.setting.strip_wrapping_punctuation_pairs:
+    for left, right in text_rules.setting.preserve_wrapping_punctuation_pairs:
         if first_boundary.char == left and last_boundary.char == right:
             return left, right
     return None
@@ -625,7 +625,7 @@ def _replace_char_at(*, text: str, index: int, char: str) -> str:
 def _find_opening_wrapping_pair(*, line: str, text_rules: TextRules) -> tuple[str, str] | None:
     """返回当前行开头命中的包裹标点配置。"""
     stripped_line = _build_wrapping_check_line(line=line, text_rules=text_rules)
-    for left, right in text_rules.setting.strip_wrapping_punctuation_pairs:
+    for left, right in text_rules.setting.preserve_wrapping_punctuation_pairs:
         if stripped_line.startswith(left):
             return left, right
     return None

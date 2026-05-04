@@ -142,6 +142,14 @@ def test_text_rules_requires_configured_source_characters_for_translation() -> N
     assert not rules.should_translate_source_text("img/pictures/Actor1.png")
 
 
+def test_text_rules_keep_book_title_quote_during_extraction() -> None:
+    """提取阶段不剥离外层日文书名号，避免写回时丢失玩家可见符号。"""
+    rules = get_default_text_rules()
+
+    assert rules.normalize_extraction_text("『リコの銀行』") == "『リコの銀行』"
+    assert rules.should_translate_source_text("『リコの銀行』")
+
+
 def test_text_rules_can_apply_custom_placeholder_json_rules() -> None:
     """自定义正则规则会在标准 RMMZ 控制符之外保护特殊片段。"""
     rules = TextRules.from_setting(

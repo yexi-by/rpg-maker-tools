@@ -22,6 +22,7 @@ class SettingOverrides:
     event_command_default_codes: list[int] | None = None
     write_back_replacement_font_path: str | None = None
     strip_wrapping_punctuation_pairs: list[tuple[str, str]] | None = None
+    preserve_wrapping_punctuation_pairs: list[tuple[str, str]] | None = None
     allowed_japanese_chars: list[str] | None = None
     allowed_japanese_tail_chars: list[str] | None = None
     line_split_punctuations: list[str] | None = None
@@ -48,6 +49,7 @@ class SettingOverrides:
                 self.event_command_default_codes is not None,
                 self.write_back_replacement_font_path is not None,
                 self.strip_wrapping_punctuation_pairs is not None,
+                self.preserve_wrapping_punctuation_pairs is not None,
                 self.allowed_japanese_chars is not None,
                 self.allowed_japanese_tail_chars is not None,
                 self.line_split_punctuations is not None,
@@ -114,6 +116,11 @@ def apply_setting_overrides(
         text_rules,
         "strip_wrapping_punctuation_pairs",
         overrides.strip_wrapping_punctuation_pairs,
+    )
+    _set_if_present(
+        text_rules,
+        "preserve_wrapping_punctuation_pairs",
+        overrides.preserve_wrapping_punctuation_pairs,
     )
     _set_if_present(text_rules, "allowed_japanese_chars", overrides.allowed_japanese_chars)
     _set_if_present(

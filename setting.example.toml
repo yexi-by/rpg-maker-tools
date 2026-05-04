@@ -25,6 +25,7 @@ replacement_font_path = "fonts/NotoSansSC-Regular.ttf"
 
 [text_rules]
 strip_wrapping_punctuation_pairs = [["「", "」"]]
+preserve_wrapping_punctuation_pairs = [["「", "」"], ["『", "』"]]
 allowed_japanese_chars = ["っ", "ッ", "ー", "・", "。", "～", "…"]
 allowed_japanese_tail_chars = ["あ", "い", "う", "え", "お", "っ", "ッ", "ん", "ー", "よ", "ね", "な", "か"]
 line_split_punctuations = [
