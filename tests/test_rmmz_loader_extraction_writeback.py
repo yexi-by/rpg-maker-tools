@@ -806,6 +806,7 @@ async def test_restore_font_references_uses_origin_backups_without_rolling_back_
         {"font": another_font, "text": "プラグイン本文"},
         ensure_ascii=False,
     )
+    parameters["HelpText"] = f"请在设置中选择 {old_font} 字体。"
     plugins_path = minimal_game_dir / "js" / "plugins.js"
     _ = plugins_path.write_text(
         f"var $plugins = {json.dumps(base_game_data.plugins_js, ensure_ascii=False, indent=2)};\n",
@@ -818,12 +819,13 @@ async def test_restore_font_references_uses_origin_backups_without_rolling_back_
     writable_system["gameTitle"] = "翻译标题"
     writable_plugin = ensure_json_object(game_data.writable_plugins_js[0], "plugins[0]")
     writable_parameters = ensure_json_object(writable_plugin["parameters"], "plugins[0].parameters")
+    replacement_name = replacement_font.name
     writable_parameters["Nested"] = json.dumps(
         {"font": another_font, "text": "插件正文"},
         ensure_ascii=False,
     )
+    writable_parameters["HelpText"] = f"请在设置中选择 {replacement_name} 字体。"
 
-    replacement_name = replacement_font.name
     _ = apply_font_replacement(
         game_data=game_data,
         game_root=minimal_game_dir,
@@ -853,3 +855,4 @@ async def test_restore_font_references_uses_origin_backups_without_rolling_back_
     nested_value = ensure_json_object(coerce_json_value(cast(object, json.loads(nested_text))), "Nested")
     assert nested_value["font"] == another_font
     assert nested_value["text"] == "插件正文"
+    assert restored_parameters["HelpText"] == f"请在设置中选择 {replacement_name} 字体。"

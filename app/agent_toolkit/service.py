@@ -22,7 +22,7 @@ from app.agent_toolkit.placeholder_scan import (
 )
 from app.agent_toolkit.reports import AgentIssue, AgentReport, issue
 from app.application.file_writer import reset_writable_copies
-from app.config import load_custom_placeholder_rules_text
+from app.config import SettingOverrides, load_custom_placeholder_rules_text
 from app.config.environment import load_environment_overrides
 from app.japanese_residual import (
     JapaneseResidualRuleSet,
@@ -375,6 +375,11 @@ class AgentToolkitService:
             translated_items = await session.read_translated_items()
             translated_by_path = {item.location_path: item for item in translated_items}
             translated_paths = set(translated_by_path)
+            active_translated_items = [
+                item
+                for item in translated_items
+                if item.location_path in active_paths
+            ]
             latest_run = await session.read_latest_translation_run()
             if latest_run is None:
                 quality_error_items: list[TranslationErrorItem] = []
@@ -391,15 +396,15 @@ class AgentToolkitService:
             if item.location_path in pending_paths
         ]
         residual_details = _collect_residual_items(
-            translated_items,
+            active_translated_items,
             text_rules,
             japanese_residual_rule_set,
         )
-        placeholder_details = _collect_placeholder_risk_items(translated_items, text_rules)
-        overwide_details = _collect_overwide_line_items(translated_items, text_rules)
+        placeholder_details = _collect_placeholder_risk_items(active_translated_items, text_rules)
+        overwide_details = _collect_overwide_line_items(active_translated_items, text_rules)
         write_back_protocol_details = _collect_write_back_protocol_items(
             game_data=game_data,
-            items=translated_items,
+            items=active_translated_items,
             active_paths=active_paths,
             text_rules=text_rules,
         )
@@ -462,9 +467,14 @@ class AgentToolkitService:
             },
         )
 
-    async def quality_report(self, *, game_title: str) -> AgentReport:
+    async def quality_report(
+        self,
+        *,
+        game_title: str,
+        setting_overrides: SettingOverrides | None = None,
+    ) -> AgentReport:
         """生成目标游戏当前翻译状态和质量风险报告。"""
-        setting = load_setting(self.setting_path)
+        setting = load_setting(self.setting_path, overrides=setting_overrides)
         errors: list[AgentIssue] = []
         warnings: list[AgentIssue] = []
         async with await self.game_registry.open_game(game_title) as session:
@@ -498,6 +508,11 @@ class AgentToolkitService:
             }
             translated_items = await session.read_translated_items()
             translated_paths = {item.location_path for item in translated_items}
+            active_translated_items = [
+                item
+                for item in translated_items
+                if item.location_path in active_paths
+            ]
             pending_paths = active_paths - translated_paths
             stale_paths = translated_paths - active_paths
             stale_japanese_residual_rule_paths = {
@@ -520,16 +535,16 @@ class AgentToolkitService:
         ]
         japanese_residual_rule_set = JapaneseResidualRuleSet.from_records(japanese_residual_rules)
         residual_items = _collect_residual_items(
-            translated_items,
+            active_translated_items,
             text_rules,
             japanese_residual_rule_set,
         )
         residual_count = len(residual_items)
-        placeholder_risk_items = _collect_placeholder_risk_items(translated_items, text_rules)
-        overwide_line_items = _collect_overwide_line_items(translated_items, text_rules)
+        placeholder_risk_items = _collect_placeholder_risk_items(active_translated_items, text_rules)
+        overwide_line_items = _collect_overwide_line_items(active_translated_items, text_rules)
         write_back_protocol_items = _collect_write_back_protocol_items(
             game_data=game_data,
-            items=translated_items,
+            items=active_translated_items,
             active_paths=active_paths,
             text_rules=text_rules,
         )

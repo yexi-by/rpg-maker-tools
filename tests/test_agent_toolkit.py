@@ -7,6 +7,7 @@ from typing import cast
 import pytest
 
 from app.agent_toolkit import AgentToolkitService
+from app.config import SettingOverrides
 from app.llm import LLMHandler
 from app.name_context.schemas import NameContextRegistry
 from app.persistence import GameRegistry
@@ -604,6 +605,101 @@ async def test_quality_report_treats_japanese_residual_as_error(
     assert "japanese_residual" in error_codes
     assert "japanese_residual" not in warning_codes
     assert report.summary["japanese_residual_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_quality_report_ignores_stale_saved_translation_quality_errors(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """质量报告不把当前不会写入的旧译文算成写入前错误。"""
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+
+    async with await registry.open_game("テストゲーム") as session:
+        await session.write_translation_items(
+            [
+                TranslationItem(
+                    location_path="Removed.json/1/name",
+                    item_type="short_text",
+                    role=None,
+                    original_lines=["こんにちは"],
+                    source_line_paths=[],
+                    translation_lines=["こんにちは"],
+                )
+            ]
+        )
+
+    report = await service.quality_report(game_title="テストゲーム")
+
+    error_codes = {error.code for error in report.errors}
+    warning_codes = {warning.code for warning in report.warnings}
+    assert "japanese_residual" not in error_codes
+    assert "stale_cache" in warning_codes
+    assert report.summary["stale_cache_count"] == 1
+    assert report.summary["japanese_residual_count"] == 0
+    assert report.details["japanese_residual_items"] == []
+
+
+@pytest.mark.asyncio
+async def test_quality_report_uses_command_setting_overrides(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """写入前质量报告使用本次命令传入的文本规则覆盖。"""
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    pending_path = tmp_path / "pending-translations.json"
+
+    _ = await service.export_pending_translations(
+        game_title="テストゲーム",
+        output_path=pending_path,
+        limit=None,
+    )
+    payload = load_json_object(pending_path)
+    residual_path = ""
+    residual_original_lines: list[str] = []
+    for location_path, raw_entry in payload.items():
+        entry = ensure_json_object(coerce_json_value(raw_entry), location_path)
+        original_lines = [
+            line
+            for line in ensure_json_array(entry["original_lines"], f"{location_path}.original_lines")
+            if isinstance(line, str)
+        ]
+        if any(_contains_japanese_test_char(line) for line in original_lines):
+            residual_path = location_path
+            residual_original_lines = original_lines
+            break
+    assert residual_path
+
+    async with await registry.open_game("テストゲーム") as session:
+        await session.write_translation_items(
+            [
+                TranslationItem(
+                    location_path=residual_path,
+                    item_type="short_text",
+                    role=None,
+                    original_lines=residual_original_lines,
+                    source_line_paths=[],
+                    translation_lines=["中カ"],
+                )
+            ]
+        )
+
+    default_report = await service.quality_report(game_title="テストゲーム")
+    override_report = await service.quality_report(
+        game_title="テストゲーム",
+        setting_overrides=SettingOverrides(allowed_japanese_chars=["カ"]),
+    )
+
+    default_error_codes = {error.code for error in default_report.errors}
+    override_error_codes = {error.code for error in override_report.errors}
+    assert "japanese_residual" in default_error_codes
+    assert "japanese_residual" not in override_error_codes
+    assert default_report.summary["japanese_residual_count"] == 1
+    assert override_report.summary["japanese_residual_count"] == 0
 
 
 @pytest.mark.asyncio

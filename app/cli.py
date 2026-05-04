@@ -30,6 +30,15 @@ from app.config import SettingOverrides
 from app.observability import console, get_progress, logger
 from app.persistence import GameRegistry
 
+PARTIAL_WRITE_BACK_BLOCKING_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        "placeholder_risk",
+        "japanese_residual",
+        "overwide_line",
+        "write_back_protocol",
+    }
+)
+
 
 class CliBusinessError(Exception):
     """表示命令行任务遇到了已知业务失败。"""
@@ -1108,6 +1117,12 @@ async def run_write_name_context_command(args: argparse.Namespace) -> int:
     game_title = await resolve_target_game_title(args)
     setting_overrides = build_setting_overrides(args)
     async with HandlerSession() as handler:
+        await ensure_write_back_gate(
+            game_title=game_title,
+            setting_overrides=setting_overrides,
+            game_registry=handler.game_registry,
+            require_complete_translation=False,
+        )
         with build_progress_reporter("标准名写回", args) as progress:
             _ = await handler.write_name_context(
                 game_title=game_title,
@@ -1179,7 +1194,12 @@ async def write_back_for_handler(
     args: argparse.Namespace,
 ) -> WriteBackSummary:
     """使用已创建的编排器回写译文。"""
-    await ensure_write_back_gate(game_title)
+    await ensure_write_back_gate(
+        game_title=game_title,
+        setting_overrides=setting_overrides,
+        game_registry=handler.game_registry,
+        require_complete_translation=True,
+    )
     with build_progress_reporter("回写数据", args) as progress:
         return await handler.write_back(
             game_title=game_title,
@@ -1189,13 +1209,41 @@ async def write_back_for_handler(
         )
 
 
-async def ensure_write_back_gate(game_title: str) -> None:
+async def ensure_write_back_gate(
+    *,
+    game_title: str,
+    setting_overrides: SettingOverrides,
+    game_registry: GameRegistry,
+    require_complete_translation: bool,
+) -> None:
     """写回前执行质量检查，避免把部分失败结果写入游戏。"""
-    report = await AgentToolkitService().quality_report(game_title=game_title)
-    if report.status != "error":
+    report = await AgentToolkitService(game_registry=game_registry).quality_report(
+        game_title=game_title,
+        setting_overrides=setting_overrides,
+    )
+    blocking_errors = collect_write_back_gate_errors(
+        report=report,
+        require_complete_translation=require_complete_translation,
+    )
+    if not blocking_errors:
         return
-    messages = "；".join(error.message for error in report.errors)
+    messages = "；".join(error.message for error in blocking_errors)
     raise CliBusinessError(f"写进游戏文件前检查没通过：{messages}")
+
+
+def collect_write_back_gate_errors(
+    *,
+    report: AgentReport,
+    require_complete_translation: bool,
+) -> list[AgentIssue]:
+    """按当前写入模式筛选必须拦截的质量问题。"""
+    if require_complete_translation:
+        return report.errors
+    return [
+        error
+        for error in report.errors
+        if error.code in PARTIAL_WRITE_BACK_BLOCKING_ERROR_CODES
+    ]
 
 
 def ensure_text_translation_success(summary: TextTranslationSummary) -> None:

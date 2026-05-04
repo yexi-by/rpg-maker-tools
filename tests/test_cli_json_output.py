@@ -9,8 +9,10 @@ from main import main
 from pytest import CaptureFixture
 
 from app.agent_toolkit import AgentReport
+from app.agent_toolkit.reports import issue
 from app.cli import build_parser
 from app.cli import build_translate_summary_report
+from app.cli import collect_write_back_gate_errors
 from app.cli import ensure_text_translation_not_blocked
 from app.cli import write_report_outputs
 from app.application.summaries import TextTranslationSummary
@@ -203,6 +205,38 @@ def test_translate_quality_errors_do_not_fail_process() -> None:
 
     assert report.status == "warning"
     assert report.summary["quality_error_count"] == 2
+
+
+def test_partial_write_back_gate_only_blocks_saved_translation_risks() -> None:
+    """标准名写回只拦截会写入游戏文件的危险译文。"""
+    report = AgentReport.from_parts(
+        errors=[
+            issue("pending_translations", "存在还没成功保存译文的文本"),
+            issue("japanese_residual", "发现译文存在日文残留风险"),
+            issue("llm_failures", "模型运行存在故障"),
+        ],
+        warnings=[],
+        summary={},
+        details={},
+    )
+
+    full_gate_codes = {
+        error.code
+        for error in collect_write_back_gate_errors(
+            report=report,
+            require_complete_translation=True,
+        )
+    }
+    partial_gate_codes = {
+        error.code
+        for error in collect_write_back_gate_errors(
+            report=report,
+            require_complete_translation=False,
+        )
+    }
+
+    assert full_gate_codes == {"pending_translations", "japanese_residual", "llm_failures"}
+    assert partial_gate_codes == {"japanese_residual"}
 
 
 def test_translate_command_accepts_json_summary_flag() -> None:
