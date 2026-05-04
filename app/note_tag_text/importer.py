@@ -8,6 +8,7 @@ import aiofiles
 from pydantic import TypeAdapter
 
 from app.note_tag_text.parser import iter_note_tag_matches
+from app.note_tag_text.sources import collect_note_tag_sources, matched_note_file_names
 from app.rmmz.schema import GameData, NoteTagTextRuleRecord
 from app.rmmz.text_rules import TextRules, coerce_json_value, get_default_text_rules
 from app.rmmz.text_protocol import normalize_visible_text_for_extraction
@@ -65,8 +66,10 @@ def build_note_tag_rule_records_from_import(
         normalized_file_name = file_name.strip()
         if not normalized_file_name:
             raise ValueError("Note 标签规则不能包含空文件名")
-        if normalized_file_name not in game_data.base_data:
-            raise ValueError(f"Note 标签规则文件不属于当前基础数据库: {normalized_file_name}")
+        if not normalized_file_name.endswith(".json"):
+            raise ValueError(f"Note 标签规则文件模式必须指向 data JSON 文件: {normalized_file_name}")
+        if not matched_note_file_names(game_data=game_data, file_pattern=normalized_file_name):
+            raise ValueError(f"Note 标签规则文件模式没有匹配当前 data 文件: {normalized_file_name}")
         normalized_tag_names = normalize_tag_names(tag_names)
         if not normalized_tag_names:
             raise ValueError(f"Note 标签规则不能为空: {normalized_file_name}")
@@ -111,19 +114,16 @@ def _validate_note_tag_rule_hit(
     text_rules: TextRules,
 ) -> None:
     """校验单个 Note 标签规则至少命中一条可翻译值。"""
-    file_items = game_data.base_data[file_name]
     hit_count = 0
     translatable_hit_count = 0
-    for base_item in file_items:
-        if base_item is None or not base_item.note:
-            continue
+    for source in collect_note_tag_sources(game_data=game_data, file_pattern=file_name):
         matches = [
             match
-            for match in iter_note_tag_matches(base_item.note)
+            for match in iter_note_tag_matches(source.note_text)
             if match.tag_name == tag_name and match.value_span is not None
         ]
         if len(matches) > 1:
-            raise ValueError(f"{file_name}/{base_item.id}/note/{tag_name} 标签重复，无法生成唯一定位路径")
+            raise ValueError(f"{source.location_prefix}/note/{tag_name} 标签重复，无法生成唯一定位路径")
         if not matches:
             continue
         hit_count += 1

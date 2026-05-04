@@ -81,6 +81,7 @@ from app.note_tag_text import (
     export_note_tag_candidates_file,
     parse_note_tag_rule_import_text,
 )
+from app.note_tag_text.sources import note_file_pattern_matches
 from app.persistence.repository import current_timestamp_text
 
 type LlmCheckFunc = Callable[[LLMHandler, str], Awaitable[None]]
@@ -196,12 +197,17 @@ class AgentToolkitService:
                 session=session,
                 custom_placeholder_rules_text=custom_placeholder_rules_text,
             )
-        text_rules = TextRules.from_setting(
-            setting.text_rules,
-            custom_placeholder_rules=custom_rules,
-        )
+            text_rules = TextRules.from_setting(
+                setting.text_rules,
+                custom_placeholder_rules=custom_rules,
+            )
+            translation_data_map = await self._extract_active_translation_data_map(
+                session=session,
+                game_data=game_data,
+                text_rules=text_rules,
+            )
 
-        candidates = scan_placeholder_candidates(game_data, text_rules)
+        candidates = scan_placeholder_candidates(translation_data_map, text_rules)
         uncovered_count = count_uncovered_candidates(candidates)
         warnings: list[AgentIssue] = []
         if uncovered_count:
@@ -250,9 +256,14 @@ class AgentToolkitService:
                             setting.text_rules,
                             custom_placeholder_rules=custom_rules,
                         )
-                        sample_texts = _collect_placeholder_preview_samples(game_data, preview_rules)
+                        translation_data_map = await self._extract_active_translation_data_map(
+                            session=session,
+                            game_data=game_data,
+                            text_rules=preview_rules,
+                        )
+                        sample_texts = _collect_placeholder_preview_samples(translation_data_map, preview_rules)
                         if not sample_texts:
-                            sample_texts = _collect_unprotected_control_warning_samples(game_data, preview_rules)
+                            sample_texts = _collect_unprotected_control_warning_samples(translation_data_map, preview_rules)
             elif custom_placeholder_rules_text is None:
                 custom_rules = ()
             else:
@@ -880,10 +891,15 @@ class AgentToolkitService:
         empty_rules = TextRules.from_setting(setting.text_rules, custom_placeholder_rules=())
         async with await self.game_registry.open_game(game_title) as session:
             game_data = await self._load_game_data(session)
-        candidates = scan_placeholder_candidates(game_data, empty_rules)
+            translation_data_map = await self._extract_active_translation_data_map(
+                session=session,
+                game_data=game_data,
+                text_rules=empty_rules,
+            )
+        candidates = scan_placeholder_candidates(translation_data_map, empty_rules)
         draft_rules = _build_custom_placeholder_rule_draft(candidates)
         warnings = _build_unprotected_control_warnings(
-            _collect_unprotected_control_warning_samples(game_data, empty_rules),
+            _collect_unprotected_control_warning_samples(translation_data_map, empty_rules),
             empty_rules,
         )
         if not draft_rules:
@@ -908,7 +924,7 @@ class AgentToolkitService:
         game_title: str,
         output_path: Path,
     ) -> AgentReport:
-        """导出基础数据库 Note 标签候选，供外部 Agent 判断可见文本标签。"""
+        """导出标准 data JSON Note 标签候选，供外部 Agent 判断可见文本标签。"""
         setting = load_setting(self.setting_path)
         async with await self.game_registry.open_game(game_title) as session:
             custom_rules = await self._resolve_custom_rules(
@@ -924,7 +940,7 @@ class AgentToolkitService:
         )
         warnings: list[AgentIssue] = []
         if report.candidate_tag_count == 0:
-            warnings.append(issue("note_tag_candidates_empty", "当前游戏没有发现基础数据库 Note 标签候选"))
+            warnings.append(issue("note_tag_candidates_empty", "当前游戏没有发现 data Note 标签候选"))
         return AgentReport.from_parts(
             errors=[],
             warnings=warnings,
@@ -997,14 +1013,12 @@ class AgentToolkitService:
                     "hit_count": sum(
                         1
                         for item in extracted_items
-                        if item.location_path.startswith(f"{record.file_name}/")
-                        and "/note/" in item.location_path
+                        if _note_tag_item_matches_rule(item=item, rule_record=record)
                     ),
                     "samples": _first_original_line_samples(
                         item
                         for item in extracted_items
-                        if item.location_path.startswith(f"{record.file_name}/")
-                        and "/note/" in item.location_path
+                        if _note_tag_item_matches_rule(item=item, rule_record=record)
                     ),
                 }
                 for record in records
@@ -1435,7 +1449,12 @@ class AgentToolkitService:
             event_rules = await session.read_event_command_text_rules()
             placeholder_records = await session.read_placeholder_rules()
             custom_rules = await self._resolve_custom_rules(session=session, custom_placeholder_rules_text=None)
-        text_rules = TextRules.from_setting(setting.text_rules, custom_placeholder_rules=custom_rules)
+            text_rules = TextRules.from_setting(setting.text_rules, custom_placeholder_rules=custom_rules)
+            translation_data_map = await self._extract_active_translation_data_map(
+                session=session,
+                game_data=game_data,
+                text_rules=text_rules,
+            )
         name_summary = await export_name_context_artifacts(game_data=game_data, output_dir=target_dir / "name-context")
         if name_registry is not None:
             exported_registry = await load_name_context_registry(registry_path=name_summary.registry_path)
@@ -1466,7 +1485,7 @@ class AgentToolkitService:
         )
         event_rules_path = target_dir / "event-command-rules.json"
         await _write_json_object(event_rules_path, _event_command_rule_records_to_import_json(event_rules))
-        placeholder_candidates = scan_placeholder_candidates(game_data, text_rules)
+        placeholder_candidates = scan_placeholder_candidates(translation_data_map, text_rules)
         placeholder_report = AgentReport.from_parts(
             errors=[],
             warnings=[],
@@ -1569,14 +1588,42 @@ class AgentToolkitService:
             warnings.append(issue("event_command_rules_missing", "工作区缺少 event-command-rules.json"))
         if placeholder_rules_path.exists():
             async with aiofiles.open(placeholder_rules_path, "r", encoding="utf-8") as file:
+                placeholder_rules_text = await file.read()
                 placeholder_report = await self.validate_placeholder_rules(
                     game_title=game_title,
-                    custom_placeholder_rules_text=await file.read(),
+                    custom_placeholder_rules_text=placeholder_rules_text,
                     sample_texts=[],
                 )
             errors.extend(placeholder_report.errors)
             warnings.extend(placeholder_report.warnings)
             details["placeholder_rules"] = placeholder_report.details
+            try:
+                placeholder_coverage_report = await self.scan_placeholder_candidates(
+                    game_title=game_title,
+                    custom_placeholder_rules_text=placeholder_rules_text,
+                )
+                errors.extend(placeholder_coverage_report.errors)
+                details["placeholder_coverage"] = {
+                    "summary": placeholder_coverage_report.summary,
+                    "details": placeholder_coverage_report.details,
+                }
+                uncovered_value = placeholder_coverage_report.summary.get("uncovered_count")
+                if isinstance(uncovered_value, bool) or not isinstance(uncovered_value, int):
+                    errors.append(issue("placeholder_coverage_invalid", "占位符候选扫描缺少有效的 uncovered_count"))
+                elif uncovered_value > 0:
+                    errors.append(
+                        issue(
+                            "placeholder_coverage_uncovered",
+                            f"还有 {uncovered_value} 个当前正文会使用但未被规则覆盖的游戏控制符",
+                        )
+                    )
+            except Exception as error:
+                errors.append(
+                    issue(
+                        "placeholder_coverage_scan_failed",
+                        f"占位符覆盖扫描失败: {type(error).__name__}: {error}",
+                    )
+                )
         else:
             warnings.append(issue("placeholder_rules_missing", "工作区缺少 placeholder-rules.json"))
         return AgentReport.from_parts(errors=errors, warnings=warnings, summary={"workspace": str(workspace)}, details=details)
@@ -1684,7 +1731,12 @@ class AgentToolkitService:
                 font_path = setting.write_back.replacement_font_path
                 if font_path is not None and not Path(font_path).exists():
                     warnings.append(issue("replacement_font", "配置的候选覆盖字体文件不存在"))
-                candidates = scan_placeholder_candidates(game_data, text_rules)
+                translation_data_map = await self._extract_active_translation_data_map(
+                    session=session,
+                    game_data=game_data,
+                    text_rules=text_rules,
+                )
+                candidates = scan_placeholder_candidates(translation_data_map, text_rules)
                 uncovered_count = count_uncovered_candidates(candidates)
                 summary["uncovered_placeholder_count"] = uncovered_count
                 if uncovered_count:
@@ -2289,10 +2341,12 @@ def _custom_placeholder_template_for_code(code: str) -> str:
     return f"[CUSTOM_{semantic_name}_{{index}}]"
 
 
-def _collect_placeholder_preview_samples(game_data: GameData, text_rules: TextRules) -> list[str]:
-    """为占位符校验收集少量包含候选控制符的样本文本。"""
+def _collect_placeholder_preview_samples(
+    translation_data_map: dict[str, TranslationData],
+    text_rules: TextRules,
+) -> list[str]:
+    """为占位符校验收集少量当前正文中的控制符样本文本。"""
     samples: list[str] = []
-    translation_data_map = DataTextExtraction(game_data, text_rules).extract_all_text()
     for translation_data in translation_data_map.values():
         for item in translation_data.translation_items:
             for text in item.original_lines:
@@ -2304,10 +2358,12 @@ def _collect_placeholder_preview_samples(game_data: GameData, text_rules: TextRu
     return samples
 
 
-def _collect_unprotected_control_warning_samples(game_data: GameData, text_rules: TextRules) -> list[str]:
-    """收集疑似存在裸露控制符边界风险的样本文本。"""
+def _collect_unprotected_control_warning_samples(
+    translation_data_map: dict[str, TranslationData],
+    text_rules: TextRules,
+) -> list[str]:
+    """收集当前正文中疑似存在裸露控制符边界风险的样本文本。"""
     samples: list[str] = []
-    translation_data_map = DataTextExtraction(game_data, text_rules).extract_all_text()
     for translation_data in translation_data_map.values():
         for item in translation_data.translation_items:
             for text in item.original_lines:
@@ -2348,6 +2404,19 @@ def _first_original_line_samples(items: Iterable[TranslationItem], limit: int = 
         if len(samples) >= limit:
             break
     return samples
+
+
+def _note_tag_item_matches_rule(*, item: TranslationItem, rule_record: NoteTagTextRuleRecord) -> bool:
+    """判断 Note 标签译文条目是否来自指定规则。"""
+    parts = item.location_path.split("/")
+    if len(parts) < 3 or parts[-2] != "note":
+        return False
+    file_name = parts[0]
+    tag_name = parts[-1]
+    return (
+        tag_name in rule_record.tag_names
+        and note_file_pattern_matches(file_name=file_name, file_pattern=rule_record.file_name)
+    )
 
 
 def _preview_event_command_write_back(
@@ -2616,32 +2685,62 @@ def _collect_overwide_line_items(items: list[TranslationItem], text_rules: TextR
     limit = text_rules.setting.long_text_line_width_limit
     details: JsonArray = []
     for item in items:
-        for index, line in enumerate(_iter_line_width_check_lines(item=item)):
+        original_text_width_limit = _original_short_text_width_limit(item=item, text_rules=text_rules)
+        for index, line, original_line in _iter_line_width_check_lines(item=item):
             if not line:
                 continue
+            effective_limit = limit
+            original_width: int | None = None
+            if original_line is not None:
+                original_width = count_line_width_chars(original_line, text_rules)
+                effective_limit = max(limit, original_width)
+            if original_text_width_limit is not None:
+                effective_limit = max(effective_limit, original_text_width_limit)
             width = count_line_width_chars(line, text_rules)
-            if width <= limit:
+            if width <= effective_limit:
                 continue
             detail = _build_translation_item_quality_detail(item)
             detail["line_index"] = index
             detail["line"] = line
             detail["line_width"] = width
-            detail["line_width_limit"] = limit
+            detail["line_width_limit"] = effective_limit
+            if original_width is not None:
+                detail["original_line_width"] = original_width
+                detail["configured_line_width_limit"] = limit
+            if original_text_width_limit is not None:
+                detail["original_text_width_limit"] = original_text_width_limit
             details.append(detail)
     return details
 
 
-def _iter_line_width_check_lines(*, item: TranslationItem) -> list[str]:
+def _original_short_text_width_limit(*, item: TranslationItem, text_rules: TextRules) -> int | None:
+    """计算单值文本原字段本身已经承载的最大显示宽度。"""
+    if item.item_type != "short_text" or not item.original_lines:
+        return None
+    original_lines = _split_display_line_breaks(item.original_lines[0])
+    if not original_lines:
+        return None
+    return max(count_line_width_chars(line, text_rules) for line in original_lines)
+
+
+def _iter_line_width_check_lines(*, item: TranslationItem) -> list[tuple[int, str, str | None]]:
     """返回需要按显示行宽检查的译文行。"""
     if item.item_type == "long_text":
-        return list(item.translation_lines)
+        return [(index, line, None) for index, line in enumerate(item.translation_lines)]
     if item.item_type != "short_text" or not item.translation_lines:
         return []
     original_has_line_break = _has_display_line_break(item.original_lines)
     translated_text = item.translation_lines[0]
     if not _has_display_line_break([translated_text]) and not original_has_line_break:
         return []
-    return _split_display_line_breaks(translated_text)
+    translated_lines = _split_display_line_breaks(translated_text)
+    original_text = item.original_lines[0] if item.original_lines else ""
+    original_lines = _split_display_line_breaks(original_text)
+    results: list[tuple[int, str, str | None]] = []
+    for index, line in enumerate(translated_lines):
+        original_line = original_lines[index] if index < len(original_lines) else None
+        results.append((index, line, original_line))
+    return results
 
 
 def _has_display_line_break(lines: list[str]) -> bool:

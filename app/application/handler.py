@@ -299,7 +299,7 @@ class TranslationHandler:
         game_title: str,
         output_path: Path,
     ) -> NoteTagJsonExportSummary:
-        """把当前游戏基础数据库 Note 标签候选导出为 JSON。"""
+        """把当前游戏 data Note 标签候选导出为 JSON。"""
         setting = self._load_setting()
         async with await self.game_registry.open_game(game_title) as session:
             game_data = await self._load_session_game_data(session)

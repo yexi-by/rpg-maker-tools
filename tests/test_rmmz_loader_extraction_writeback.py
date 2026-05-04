@@ -211,6 +211,56 @@ async def test_note_tag_json_string_leaf_uses_visible_text_protocol(minimal_game
 
 
 @pytest.mark.asyncio
+async def test_map_event_note_tag_rules_extract_and_write_back(minimal_game_dir: Path) -> None:
+    """Note 标签规则覆盖地图事件 note 字段，并支持 Map*.json 文件模式。"""
+    map_path = minimal_game_dir / "data" / "Map001.json"
+    raw_map = _read_test_json(map_path)
+    map_object = ensure_json_object(raw_map, "Map001.json")
+    events = ensure_json_array(map_object["events"], "Map001.json.events")
+    event = ensure_json_object(events[2], "Map001.json.events[2]")
+    event["note"] = "<namePop:導き手>\n<machine:1>"
+    _rewrite_json(map_path, raw_map)
+
+    game_data = await load_game_data(minimal_game_dir)
+    candidates = collect_note_tag_candidates(
+        game_data=game_data,
+        text_rules=get_default_text_rules(),
+    )
+    name_pop_candidate = next(
+        ensure_json_object(candidate_value, "note_tag_candidate")
+        for candidate_value in candidates
+        if isinstance(candidate_value, dict)
+        and candidate_value.get("file_name") == "Map*.json"
+        and candidate_value.get("tag_name") == "namePop"
+    )
+    assert name_pop_candidate["translatable_hit_count"] == 1
+    assert name_pop_candidate["sample_locations"] == ["Map001.json/events/2/note/namePop"]
+
+    rule_records = build_note_tag_rule_records_from_import(
+        game_data=game_data,
+        import_file={"Map*.json": ["namePop"]},
+        text_rules=get_default_text_rules(),
+    )
+    note_items = NoteTagTextExtraction(
+        game_data=game_data,
+        rule_records=rule_records,
+        text_rules=get_default_text_rules(),
+    ).extract_all_text()["Map001.json"].translation_items
+
+    assert [item.location_path for item in note_items] == ["Map001.json/events/2/note/namePop"]
+    assert note_items[0].original_lines == ["導き手"]
+
+    note_items[0].translation_lines = ["引导者"]
+    reset_writable_copies(game_data)
+    write_data_text(game_data, [note_items[0]])
+    writable_map = ensure_json_object(game_data.writable_data["Map001.json"], "Map001.json")
+    writable_events = ensure_json_array(writable_map["events"], "Map001.json.events")
+    writable_event = ensure_json_object(writable_events[2], "Map001.json.events[2]")
+
+    assert writable_event["note"] == "<namePop:引导者>\n<machine:1>"
+
+
+@pytest.mark.asyncio
 async def test_fixture_custom_control_sequences_can_be_protected(minimal_game_dir: Path) -> None:
     """测试夹具里的自定义控制符可通过外部规则保护。"""
     text_rules = TextRules.from_setting(

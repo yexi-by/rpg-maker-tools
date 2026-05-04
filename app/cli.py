@@ -226,6 +226,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_optional_target_arguments(import_plugin_parser)
     _ = import_plugin_parser.add_argument("--input", required=True, help="外部插件规则 JSON 文件")
+    _ = import_plugin_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
     export_event_commands_parser = subparsers.add_parser(
         "export-event-commands-json",
@@ -249,10 +250,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_optional_target_arguments(import_event_command_parser)
     _ = import_event_command_parser.add_argument("--input", required=True, help="外部事件指令规则 JSON 文件")
+    _ = import_event_command_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
     export_note_tag_parser = subparsers.add_parser(
         "export-note-tag-candidates",
-        help="导出基础数据库 note 字段中的 Note 标签候选",
+        help="导出标准 data JSON 中全部 note 字段的 Note 标签候选",
     )
     add_optional_target_arguments(export_note_tag_parser)
     _ = export_note_tag_parser.add_argument("--output", required=True, help="Note 标签候选 JSON 输出文件")
@@ -435,6 +437,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_optional_target_arguments(import_name_parser)
     _ = import_name_parser.add_argument("--input", required=True, help="已填写的大 JSON 路径")
+    _ = import_name_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
     write_name_parser = subparsers.add_parser(
         "write-name-context",
@@ -479,6 +482,7 @@ def build_parser() -> argparse.ArgumentParser:
     import_placeholder_source_group = import_placeholder_parser.add_mutually_exclusive_group(required=True)
     _ = import_placeholder_source_group.add_argument("--rules", help="占位符规则 JSON 字符串")
     _ = import_placeholder_source_group.add_argument("--input", help="占位符规则 JSON 文件")
+    _ = import_placeholder_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
     validate_plugin_parser = subparsers.add_parser(
         "validate-plugin-rules",
@@ -759,8 +763,34 @@ async def run_import_plugin_rules_command(args: argparse.Namespace) -> int:
     """执行 `import-plugin-rules` 命令。"""
     game_title = await resolve_target_game_title(args)
     input_path = read_required_path_arg(args, "input")
-    async with HandlerSession() as handler:
-        _ = await handler.import_plugin_rules(game_title=game_title, input_path=input_path)
+    try:
+        async with HandlerSession() as handler:
+            summary = await handler.import_plugin_rules(game_title=game_title, input_path=input_path)
+    except Exception as error:
+        if not read_bool_arg(args, "json_output"):
+            raise
+        report = AgentReport.from_parts(
+            errors=[issue("plugin_rules_invalid", f"插件规则导入失败: {type(error).__name__}: {error}")],
+            warnings=[],
+            summary={"game": game_title, "input": str(input_path)},
+            details={},
+        )
+        write_report_outputs(report=report, args=args, title="插件规则导入报告")
+        return 1
+    if read_bool_arg(args, "json_output"):
+        report = AgentReport.from_parts(
+            errors=[],
+            warnings=[],
+            summary={
+                "game": game_title,
+                "input": str(input_path),
+                "imported_plugin_count": summary.imported_plugin_count,
+                "imported_rule_count": summary.imported_rule_count,
+                "deleted_translation_items": summary.deleted_translation_items,
+            },
+            details={},
+        )
+        write_report_outputs(report=report, args=args, title="插件规则导入报告")
     return 0
 
 
@@ -801,8 +831,34 @@ async def run_import_event_command_rules_command(args: argparse.Namespace) -> in
     """执行 `import-event-command-rules` 命令。"""
     game_title = await resolve_target_game_title(args)
     input_path = read_required_path_arg(args, "input")
-    async with HandlerSession() as handler:
-        _ = await handler.import_event_command_rules(game_title=game_title, input_path=input_path)
+    try:
+        async with HandlerSession() as handler:
+            summary = await handler.import_event_command_rules(game_title=game_title, input_path=input_path)
+    except Exception as error:
+        if not read_bool_arg(args, "json_output"):
+            raise
+        report = AgentReport.from_parts(
+            errors=[issue("event_command_rules_invalid", f"事件指令规则导入失败: {type(error).__name__}: {error}")],
+            warnings=[],
+            summary={"game": game_title, "input": str(input_path)},
+            details={},
+        )
+        write_report_outputs(report=report, args=args, title="事件指令规则导入报告")
+        return 1
+    if read_bool_arg(args, "json_output"):
+        report = AgentReport.from_parts(
+            errors=[],
+            warnings=[],
+            summary={
+                "game": game_title,
+                "input": str(input_path),
+                "imported_rule_group_count": summary.imported_rule_group_count,
+                "imported_path_rule_count": summary.imported_path_rule_count,
+                "deleted_translation_items": summary.deleted_translation_items,
+            },
+            details={},
+        )
+        write_report_outputs(report=report, args=args, title="事件指令规则导入报告")
     return 0
 
 
@@ -881,8 +937,28 @@ async def run_import_placeholder_rules_command(args: argparse.Namespace) -> int:
     """执行 `import-placeholder-rules` 命令。"""
     game_title = await resolve_target_game_title(args)
     rules_text = await read_required_text_source_arg(args, "rules", "input")
-    async with HandlerSession() as handler:
-        _ = await handler.import_placeholder_rules(game_title=game_title, rules_text=rules_text)
+    try:
+        async with HandlerSession() as handler:
+            imported_rule_count = await handler.import_placeholder_rules(game_title=game_title, rules_text=rules_text)
+    except Exception as error:
+        if not read_bool_arg(args, "json_output"):
+            raise
+        report = AgentReport.from_parts(
+            errors=[issue("placeholder_rules_invalid", f"自定义占位符规则导入失败: {type(error).__name__}: {error}")],
+            warnings=[],
+            summary={"game": game_title},
+            details={},
+        )
+        write_report_outputs(report=report, args=args, title="自定义占位符规则导入报告")
+        return 1
+    if read_bool_arg(args, "json_output"):
+        report = AgentReport.from_parts(
+            errors=[],
+            warnings=[] if imported_rule_count else [issue("placeholder_rules_empty", "已导入空自定义占位符规则")],
+            summary={"game": game_title, "imported_rule_count": imported_rule_count},
+            details={},
+        )
+        write_report_outputs(report=report, args=args, title="自定义占位符规则导入报告")
     return 0
 
 
@@ -1108,8 +1184,33 @@ async def run_import_name_context_command(args: argparse.Namespace) -> int:
     """执行 `import-name-context` 命令。"""
     game_title = await resolve_target_game_title(args)
     input_path = read_required_path_arg(args, "input")
-    async with HandlerSession() as handler:
-        _ = await handler.import_name_context(game_title=game_title, input_path=input_path)
+    try:
+        async with HandlerSession() as handler:
+            summary = await handler.import_name_context(game_title=game_title, input_path=input_path)
+    except Exception as error:
+        if not read_bool_arg(args, "json_output"):
+            raise
+        report = AgentReport.from_parts(
+            errors=[issue("name_context_invalid", f"术语表导入失败: {type(error).__name__}: {error}")],
+            warnings=[],
+            summary={"game": game_title, "input": str(input_path)},
+            details={},
+        )
+        write_report_outputs(report=report, args=args, title="术语表导入报告")
+        return 1
+    if read_bool_arg(args, "json_output"):
+        report = AgentReport.from_parts(
+            errors=[],
+            warnings=[],
+            summary={
+                "game": game_title,
+                "input": str(input_path),
+                "imported_entry_count": summary.imported_entry_count,
+                "filled_entry_count": summary.filled_entry_count,
+            },
+            details={},
+        )
+        write_report_outputs(report=report, args=args, title="术语表导入报告")
     return 0
 
 

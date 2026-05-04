@@ -57,6 +57,39 @@ def test_json_command_reports_unexpected_error_as_parseable_json(
     assert "CLI 运行开始" not in captured.out
 
 
+def test_json_import_command_reports_business_error_as_parseable_json(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    """规则导入命令的 `--json` 失败输出保持机器可读。"""
+    rules_path = tmp_path / "placeholder-rules.json"
+    _ = rules_path.write_text("{}\n", encoding="utf-8")
+
+    exit_code = main(
+        [
+            "import-placeholder-rules",
+            "--game",
+            "missing-game",
+            "--input",
+            str(rules_path),
+            "--json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    raw_payload = cast(object, json.loads(captured.out))
+    payload = ensure_json_object(coerce_json_value(raw_payload), "CLI JSON 输出")
+    errors = payload["errors"]
+    assert isinstance(errors, list)
+    first_error = errors[0]
+    assert isinstance(first_error, dict)
+
+    assert exit_code == 1
+    assert payload["status"] == "error"
+    assert first_error["code"] == "placeholder_rules_invalid"
+    assert "CLI 运行开始" not in captured.out
+
+
 def test_placeholder_rule_commands_accept_input_files() -> None:
     """占位符导入与校验命令支持文件输入，避免 Agent 手写长 JSON 参数。"""
     parser = build_parser()
@@ -68,6 +101,7 @@ def test_placeholder_rule_commands_accept_input_files() -> None:
             "demo",
             "--input",
             "placeholder-rules.json",
+            "--json",
         ]
     )
     validate_args = parser.parse_args(
@@ -83,12 +117,13 @@ def test_placeholder_rule_commands_accept_input_files() -> None:
 
     assert namespace_optional_str(import_args, "input") == "placeholder-rules.json"
     assert namespace_optional_str(import_args, "rules") is None
+    assert getattr(import_args, "json_output") is True
     assert namespace_optional_str(validate_args, "input") == "placeholder-rules.json"
     assert namespace_optional_str(validate_args, "placeholder_rules") is None
 
 
-def test_rule_validation_commands_accept_input_files() -> None:
-    """规则扫描与验收命令支持文件输入，避免 Agent 拼接大段 JSON 字符串。"""
+def test_rule_commands_accept_input_files_and_json_output() -> None:
+    """规则扫描、验收与导入命令支持文件输入和机器可读输出。"""
     parser = build_parser()
 
     scan_args = parser.parse_args(
@@ -111,9 +146,29 @@ def test_rule_validation_commands_accept_input_files() -> None:
             "--json",
         ]
     )
+    plugin_import_args = parser.parse_args(
+        [
+            "import-plugin-rules",
+            "--game",
+            "demo",
+            "--input",
+            "plugin-rules.json",
+            "--json",
+        ]
+    )
     event_args = parser.parse_args(
         [
             "validate-event-command-rules",
+            "--game",
+            "demo",
+            "--input",
+            "event-command-rules.json",
+            "--json",
+        ]
+    )
+    event_import_args = parser.parse_args(
+        [
+            "import-event-command-rules",
             "--game",
             "demo",
             "--input",
@@ -171,13 +226,27 @@ def test_rule_validation_commands_accept_input_files() -> None:
             "--json",
         ]
     )
+    name_import_args = parser.parse_args(
+        [
+            "import-name-context",
+            "--game",
+            "demo",
+            "--input",
+            "name-context/name_registry.json",
+            "--json",
+        ]
+    )
 
     assert namespace_optional_str(scan_args, "input") == "placeholder-rules.json"
     assert namespace_optional_str(scan_args, "placeholder_rules") is None
     assert namespace_optional_str(plugin_args, "input") == "plugin-rules.json"
     assert namespace_optional_str(plugin_args, "rules") is None
+    assert namespace_optional_str(plugin_import_args, "input") == "plugin-rules.json"
+    assert getattr(plugin_import_args, "json_output") is True
     assert namespace_optional_str(event_args, "input") == "event-command-rules.json"
     assert namespace_optional_str(event_args, "rules") is None
+    assert namespace_optional_str(event_import_args, "input") == "event-command-rules.json"
+    assert getattr(event_import_args, "json_output") is True
     assert namespace_optional_str(note_export_args, "output") == "note-tag-candidates.json"
     assert namespace_optional_str(note_validate_args, "input") == "note-tag-rules.json"
     assert getattr(note_validate_args, "json_output") is True
@@ -187,6 +256,8 @@ def test_rule_validation_commands_accept_input_files() -> None:
     assert namespace_optional_str(residual_args, "rules") is None
     assert namespace_optional_str(residual_import_args, "input") == "japanese-residual-rules.json"
     assert getattr(residual_import_args, "json_output") is True
+    assert namespace_optional_str(name_import_args, "input") == "name-context/name_registry.json"
+    assert getattr(name_import_args, "json_output") is True
 
 
 def test_translate_quality_errors_do_not_fail_process() -> None:

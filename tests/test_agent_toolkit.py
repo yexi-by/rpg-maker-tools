@@ -126,6 +126,87 @@ async def test_build_placeholder_rules_groups_similar_candidates(
 
 
 @pytest.mark.asyncio
+async def test_placeholder_rule_draft_uses_active_translation_sources(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """占位符草稿只基于当前会进入翻译正文的完整文本集合。"""
+    game_data = await load_game_data(minimal_game_dir)
+    plugin_parameters = ensure_json_object(game_data.plugins_js[0]["parameters"], "plugins[0].parameters")
+    plugin_parameters["Message"] = r"\PX[PluginFace]プラグイン本文"
+    plugins_text = f"var $plugins = {json.dumps(game_data.plugins_js, ensure_ascii=False, indent=2)};\n"
+    _ = (minimal_game_dir / "js" / "plugins.js").write_text(plugins_text, encoding="utf-8")
+
+    common_events_path = minimal_game_dir / "data" / "CommonEvents.json"
+    raw_common_events = cast(object, json.loads(common_events_path.read_text(encoding="utf-8")))
+    common_events = ensure_json_array(coerce_json_value(raw_common_events), "CommonEvents.json")
+    common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
+    commands = ensure_json_array(common_event["list"], "CommonEvents[1].list")
+    command = ensure_json_object(commands[4], "CommonEvents[1].list[4]")
+    parameters = ensure_json_array(command["parameters"], "CommonEvents[1].list[4].parameters")
+    payload = ensure_json_object(parameters[3], "CommonEvents[1].list[4].parameters[3]")
+    payload["message"] = r"\EV[CommandFace]プラグイン台詞"
+    _ = common_events_path.write_text(json.dumps(common_events, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    items_path = minimal_game_dir / "data" / "Items.json"
+    raw_items = cast(object, json.loads(items_path.read_text(encoding="utf-8")))
+    items = ensure_json_array(coerce_json_value(raw_items), "Items.json")
+    item = ensure_json_object(items[1], "Items.json[1]")
+    item["note"] = r"<拡張説明:\NT[NoteFace]薬草の詳細説明>"
+    _ = items_path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    before_rules_path = tmp_path / "before-placeholder-rules.json"
+    after_rules_path = tmp_path / "after-placeholder-rules.json"
+
+    _ = await service.build_placeholder_rules(game_title="テストゲーム", output_path=before_rules_path)
+    before_rules = load_json_object(before_rules_path)
+
+    fresh_game_data = await load_game_data(minimal_game_dir)
+    async with await registry.open_game("テストゲーム") as session:
+        await session.replace_plugin_text_rules(
+            [
+                PluginTextRuleRecord(
+                    plugin_index=0,
+                    plugin_name="TestPlugin",
+                    plugin_hash=build_plugin_hash(fresh_game_data.plugins_js[0]),
+                    path_templates=["$['parameters']['Message']"],
+                )
+            ]
+        )
+        await session.replace_event_command_text_rules(
+            [
+                EventCommandTextRuleRecord(
+                    command_code=357,
+                    parameter_filters=[
+                        EventCommandParameterFilter(index=0, value="TestPlugin"),
+                        EventCommandParameterFilter(index=1, value="Show"),
+                    ],
+                    path_templates=["$['parameters'][3]['message']"],
+                )
+            ]
+        )
+        await session.replace_note_tag_text_rules(
+            [NoteTagTextRuleRecord(file_name="Items.json", tag_names=["拡張説明"])]
+        )
+
+    report = await service.build_placeholder_rules(game_title="テストゲーム", output_path=after_rules_path)
+    after_rules = load_json_object(after_rules_path)
+    draft_rule_count = report.summary["draft_rule_count"]
+
+    assert isinstance(draft_rule_count, int)
+    assert draft_rule_count >= 4
+    assert not any(r"\\PX" in pattern for pattern in before_rules)
+    assert not any(r"\\EV" in pattern for pattern in before_rules)
+    assert not any(r"\\NT" in pattern for pattern in before_rules)
+    assert any(r"\\PX" in pattern for pattern in after_rules)
+    assert any(r"\\EV" in pattern for pattern in after_rules)
+    assert any(r"\\NT" in pattern for pattern in after_rules)
+
+
+@pytest.mark.asyncio
 async def test_prepare_agent_workspace_includes_placeholder_rule_draft(
     minimal_game_dir: Path,
     tmp_path: Path,
@@ -263,7 +344,7 @@ async def test_validate_agent_workspace_blocks_missing_note_tag_rules(
     minimal_game_dir: Path,
     tmp_path: Path,
 ) -> None:
-    """Note 标签规则是第五类强制子代理产物，缺失时工作区校验阻断。"""
+    """Note 标签规则是四类子代理产物之一，缺失时工作区校验阻断。"""
     registry = GameRegistry(tmp_path / "db")
     _ = await registry.register_game(minimal_game_dir)
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
@@ -279,6 +360,59 @@ async def test_validate_agent_workspace_blocks_missing_note_tag_rules(
 
     assert report.status == "error"
     assert "note_tag_rules_missing" in {error.code for error in report.errors}
+
+
+@pytest.mark.asyncio
+async def test_validate_agent_workspace_blocks_uncovered_placeholder_rules(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """工作区验收会阻断未覆盖当前正文控制符的占位符规则。"""
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    workspace = tmp_path / "workspace"
+
+    _ = await service.prepare_agent_workspace(
+        game_title="テストゲーム",
+        output_dir=workspace,
+        command_codes=None,
+    )
+    _ = (workspace / "placeholder-rules.json").write_text("{}\n", encoding="utf-8")
+
+    report = await service.validate_agent_workspace(game_title="テストゲーム", workspace=workspace)
+
+    assert report.status == "error"
+    assert "placeholder_coverage_uncovered" in {error.code for error in report.errors}
+    placeholder_coverage = ensure_json_object(report.details["placeholder_coverage"], "placeholder_coverage")
+    summary = ensure_json_object(placeholder_coverage["summary"], "placeholder_coverage.summary")
+    assert summary["uncovered_count"] != 0
+
+
+@pytest.mark.asyncio
+async def test_validate_agent_workspace_reports_invalid_placeholder_rules(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """工作区验收会把坏占位符规则报告成结构化错误。"""
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    workspace = tmp_path / "workspace"
+
+    _ = await service.prepare_agent_workspace(
+        game_title="テストゲーム",
+        output_dir=workspace,
+        command_codes=None,
+    )
+    _ = (workspace / "placeholder-rules.json").write_text("{\n", encoding="utf-8")
+
+    report = await service.validate_agent_workspace(game_title="テストゲーム", workspace=workspace)
+
+    error_codes = {error.code for error in report.errors}
+    assert report.status == "error"
+    assert "placeholder_rules_invalid" in error_codes
+    assert "placeholder_coverage_scan_failed" in error_codes
 
 
 @pytest.mark.asyncio
@@ -1413,6 +1547,46 @@ async def test_quality_report_flags_literal_line_break_short_text_overwide_line(
     assert overwide_detail["item_type"] == "short_text"
     assert overwide_detail["line_index"] == 1
     assert overwide_detail["line_width"] == 30
+
+
+@pytest.mark.asyncio
+async def test_quality_report_allows_original_overwide_short_text_line(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """原文同一显示行本来很长时，单值文本不按普通对话框宽度误报。"""
+    items_path = minimal_game_dir / "data" / "Items.json"
+    raw_value = coerce_json_value(cast(object, json.loads(items_path.read_text(encoding="utf-8"))))
+    items = ensure_json_array(raw_value, "Items.json")
+    item = ensure_json_object(items[1], "Items.json[1]")
+    item["note"] = "<拡張説明:説明\n原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原>"
+    _ = items_path.write_text(json.dumps(raw_value, ensure_ascii=False, indent=2), encoding="utf-8")
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    async with await registry.open_game("テストゲーム") as session:
+        await session.replace_note_tag_text_rules(
+            [
+                NoteTagTextRuleRecord(
+                    file_name="Items.json",
+                    tag_names=["拡張説明"],
+                )
+            ]
+        )
+        await session.write_translation_items(
+            [
+                TranslationItem(
+                    location_path="Items.json/1/note/拡張説明",
+                    item_type="short_text",
+                    original_lines=["説明\n原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原"],
+                    translation_lines=["说明\n甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲"],
+                )
+            ]
+        )
+
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    report = await service.quality_report(game_title="テストゲーム")
+
+    assert report.summary["overwide_line_count"] == 0
 
 
 @pytest.mark.asyncio

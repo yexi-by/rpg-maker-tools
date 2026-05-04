@@ -4,10 +4,8 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-from app.plugin_text.paths import resolve_plugin_leaves
-from app.rmmz.commands import iter_all_commands
 from app.rmmz.control_codes import iter_standard_control_spans
-from app.rmmz.schema import GameData
+from app.rmmz.schema import TranslationData, TranslationItem
 from app.rmmz.text_rules import JsonValue, TextRules
 
 CONTROL_CANDIDATE_PATTERN: re.Pattern[str] = re.compile(
@@ -26,10 +24,13 @@ class PlaceholderCandidate:
     custom_covered: bool = False
 
 
-def scan_placeholder_candidates(game_data: GameData, text_rules: TextRules) -> list[PlaceholderCandidate]:
-    """扫描当前游戏数据中的反斜杠控制符候选。"""
+def scan_placeholder_candidates(
+    translation_data_map: dict[str, TranslationData],
+    text_rules: TextRules,
+) -> list[PlaceholderCandidate]:
+    """扫描当前会进入正文翻译的文本中的反斜杠控制符候选。"""
     candidates: dict[str, PlaceholderCandidate] = {}
-    for source_name, text in _iter_scan_texts(game_data):
+    for source_name, text in _iter_scan_texts(translation_data_map):
         for match in CONTROL_CANDIDATE_PATTERN.finditer(text):
             marker = match.group(0)
             candidate = candidates.get(marker)
@@ -75,33 +76,19 @@ def count_uncovered_candidates(candidates: list[PlaceholderCandidate]) -> int:
     )
 
 
-def _iter_scan_texts(game_data: GameData) -> Iterable[tuple[str, str]]:
-    """遍历 data、插件配置和事件指令参数中的字符串。"""
-    for value in game_data.data.values():
-        yield from _iter_json_strings("data", value)
-
-    for plugin in game_data.plugins_js:
-        for leaf in resolve_plugin_leaves(plugin):
-            if isinstance(leaf.value, str):
-                yield "plugins", leaf.value
-
-    for _path, _display_name, command in iter_all_commands(game_data):
-        for text in _iter_json_strings("event_commands", command.parameters):
-            yield text
+def _iter_scan_texts(
+    translation_data_map: dict[str, TranslationData],
+) -> Iterable[tuple[str, str]]:
+    """遍历当前提取规则确认会进入模型正文的原文行。"""
+    for translation_data in translation_data_map.values():
+        for item in translation_data.translation_items:
+            yield from _iter_item_scan_texts(item)
 
 
-def _iter_json_strings(source_name: str, value: JsonValue) -> Iterable[tuple[str, str]]:
-    """递归遍历 JSON 值中的字符串叶子。"""
-    if isinstance(value, str):
-        yield source_name, value
-        return
-    if isinstance(value, list):
-        for item in value:
-            yield from _iter_json_strings(source_name, item)
-        return
-    if isinstance(value, dict):
-        for item in value.values():
-            yield from _iter_json_strings(source_name, item)
+def _iter_item_scan_texts(item: TranslationItem) -> Iterable[tuple[str, str]]:
+    """逐行返回单个正文条目的原文。"""
+    for line_index, text in enumerate(item.original_lines):
+        yield f"{item.location_path}#{line_index}", text
 
 
 def _is_standard_covered(marker: str) -> bool:

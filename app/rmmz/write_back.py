@@ -42,6 +42,9 @@ def write_data_text(game_data: GameData, items: list[TranslationItem], text_rule
         file_name = item.location_path.split("/")[0]
         if file_name == PLUGINS_FILE_NAME:
             continue
+        if _is_note_tag_location_path(item.location_path):
+            _write_note_tag_item(game_data=game_data, item=item, text_rules=text_rules)
+            continue
         if file_name == SYSTEM_FILE_NAME:
             _write_system_item(game_data=game_data, item=item, text_rules=text_rules)
             continue
@@ -547,6 +550,75 @@ def _write_system_item(game_data: GameData, item: TranslationItem, text_rules: T
     raise ValueError(f"无法识别的 System 路径: {item.location_path}")
 
 
+def _is_note_tag_location_path(location_path: str) -> bool:
+    """判断路径是否指向 Note 标签值。"""
+    parts = location_path.split("/")
+    return len(parts) >= 3 and parts[-2] == "note"
+
+
+def _write_note_tag_item(game_data: GameData, item: TranslationItem, text_rules: TextRules | None) -> None:
+    """按通用 data JSON 路径写回 Note 标签译文。"""
+    parts = item.location_path.split("/")
+    file_name = parts[0]
+    tag_name = parts[-1]
+    owner_parts = parts[1:-2]
+    translated_text = _prepare_single_text_write_value(item=item, text_rules=text_rules)
+    target = _locate_note_owner(
+        value=game_data.writable_data[file_name],
+        owner_parts=owner_parts,
+        location_path=item.location_path,
+    )
+    note_value = target.get("note")
+    if not isinstance(note_value, str):
+        raise ValueError(f"Note 字段不是字符串: {item.location_path}")
+    target["note"] = replace_note_tag_value(
+        note_text=note_value,
+        tag_name=tag_name,
+        translated_text=translated_text,
+    )
+
+
+def _locate_note_owner(
+    *,
+    value: JsonValue,
+    owner_parts: list[str],
+    location_path: str,
+) -> JsonObject:
+    """根据 Note 标签路径定位持有 note 字段的 JSON 对象。"""
+    current_value = value
+    for part in owner_parts:
+        if isinstance(current_value, dict):
+            if part not in current_value:
+                raise ValueError(f"Note 路径对象键不存在: {location_path}")
+            current_value = current_value[part]
+            continue
+        if isinstance(current_value, list):
+            index = int(part)
+            if index < len(current_value):
+                indexed_value = current_value[index]
+                if indexed_value is not None:
+                    current_value = indexed_value
+                    continue
+            matched_value = _find_json_object_by_id(current_value, index)
+            if matched_value is None:
+                raise ValueError(f"Note 路径数组索引不存在: {location_path}")
+            current_value = matched_value
+            continue
+        raise ValueError(f"Note 路径无法继续定位: {location_path}")
+
+    return ensure_json_object(current_value, item_context(location_path, "note_owner"))
+
+
+def _find_json_object_by_id(values: JsonArray, item_id: int) -> JsonObject | None:
+    """在数组中按 id 字段查找对象，兼容少数索引与 id 不一致的数据。"""
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        if value.get("id") == item_id:
+            return value
+    return None
+
+
 def _write_base_item(game_data: GameData, item: TranslationItem, text_rules: TextRules | None) -> None:
     """将基础数据库条目文本写回数据副本。"""
     parts = item.location_path.split("/")
@@ -593,18 +665,7 @@ def _write_base_item_value(
     translated_text: str,
     location_path: str,
 ) -> None:
-    """写回基础数据库条目的普通字段或 Note 标签值。"""
-    if key == "note" and len(parts) == 4:
-        note_value = target.get("note")
-        if not isinstance(note_value, str):
-            raise ValueError(f"基础数据库 note 字段不是字符串: {location_path}")
-        target["note"] = replace_note_tag_value(
-            note_text=note_value,
-            tag_name=parts[3],
-            translated_text=translated_text,
-        )
-        return
-
+    """写回基础数据库条目的普通字段。"""
     if len(parts) == 3:
         target[key] = translated_text
         return

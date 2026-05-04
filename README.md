@@ -89,6 +89,53 @@ claude --permission-mode bypassPermissions
 
 如果使用 Codex 或其他 Agent，按对应工具的方式打开这个项目，然后提交同一份任务说明即可。把 `<游戏目录>` 和 `<工作区>` 换成你自己的目录；`<工作区>` 建议放在游戏目录旁边或游戏目录内的临时文件夹。
 
+Agent 的期望工作流程如下：主 Agent 负责运行 CLI、派发和复核子代理任务、把规则保存到项目数据库、确认游戏控制符全覆盖，并在质量检查通过后向用户请求写回许可。
+
+```mermaid
+flowchart TD
+    A["确认项目目录、游戏目录、工作区和写回许可"] --> B["doctor --no-check-llm"]
+    B --> C["add-game 注册游戏并取得游戏标题"]
+    C --> D["doctor --game --no-check-llm"]
+    D --> E["prepare-agent-workspace 生成工作区"]
+
+    E --> F["主 Agent 派发四类子代理"]
+    F --> G["name-context<br/>只写术语表"]
+    F --> H["plugin-rules<br/>只写插件规则"]
+    F --> I["event-command-rules<br/>只写事件指令规则"]
+    F --> J["note-tag-rules<br/>只写 Note 标签规则"]
+
+    G --> K["主 Agent 等待全部完成并二次审查"]
+    H --> K
+    I --> K
+    J --> K
+
+    K --> L["validate/import 四类规则"]
+    L --> M["主 Agent 重新生成占位符规则"]
+    M --> N["validate-placeholder-rules"]
+    N --> O["scan-placeholder-candidates<br/>确认 uncovered_count = 0"]
+    O --> P{"仍有未覆盖控制符？"}
+    P -- "是" --> Q["修正占位符规则后重跑校验和扫描"]
+    Q --> N
+    P -- "否" --> R["import-placeholder-rules"]
+
+    R --> S["validate-agent-workspace"]
+    S --> T{"无错误？"}
+    T -- "否" --> U["修复对应工作区文件或规则"]
+    U --> S
+    T -- "是" --> V["translate --max-batches 1 小批量翻译"]
+
+    V --> W["translation-status + quality-report"]
+    W --> X{"质量检查通过？"}
+    X -- "否" --> Y["导出修复表，填写中文译文行后重新导入"]
+    Y --> W
+    X -- "是" --> Z["继续全量 translate"]
+    Z --> AA["最终 quality-report 无错误"]
+    AA --> AB{"用户确认写进游戏文件？"}
+    AB -- "否" --> AC["报告当前状态，等待确认"]
+    AB -- "是" --> AD["write-back 写进游戏文件"]
+    AD --> AE["cleanup-agent-workspace 清理工作区"]
+```
+
 ```text
 请使用 <项目目录>/skills/att-mz/SKILL.md 自动汉化这个 RPG Maker MZ 游戏。
 
@@ -99,7 +146,7 @@ claude --permission-mode bypassPermissions
 目标：
 1. 从注册游戏开始，完成规则分析、正文翻译、质量检查、必要补译和最终写回。
 2. 全程按 Skill 的黑盒协议工作，只通过 CLI、工作区 JSON 和游戏目录处理业务数据。
-3. 启动任何翻译前，先扫描并校验占位符规则、术语表、插件规则、事件指令规则和 Note 标签规则。
+3. 启动任何翻译前，先分析并导入术语表、插件规则、事件指令规则和 data Note 标签规则；这些文本来源确认后，再由主 Agent 生成、校验、扫描确认全覆盖并导入占位符规则。
 4. 先小批量翻译并运行 quality-report，确认没有乱码、占位符风险、超宽行和明显日文残留后，再继续全量翻译。
 5. 质量问题优先用 export-quality-fix-template 导出可填写的修复表，再用 import-manual-translations 导入。
 6. 如果还有没成功保存译文的文本，用 export-untranslated-translations 导出完整译文表，只填写 translation_lines，也就是中文译文行。

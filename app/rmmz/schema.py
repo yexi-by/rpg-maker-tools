@@ -270,7 +270,7 @@ class PluginTextRuleRecord(BaseModel):
 
 
 class NoteTagTextRuleRecord(BaseModel):
-    """单个基础数据库文件的 Note 标签文本规则快照。"""
+    """单个 data 文件或文件模式的 Note 标签文本规则快照。"""
 
     file_name: str
     tag_names: list[str] = Field(default_factory=list)
