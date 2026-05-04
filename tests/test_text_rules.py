@@ -14,6 +14,7 @@ from app.config.schemas import TextRulesSetting
 from app.rmmz.control_codes import CustomPlaceholderRule, LITERAL_ESCAPE_PLACEHOLDERS, LITERAL_LINE_BREAK_PLACEHOLDER
 from app.rmmz.schema import TranslationItem
 from app.rmmz.text_rules import TextRules, get_default_text_rules
+from app.translation.text_structure import validate_translation_text_structure
 
 
 def test_text_rules_replace_and_restore_standard_rmmz_control_sequences() -> None:
@@ -220,8 +221,8 @@ def test_unprotected_control_sequences_report_added_unknown_escape() -> None:
         item.verify_placeholders(rules)
 
 
-def test_literal_line_break_placeholder_allows_width_wrap_additions() -> None:
-    """字面量反斜杠 n 是标准换行占位符，允许行宽兜底追加换行。"""
+def test_literal_line_break_placeholder_structure_rejects_additions() -> None:
+    """字面量反斜杠 n 是单字段结构，不能被译文额外新增。"""
     rules = get_default_text_rules()
     item = TranslationItem(
         location_path="plugins.js/1/message",
@@ -235,9 +236,12 @@ def test_literal_line_break_placeholder_allows_width_wrap_additions() -> None:
     item.translation_lines_with_placeholders = [
         f"说明{LITERAL_LINE_BREAK_PLACEHOLDER}正文{LITERAL_LINE_BREAK_PLACEHOLDER}补充"
     ]
-    item.verify_placeholders(rules)
-    item.restore_placeholders()
-    assert item.translation_lines == ["说明\\n正文\\n补充"]
+    with pytest.raises(ValueError, match="字面量换行标记数量不一致"):
+        validate_translation_text_structure(
+            item=item,
+            translation_lines=["说明\\n正文\\n补充"],
+            translation_lines_with_placeholders=item.translation_lines_with_placeholders,
+        )
 
 
 def test_custom_placeholder_rules_load_from_json_file(tmp_path: Path) -> None:

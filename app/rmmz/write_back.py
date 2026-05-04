@@ -27,7 +27,6 @@ from app.rmmz.text_protocol import (
 from app.translation.line_wrap import (
     normalize_translated_wrapping_punctuation,
     split_overwide_lines,
-    split_overwide_single_text_value_if_needed,
 )
 
 
@@ -248,15 +247,7 @@ def _prepare_single_text_write_value(
 ) -> str:
     """读取单值文本写回内容，并套用外层包裹标点修复。"""
     translation_lines = _prepare_text_write_lines(item=item, text_rules=text_rules)
-    translated_text = translation_lines[0] if translation_lines else ""
-    if text_rules is None:
-        return translated_text
-    return split_overwide_single_text_value_if_needed(
-        original_lines=item.original_lines,
-        translation_text=translated_text,
-        location_path=item.location_path,
-        text_rules=text_rules,
-    )
+    return translation_lines[0] if translation_lines else ""
 
 
 def _strip_trailing_empty_lines(lines: list[str]) -> list[str]:

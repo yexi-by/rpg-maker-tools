@@ -17,7 +17,7 @@ from app.rmmz.text_rules import ControlSequenceSpan, JsonValue, TextRules, get_d
 
 
 type ItemType = Literal["long_text", "array", "short_text"]
-type ErrorType = Literal["模型返回不可解析", "AI漏翻", "控制符不匹配", "日文残留", "选项行数不匹配"]
+type ErrorType = Literal["模型返回不可解析", "AI漏翻", "文本结构不匹配", "控制符不匹配", "日文残留", "选项行数不匹配"]
 type TranslationRunStatus = Literal["running", "completed", "blocked", "cancelled", "failed", "stopped"]
 type LlmFailureCategory = Literal[
     "rate_limit",

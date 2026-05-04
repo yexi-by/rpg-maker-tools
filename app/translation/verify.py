@@ -16,11 +16,12 @@ from app.rmmz.text_rules import ControlSequenceSpan, TextRules
 from app.translation.line_wrap import (
     align_long_text_lines,
     normalize_translated_wrapping_punctuation,
-    split_overwide_single_text_value_if_needed,
 )
+from app.translation.text_structure import validate_translation_text_structure
 
 ERR_PARSE_FAILED: ErrorType = "模型返回不可解析"
 ERR_MISSING_KEY: ErrorType = "AI漏翻"
+ERR_TEXT_STRUCTURE: ErrorType = "文本结构不匹配"
 ERR_PLACEHOLDER_MISMATCH: ErrorType = "控制符不匹配"
 ERR_JAPANESE_RESIDUAL: ErrorType = "日文残留"
 ERR_ARRAY_LINE_COUNT: ErrorType = "选项行数不匹配"
@@ -135,19 +136,12 @@ async def verify_translation_batch(
                 )
                 continue
         else:
-            translation_lines = ["\n".join(model_translation_lines)]
+            translation_lines = list(model_translation_lines)
             translation_lines = normalize_translated_wrapping_punctuation(
                 original_lines=item.original_lines,
                 translation_lines=translation_lines,
                 text_rules=text_rules,
             )
-            if translation_lines:
-                translation_lines[0] = split_overwide_single_text_value_if_needed(
-                    original_lines=item.original_lines,
-                    translation_text=translation_lines[0],
-                    location_path=item.location_path,
-                    text_rules=text_rules,
-                )
 
         item.translation_lines_with_placeholders = _mask_known_translation_controls(
             item=item,
@@ -155,6 +149,27 @@ async def verify_translation_batch(
             text_rules=text_rules,
         )
         item.translation_lines = []
+
+        try:
+            validate_translation_text_structure(
+                item=item,
+                translation_lines=translation_lines,
+                translation_lines_with_placeholders=item.translation_lines_with_placeholders,
+            )
+        except ValueError as error:
+            error_items.append(
+                TranslationErrorItem(
+                    location_path=item.location_path,
+                    item_type=item.item_type,
+                    role=item.role,
+                    original_lines=list(item.original_lines),
+                    translation_lines=list(translation_lines),
+                    error_type=ERR_TEXT_STRUCTURE,
+                    error_detail=str(error).split(";\n"),
+                    model_response=ai_result,
+                )
+            )
+            continue
 
         try:
             item.verify_placeholders(text_rules)

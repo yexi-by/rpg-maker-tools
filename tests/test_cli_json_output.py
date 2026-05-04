@@ -213,6 +213,7 @@ def test_partial_write_back_gate_only_blocks_saved_translation_risks() -> None:
         errors=[
             issue("pending_translations", "存在还没成功保存译文的文本"),
             issue("japanese_residual", "发现译文存在日文残留风险"),
+            issue("text_structure", "发现译文改动了游戏文本结构"),
             issue("llm_failures", "模型运行存在故障"),
         ],
         warnings=[],
@@ -235,8 +236,8 @@ def test_partial_write_back_gate_only_blocks_saved_translation_risks() -> None:
         )
     }
 
-    assert full_gate_codes == {"pending_translations", "japanese_residual", "llm_failures"}
-    assert partial_gate_codes == {"japanese_residual"}
+    assert full_gate_codes == {"pending_translations", "japanese_residual", "text_structure", "llm_failures"}
+    assert partial_gate_codes == {"japanese_residual", "text_structure"}
 
 
 def test_translate_command_accepts_json_summary_flag() -> None:

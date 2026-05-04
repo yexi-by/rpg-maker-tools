@@ -34,6 +34,7 @@ PARTIAL_WRITE_BACK_BLOCKING_ERROR_CODES: frozenset[str] = frozenset(
     {
         "placeholder_risk",
         "japanese_residual",
+        "text_structure",
         "overwide_line",
         "write_back_protocol",
     }

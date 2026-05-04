@@ -122,8 +122,8 @@ async def test_note_tag_rules_extract_and_write_back_only_target_values(minimal_
 
 
 @pytest.mark.asyncio
-async def test_note_tag_multiline_value_splits_overwide_lines_before_write_back(minimal_game_dir: Path) -> None:
-    """Note 标签单字段内的多行显示文本在写回前执行行宽兜底。"""
+async def test_note_tag_multiline_value_keeps_line_break_structure_before_write_back(minimal_game_dir: Path) -> None:
+    """Note 标签单字段写回不再为了切宽新增换行。"""
     items_path = minimal_game_dir / "data" / "Items.json"
     raw_items = _read_test_json(items_path)
     items = ensure_json_array(raw_items, "Items.json")
@@ -155,7 +155,7 @@ async def test_note_tag_multiline_value_splits_overwide_lines_before_write_back(
 
     writable_items = ensure_json_array(game_data.writable_data["Items.json"], "Items.json")
     writable_item = ensure_json_object(writable_items[1], "Items.json[1]")
-    assert writable_item["note"] == "<拡張説明:说明\n「甲乙丙丁戊己，\n　庚辛壬癸」>"
+    assert writable_item["note"] == "<拡張説明:说明\n「甲乙丙丁戊己，庚辛壬癸」>"
 
 
 @pytest.mark.asyncio

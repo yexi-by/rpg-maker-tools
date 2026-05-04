@@ -964,6 +964,7 @@ def parse_error_type(value: str, db_path: Path) -> ErrorType:
     allowed: set[ErrorType] = {
         "模型返回不可解析",
         "AI漏翻",
+        "文本结构不匹配",
         "控制符不匹配",
         "日文残留",
         "选项行数不匹配",

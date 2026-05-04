@@ -12,7 +12,7 @@ from app.llm import LLMHandler
 from app.name_context.schemas import NameContextRegistry
 from app.persistence import GameRegistry
 from app.plugin_text import build_plugin_hash
-from app.rmmz.json_types import JsonObject, coerce_json_value, ensure_json_array, ensure_json_object
+from app.rmmz.json_types import JsonObject, JsonValue, coerce_json_value, ensure_json_array, ensure_json_object
 from app.rmmz.loader import load_game_data
 from app.rmmz.schema import (
     EventCommandParameterFilter,
@@ -791,6 +791,62 @@ async def test_manual_long_text_import_splits_overwide_lines(
     assert translated_by_path[target_path].translation_lines == ["甲乙丙", "丁戊己", "庚辛"]
 
 
+@pytest.mark.parametrize(
+    "translation_lines",
+    [
+        ["第一行", "第二行"],
+        ["第一行\n第二行"],
+        [r"第一行\n第二行"],
+        ["译文：你好"],
+        ["translation_lines: 你好"],
+    ],
+)
+@pytest.mark.asyncio
+async def test_manual_translation_import_rejects_text_structure_errors(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+    translation_lines: list[str],
+) -> None:
+    """人工补译同样拒绝改动单字段结构或混入模型协议文本的译文。"""
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    pending_path = tmp_path / "pending-translations.json"
+
+    _ = await service.export_pending_translations(
+        game_title="テストゲーム",
+        output_path=pending_path,
+        limit=None,
+    )
+    payload = load_json_object(pending_path)
+    target_path = ""
+    for location_path, raw_entry in payload.items():
+        entry = ensure_json_object(coerce_json_value(raw_entry), location_path)
+        original_lines = [
+            line
+            for line in ensure_json_array(entry["original_lines"], f"{location_path}.original_lines")
+            if isinstance(line, str)
+        ]
+        if entry["item_type"] == "short_text" and not any("\n" in line or r"\n" in line for line in original_lines):
+            target_path = location_path
+            entry["translation_lines"] = cast(JsonValue, list(translation_lines))
+            _ = pending_path.write_text(
+                json.dumps({target_path: entry}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            break
+    assert target_path
+
+    report = await service.import_manual_translations(
+        game_title="テストゲーム",
+        input_path=pending_path,
+    )
+
+    assert report.status == "error"
+    assert report.summary["imported_count"] == 0
+    assert report.errors[0].code == "manual_translation_invalid"
+
+
 @pytest.mark.asyncio
 async def test_export_quality_fix_template_collects_repairable_items(
     minimal_game_dir: Path,
@@ -1311,3 +1367,80 @@ async def test_quality_report_flags_multiline_short_text_overwide_line(
     assert overwide_detail["item_type"] == "short_text"
     assert overwide_detail["line_index"] == 1
     assert overwide_detail["line_width"] == 30
+
+
+@pytest.mark.asyncio
+async def test_quality_report_flags_literal_line_break_short_text_overwide_line(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """质量报告会把字面量反斜杠 n 也当作游戏显示换行检查行宽。"""
+    items_path = minimal_game_dir / "data" / "Items.json"
+    raw_value = coerce_json_value(cast(object, json.loads(items_path.read_text(encoding="utf-8"))))
+    items = ensure_json_array(raw_value, "Items.json")
+    item = ensure_json_object(items[1], "Items.json[1]")
+    item["note"] = r"<拡張説明:説明\n原文>"
+    _ = items_path.write_text(json.dumps(raw_value, ensure_ascii=False, indent=2), encoding="utf-8")
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    async with await registry.open_game("テストゲーム") as session:
+        await session.replace_note_tag_text_rules(
+            [
+                NoteTagTextRuleRecord(
+                    file_name="Items.json",
+                    tag_names=["拡張説明"],
+                )
+            ]
+        )
+        await session.write_translation_items(
+            [
+                TranslationItem(
+                    location_path="Items.json/1/note/拡張説明",
+                    item_type="short_text",
+                    original_lines=[r"説明\n原文"],
+                    translation_lines=[r"说明\n甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲"],
+                )
+            ]
+        )
+
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    report = await service.quality_report(game_title="テストゲーム")
+
+    overwide_items = ensure_json_array(report.details["overwide_line_items"], "overwide_line_items")
+    overwide_detail = ensure_json_object(overwide_items[0], "overwide_line_items[0]")
+    assert report.summary["overwide_line_count"] == 1
+    assert overwide_detail["location_path"] == "Items.json/1/note/拡張説明"
+    assert overwide_detail["item_type"] == "short_text"
+    assert overwide_detail["line_index"] == 1
+    assert overwide_detail["line_width"] == 30
+
+
+@pytest.mark.asyncio
+async def test_quality_report_flags_saved_short_text_structure_errors(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """质量报告会拦截已保存译文中改动单字段结构的问题。"""
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    async with await registry.open_game("テストゲーム") as session:
+        await session.write_translation_items(
+            [
+                TranslationItem(
+                    location_path="Items.json/1/description",
+                    item_type="short_text",
+                    original_lines=["アイテム説明"],
+                    translation_lines=["说明\n额外一行"],
+                )
+            ]
+        )
+
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    report = await service.quality_report(game_title="テストゲーム")
+
+    error_codes = {error.code for error in report.errors}
+    text_structure_items = ensure_json_array(report.details["text_structure_items"], "text_structure_items")
+    text_structure_detail = ensure_json_object(text_structure_items[0], "text_structure_items[0]")
+    assert "text_structure" in error_codes
+    assert report.summary["text_structure_count"] == 1
+    assert text_structure_detail["location_path"] == "Items.json/1/description"

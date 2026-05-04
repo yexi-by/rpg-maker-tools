@@ -41,7 +41,7 @@ from app.plugin_text import (
 )
 from app.plugin_text.write_back import write_plugin_text
 from app.rmmz import DataTextExtraction
-from app.rmmz.control_codes import CustomPlaceholderRule
+from app.rmmz.control_codes import ControlSequenceSpan, CustomPlaceholderRule, LITERAL_LINE_BREAK_MARKER
 from app.rmmz.schema import (
     GameData,
     EventCommandTextRuleRecord,
@@ -58,14 +58,13 @@ from app.rmmz.schema import (
 from app.rmmz.placeholder_guard import collect_internal_placeholder_tokens
 from app.rmmz.text_rules import JsonArray, JsonObject, JsonValue, TextRules
 from app.rmmz.json_types import coerce_json_value, ensure_json_array, ensure_json_object, ensure_json_string_list
-from app.rmmz.control_codes import ControlSequenceSpan
 from app.rmmz.write_back import write_data_text
 from app.translation.line_wrap import (
     count_line_width_chars,
     normalize_translated_wrapping_punctuation,
     split_overwide_lines,
-    split_overwide_single_text_value_if_needed,
 )
+from app.translation.text_structure import validate_translation_text_structure
 from app.utils.config_loader_utils import load_setting, resolve_setting_path
 from app.event_command_text import (
     EventCommandTextExtraction,
@@ -400,6 +399,7 @@ class AgentToolkitService:
             text_rules,
             japanese_residual_rule_set,
         )
+        text_structure_details = _collect_text_structure_items(active_translated_items, text_rules)
         placeholder_details = _collect_placeholder_risk_items(active_translated_items, text_rules)
         overwide_details = _collect_overwide_line_items(active_translated_items, text_rules)
         write_back_protocol_details = _collect_write_back_protocol_items(
@@ -411,6 +411,7 @@ class AgentToolkitService:
         problem_paths = _collect_quality_fix_problem_paths(
             quality_error_items=quality_error_items,
             residual_details=residual_details,
+            text_structure_details=text_structure_details,
             placeholder_details=placeholder_details,
             overwide_details=overwide_details,
             write_back_protocol_details=write_back_protocol_details,
@@ -423,6 +424,7 @@ class AgentToolkitService:
         categories_by_path = _build_quality_fix_categories_by_path(
             quality_error_items=quality_error_items,
             residual_details=residual_details,
+            text_structure_details=text_structure_details,
             placeholder_details=placeholder_details,
             overwide_details=overwide_details,
             write_back_protocol_details=write_back_protocol_details,
@@ -457,6 +459,7 @@ class AgentToolkitService:
                 "output": str(output_path),
                 "quality_error_count": len(quality_error_items),
                 "japanese_residual_count": _count_active_quality_details(residual_details, active_paths),
+                "text_structure_count": _count_active_quality_details(text_structure_details, active_paths),
                 "placeholder_risk_count": _count_active_quality_details(placeholder_details, active_paths),
                 "overwide_line_count": _count_active_quality_details(overwide_details, active_paths),
                 "write_back_protocol_count": _count_active_quality_details(write_back_protocol_details, active_paths),
@@ -540,6 +543,7 @@ class AgentToolkitService:
             japanese_residual_rule_set,
         )
         residual_count = len(residual_items)
+        text_structure_items = _collect_text_structure_items(active_translated_items, text_rules)
         placeholder_risk_items = _collect_placeholder_risk_items(active_translated_items, text_rules)
         overwide_line_items = _collect_overwide_line_items(active_translated_items, text_rules)
         write_back_protocol_items = _collect_write_back_protocol_items(
@@ -580,6 +584,8 @@ class AgentToolkitService:
             errors.append(issue("placeholder_risk", f"发现 {len(placeholder_risk_items)} 条译文里的游戏控制符可能被改坏"))
         if residual_count:
             errors.append(issue("japanese_residual", f"发现 {residual_count} 条译文存在日文残留风险"))
+        if text_structure_items:
+            errors.append(issue("text_structure", f"发现 {len(text_structure_items)} 条译文改动了游戏文本结构"))
         if overwide_line_items:
             errors.append(issue("overwide_line", f"发现 {len(overwide_line_items)} 行译文超过当前长文本宽度上限"))
         if write_back_protocol_items:
@@ -614,6 +620,7 @@ class AgentToolkitService:
                 "run_quality_error_count": run_quality_error_count,
                 "model_response_error_count": model_response_count,
                 "japanese_residual_count": residual_count,
+                "text_structure_count": len(text_structure_items),
                 "placeholder_risk_count": len(placeholder_risk_items),
                 "overwide_line_count": len(overwide_line_items),
                 "write_back_protocol_count": len(write_back_protocol_items),
@@ -624,6 +631,7 @@ class AgentToolkitService:
                 "llm_failure_counts": dict(llm_failure_counts),
                 "quality_error_items": quality_error_details,
                 "japanese_residual_items": residual_items,
+                "text_structure_items": text_structure_items,
                 "placeholder_risk_items": placeholder_risk_items,
                 "overwide_line_items": overwide_line_items,
                 "write_back_protocol_items": write_back_protocol_items,
@@ -2063,6 +2071,7 @@ def _collect_quality_fix_problem_paths(
     *,
     quality_error_items: list[TranslationErrorItem],
     residual_details: JsonArray,
+    text_structure_details: JsonArray,
     placeholder_details: JsonArray,
     overwide_details: JsonArray,
     write_back_protocol_details: JsonArray,
@@ -2072,7 +2081,7 @@ def _collect_quality_fix_problem_paths(
     location_paths: list[str] = []
     for item in quality_error_items:
         _append_unique_active_path(location_paths, item.location_path, active_paths)
-    for details in (residual_details, placeholder_details, overwide_details, write_back_protocol_details):
+    for details in (residual_details, text_structure_details, placeholder_details, overwide_details, write_back_protocol_details):
         for location_path in _location_paths_from_quality_details(details):
             _append_unique_active_path(location_paths, location_path, active_paths)
     return location_paths
@@ -2082,6 +2091,7 @@ def _build_quality_fix_categories_by_path(
     *,
     quality_error_items: list[TranslationErrorItem],
     residual_details: JsonArray,
+    text_structure_details: JsonArray,
     placeholder_details: JsonArray,
     overwide_details: JsonArray,
     write_back_protocol_details: JsonArray,
@@ -2093,6 +2103,7 @@ def _build_quality_fix_categories_by_path(
         if item.location_path in active_paths:
             categories.setdefault(item.location_path, []).append("quality_error")
     _append_quality_detail_categories(categories, residual_details, active_paths, "japanese_residual")
+    _append_quality_detail_categories(categories, text_structure_details, active_paths, "text_structure")
     _append_quality_detail_categories(categories, placeholder_details, active_paths, "placeholder_risk")
     _append_quality_detail_categories(categories, overwide_details, active_paths, "overwide_line")
     _append_quality_detail_categories(categories, write_back_protocol_details, active_paths, "write_back_protocol")
@@ -2497,6 +2508,29 @@ def _collect_placeholder_risk_items(items: list[TranslationItem], text_rules: Te
     return details
 
 
+def _collect_text_structure_items(items: list[TranslationItem], text_rules: TextRules) -> JsonArray:
+    """收集改动单字段结构或混入模型协议文本的译文。"""
+    details: JsonArray = []
+    for item in items:
+        cloned_item = item.model_copy(deep=True)
+        try:
+            cloned_item.build_placeholders(text_rules)
+            translation_lines_with_placeholders = [
+                _mask_translation_controls(line=line, item=cloned_item, text_rules=text_rules)
+                for line in cloned_item.translation_lines
+            ]
+            validate_translation_text_structure(
+                item=cloned_item,
+                translation_lines=cloned_item.translation_lines,
+                translation_lines_with_placeholders=translation_lines_with_placeholders,
+            )
+        except ValueError as error:
+            detail = _build_translation_item_quality_detail(item)
+            detail["reason"] = str(error)
+            details.append(detail)
+    return details
+
+
 def _mask_translation_controls(*, line: str, item: TranslationItem, text_rules: TextRules) -> str:
     """把译文中的控制符转换成占位符以便复用数量校验。"""
     reverse_map = {original: placeholder for placeholder, original in item.placeholder_map.items()}
@@ -2541,6 +2575,11 @@ def _prepare_manual_translation_item(
         _mask_translation_controls(line=line, item=cloned_item, text_rules=text_rules)
         for line in normalized_translation_lines
     ]
+    validate_translation_text_structure(
+        item=cloned_item,
+        translation_lines=normalized_translation_lines,
+        translation_lines_with_placeholders=cloned_item.translation_lines_with_placeholders,
+    )
     cloned_item.verify_placeholders(text_rules)
     cloned_item.translation_lines = list(normalized_translation_lines)
     check_japanese_residual_for_item(
@@ -2563,14 +2602,6 @@ def _normalize_manual_translation_lines(
         translation_lines=list(translation_lines),
         text_rules=text_rules,
     )
-    if item.item_type == "short_text" and normalized_lines:
-        normalized_lines[0] = split_overwide_single_text_value_if_needed(
-            original_lines=item.original_lines,
-            translation_text=normalized_lines[0],
-            location_path=item.location_path,
-            text_rules=text_rules,
-        )
-        return normalized_lines
     if item.item_type != "long_text":
         return normalized_lines
     return split_overwide_lines(
@@ -2606,11 +2637,21 @@ def _iter_line_width_check_lines(*, item: TranslationItem) -> list[str]:
         return list(item.translation_lines)
     if item.item_type != "short_text" or not item.translation_lines:
         return []
-    original_has_line_break = any("\n" in line for line in item.original_lines)
+    original_has_line_break = _has_display_line_break(item.original_lines)
     translated_text = item.translation_lines[0]
-    if "\n" not in translated_text and not original_has_line_break:
+    if not _has_display_line_break([translated_text]) and not original_has_line_break:
         return []
-    return translated_text.split("\n")
+    return _split_display_line_breaks(translated_text)
+
+
+def _has_display_line_break(lines: list[str]) -> bool:
+    """判断文本是否包含游戏显示时会分行的换行标记。"""
+    return any("\n" in line or LITERAL_LINE_BREAK_MARKER in line for line in lines)
+
+
+def _split_display_line_breaks(text: str) -> list[str]:
+    """按真实换行和字面量换行拆成游戏窗口里的显示行。"""
+    return text.replace(LITERAL_LINE_BREAK_MARKER, "\n").split("\n")
 
 
 def _build_translation_item_quality_detail(item: TranslationItem) -> JsonObject:
