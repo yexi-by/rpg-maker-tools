@@ -564,7 +564,7 @@ class AgentToolkitService:
         if placeholder_risk_items:
             errors.append(issue("placeholder_risk", f"发现 {len(placeholder_risk_items)} 条译文里的游戏控制符可能被改坏"))
         if residual_count:
-            warnings.append(issue("japanese_residual", f"发现 {residual_count} 条译文存在日文残留风险"))
+            errors.append(issue("japanese_residual", f"发现 {residual_count} 条译文存在日文残留风险"))
         if overwide_line_items:
             errors.append(issue("overwide_line", f"发现 {len(overwide_line_items)} 行译文超过当前长文本宽度上限"))
         if write_back_protocol_items:

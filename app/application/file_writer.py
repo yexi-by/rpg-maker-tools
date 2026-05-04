@@ -1,7 +1,7 @@
 """游戏文件回写编排。
 
-首次写回按文件粒度备份本轮实际受影响的原始文件。后续写回直接替换激活版
-文件，并保持原件留档不变。
+每次写回前按文件粒度补齐本轮实际受影响的原始文件留档。已存在的原件留档
+保持不变，避免后续新增受影响文件直接覆盖原文。
 """
 
 import copy
@@ -41,16 +41,14 @@ def write_game_files(game_data: GameData, game_root: Path) -> None:
         active_data_dir=active_data_dir,
         active_plugins_path=active_plugins_path,
     )
-    has_existing_backup = origin_data_dir.exists() or origin_plugins_path.exists()
-    if not has_existing_backup:
-        backup_affected_original_files(
-            changed_data_files=changed_data_files,
-            active_data_dir=active_data_dir,
-            origin_data_dir=origin_data_dir,
-            plugins_changed=plugins_changed,
-            active_plugins_path=active_plugins_path,
-            origin_plugins_path=origin_plugins_path,
-        )
+    backup_affected_original_files(
+        changed_data_files=changed_data_files,
+        active_data_dir=active_data_dir,
+        origin_data_dir=origin_data_dir,
+        plugins_changed=plugins_changed,
+        active_plugins_path=active_plugins_path,
+        origin_plugins_path=origin_plugins_path,
+    )
 
     replace_changed_data_files(
         game_data=game_data,
@@ -112,17 +110,21 @@ def backup_affected_original_files(
     active_plugins_path: Path,
     origin_plugins_path: Path,
 ) -> None:
-    """首次写回前，只复制本轮受影响文件的原件留档。"""
+    """写回前逐个补齐本轮受影响文件的原件留档。"""
     if changed_data_files:
         origin_data_dir.mkdir(parents=True, exist_ok=True)
         for file_name in changed_data_files:
             source_path = active_data_dir / file_name
             target_path = origin_data_dir / file_name
+            if target_path.exists():
+                continue
             if not source_path.exists():
                 raise FileNotFoundError(f"待备份原始 data 文件不存在: {source_path}")
             _ = shutil.copy2(source_path, target_path)
 
     if plugins_changed:
+        if origin_plugins_path.exists():
+            return
         origin_plugins_path.parent.mkdir(parents=True, exist_ok=True)
         _ = shutil.copy2(active_plugins_path, origin_plugins_path)
 

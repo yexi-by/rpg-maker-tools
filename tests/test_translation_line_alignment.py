@@ -7,7 +7,7 @@ import pytest
 
 from app.config.schemas import TextRulesSetting
 from app.rmmz.control_codes import CustomPlaceholderRule, LITERAL_LINE_BREAK_PLACEHOLDER
-from app.rmmz.schema import TranslationErrorItem, TranslationItem
+from app.rmmz.schema import ItemType, TranslationErrorItem, TranslationItem
 from app.rmmz.text_rules import TextRules
 from app.translation.line_wrap import (
     align_long_text_lines,
@@ -239,6 +239,46 @@ async def test_translation_response_missing_id_is_recorded_as_missing_key() -> N
     error_items = await error_queue.get()
     assert error_items is not None
     assert error_items[0].error_type == "AI漏翻"
+
+
+@pytest.mark.parametrize(
+    ("item_type", "original_lines", "translation_lines"),
+    [
+        ("long_text", ["こんにちは"], []),
+        ("short_text", ["説明"], [""]),
+        ("array", ["はい", "いいえ"], [" ", ""]),
+    ],
+)
+@pytest.mark.asyncio
+async def test_empty_translation_lines_are_recorded_as_missing_translation(
+    item_type: ItemType,
+    original_lines: list[str],
+    translation_lines: list[str],
+) -> None:
+    """模型返回空数组或全空白译文时按漏翻记录，禁止保存空译文。"""
+    text_rules = _build_text_rules(width_limit=40)
+    item = TranslationItem(
+        location_path="Map001.json/1/0/0",
+        item_type=item_type,
+        original_lines=original_lines,
+    )
+    item.build_placeholders(text_rules)
+    right_queue: asyncio.Queue[list[TranslationItem] | None] = asyncio.Queue()
+    error_queue: asyncio.Queue[list[TranslationErrorItem] | None] = asyncio.Queue()
+
+    await verify_translation_batch(
+        ai_result=_build_model_response(item=item, translation_lines=translation_lines),
+        items=[item],
+        right_queue=right_queue,
+        error_queue=error_queue,
+        text_rules=text_rules,
+    )
+
+    assert right_queue.empty()
+    error_items = await error_queue.get()
+    assert error_items is not None
+    assert error_items[0].error_type == "AI漏翻"
+    assert error_items[0].error_detail == ["AI漏翻: 模型返回空译文"]
 
 
 @pytest.mark.asyncio

@@ -654,8 +654,8 @@ async def test_first_write_back_only_archives_affected_data_files(minimal_game_d
 
 
 @pytest.mark.asyncio
-async def test_old_game_reads_archived_files_without_touching_new_backups(minimal_game_dir: Path) -> None:
-    """留档布局优先读取原件留档，二次写回保持留档不变。"""
+async def test_old_game_reads_archived_files_and_adds_missing_backups(minimal_game_dir: Path) -> None:
+    """留档布局优先读取原件留档，后续写回补齐新增受影响文件留档。"""
     first_game_data = await load_game_data(minimal_game_dir)
     extracted = DataTextExtraction(first_game_data, get_default_text_rules()).extract_all_text()
     common_item = next(
@@ -687,7 +687,25 @@ async def test_old_game_reads_archived_files_without_touching_new_backups(minima
     write_data_text(reloaded_game_data, [actor_item])
     write_game_files(reloaded_game_data, minimal_game_dir)
 
-    assert not (minimal_game_dir / "data_origin" / "Actors.json").exists()
+    origin_actors_path = minimal_game_dir / "data_origin" / "Actors.json"
+    assert origin_actors_path.exists()
+    origin_actors = ensure_json_array(_read_test_json(origin_actors_path), "data_origin/Actors.json")
+    active_actors = ensure_json_array(_read_test_json(minimal_game_dir / "data" / "Actors.json"), "Actors.json")
+    origin_actor = ensure_json_object(origin_actors[1], "data_origin/Actors.json[1]")
+    active_actor = ensure_json_object(active_actors[1], "Actors.json[1]")
+    assert origin_actor["name"] == "勇者"
+    assert active_actor["name"] == "勇者译名"
+
+    plugin_game_data = await load_game_data(minimal_game_dir)
+    reset_writable_copies(plugin_game_data)
+    plugin_text = plugin_game_data.writable_data[PLUGINS_FILE_NAME]
+    assert isinstance(plugin_text, str)
+    plugin_game_data.writable_data[PLUGINS_FILE_NAME] = plugin_text.replace("プラグイン本文", "插件正文")
+    write_game_files(plugin_game_data, minimal_game_dir)
+
+    origin_plugins_path = minimal_game_dir / "js" / "plugins_origin.js"
+    assert origin_plugins_path.exists()
+    assert "プラグイン本文" in origin_plugins_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -720,6 +738,7 @@ async def test_font_replacement_updates_only_writable_outputs(
         {"font": another_font, "text": "プラグイン本文"},
         ensure_ascii=False,
     )
+    parameters["HelpText"] = f"请在设置中选择 {Path(old_font).stem} 字体。"
 
     summary = apply_font_replacement(
         game_data=game_data,
@@ -733,15 +752,20 @@ async def test_font_replacement_updates_only_writable_outputs(
     assert summary.source_font_count == 2
     assert summary.replaced_reference_count == 5
     assert len(summary.records) == 5
-    serialized_system = json.dumps(game_data.writable_data["System.json"], ensure_ascii=False)
-    serialized_plugins = str(game_data.writable_data[PLUGINS_FILE_NAME])
-    assert old_font not in serialized_system
-    assert another_font not in serialized_system
-    assert old_font not in serialized_plugins
-    assert another_font not in serialized_plugins
-    assert Path(old_font).stem not in serialized_plugins
-    assert replacement_name in serialized_system
-    assert replacement_name in serialized_plugins
+    writable_system = ensure_json_object(game_data.writable_data["System.json"], "System")
+    advanced = ensure_json_object(writable_system["advanced"], "System.advanced")
+    writable_plugin = ensure_json_object(game_data.writable_plugins_js[0], "plugins[0]")
+    writable_parameters = ensure_json_object(writable_plugin["parameters"], "plugins[0].parameters")
+    assert advanced["mainFontFilename"] == replacement_name
+    assert advanced["numberFontFilename"] == replacement_name
+    assert writable_parameters["FontFace"] == replacement_name
+    assert writable_parameters["FontStem"] == replacement_name
+    nested_text = writable_parameters["Nested"]
+    assert isinstance(nested_text, str)
+    nested_value = ensure_json_object(coerce_json_value(cast(object, json.loads(nested_text))), "Nested")
+    assert nested_value["font"] == replacement_name
+    assert nested_value["text"] == "プラグイン本文"
+    assert writable_parameters["HelpText"] == f"请在设置中选择 {Path(old_font).stem} 字体。"
     original_system = json.dumps(game_data.data["System.json"], ensure_ascii=False)
     assert old_font not in original_system
     assert another_font not in original_system

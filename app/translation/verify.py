@@ -24,6 +24,7 @@ ERR_MISSING_KEY: ErrorType = "AI漏翻"
 ERR_PLACEHOLDER_MISMATCH: ErrorType = "控制符不匹配"
 ERR_JAPANESE_RESIDUAL: ErrorType = "日文残留"
 ERR_ARRAY_LINE_COUNT: ErrorType = "选项行数不匹配"
+ERR_EMPTY_TRANSLATION: ErrorType = "AI漏翻"
 
 
 class TranslationResponseItem(BaseModel):
@@ -85,6 +86,20 @@ async def verify_translation_batch(
                     translation_lines=[],
                     error_type=ERR_MISSING_KEY,
                     error_detail=[f"AI漏翻: 未找到键 {item.location_path}"],
+                    model_response=ai_result,
+                )
+            )
+            continue
+        if _is_empty_translation_lines(model_translation_lines):
+            error_items.append(
+                TranslationErrorItem(
+                    location_path=item.location_path,
+                    item_type=item.item_type,
+                    role=item.role,
+                    original_lines=list(item.original_lines),
+                    translation_lines=list(model_translation_lines),
+                    error_type=ERR_EMPTY_TRANSLATION,
+                    error_detail=["AI漏翻: 模型返回空译文"],
                     model_response=ai_result,
                 )
             )
@@ -203,6 +218,11 @@ def _build_translation_line_map(
             raise ValueError(f"模型返回重复 ID: {response_item.id}")
         translation_map[response_item.id] = list(response_item.translation_lines)
     return translation_map
+
+
+def _is_empty_translation_lines(translation_lines: list[str]) -> bool:
+    """判断模型是否返回了空数组或全空白译文。"""
+    return not translation_lines or not any(line.strip() for line in translation_lines)
 
 
 def _mask_known_translation_controls(

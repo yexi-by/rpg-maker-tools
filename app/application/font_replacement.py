@@ -394,16 +394,88 @@ def replace_font_names_in_text(
     old_font_names: list[str],
     replacement_font_name: str,
 ) -> tuple[str, int]:
-    """替换字符串中的旧字体文件名。"""
-    replaced_text = text
-    replaced_count = 0
+    """只替换完整字体引用，避免误改玩家可见正文。"""
+    replaced_text, replaced_count = replace_complete_font_reference_text(
+        text=text,
+        old_font_names=old_font_names,
+        replacement_font_name=replacement_font_name,
+    )
+    if replaced_count:
+        return replaced_text, replaced_count
+    return replace_font_references_in_encoded_json_text(
+        text=text,
+        old_font_names=old_font_names,
+        replacement_font_name=replacement_font_name,
+    )
+
+
+def replace_complete_font_reference_text(
+    *,
+    text: str,
+    old_font_names: list[str],
+    replacement_font_name: str,
+) -> tuple[str, int]:
+    """替换整个字符串就是旧字体引用的值。"""
+    stripped_text = text.strip()
+    if not stripped_text:
+        return text, 0
+
+    leading_text = text[:len(text) - len(text.lstrip())]
+    trailing_text = text[len(text.rstrip()):]
     for old_font_name in old_font_names:
-        occurrence_count = replaced_text.count(old_font_name)
-        if occurrence_count == 0:
-            continue
-        replaced_text = replaced_text.replace(old_font_name, replacement_font_name)
-        replaced_count += occurrence_count
-    return replaced_text, replaced_count
+        replaced_reference = replace_complete_font_reference_core(
+            text=stripped_text,
+            old_font_name=old_font_name,
+            replacement_font_name=replacement_font_name,
+        )
+        if replaced_reference is not None:
+            return f"{leading_text}{replaced_reference}{trailing_text}", 1
+    return text, 0
+
+
+def replace_complete_font_reference_core(
+    *,
+    text: str,
+    old_font_name: str,
+    replacement_font_name: str,
+) -> str | None:
+    """替换完整文件名、完整 stem 或带目录前缀的完整字体引用。"""
+    if text == old_font_name:
+        return replacement_font_name
+
+    separator_index = max(text.rfind("/"), text.rfind("\\"))
+    if separator_index < 0:
+        return None
+    reference_name = text[separator_index + 1:]
+    if reference_name != old_font_name:
+        return None
+    return f"{text[:separator_index + 1]}{replacement_font_name}"
+
+
+def replace_font_references_in_encoded_json_text(
+    *,
+    text: str,
+    old_font_names: list[str],
+    replacement_font_name: str,
+) -> tuple[str, int]:
+    """解析插件参数里的 JSON 字符串，并只替换其中的完整字体引用。"""
+    try:
+        raw_value = cast(object, json.loads(text))
+        json_value = coerce_json_value(raw_value)
+    except (json.JSONDecodeError, TypeError):
+        return text, 0
+
+    if not isinstance(json_value, list | dict):
+        return text, 0
+
+    replaced_value, replaced_count = replace_font_names_in_json_value(
+        value=json_value,
+        old_font_names=old_font_names,
+        replacement_font_name=replacement_font_name,
+    )
+    if replaced_count == 0:
+        return text, 0
+    return json.dumps(replaced_value, ensure_ascii=False), replaced_count
 
 
 def collect_replacement_font_names(

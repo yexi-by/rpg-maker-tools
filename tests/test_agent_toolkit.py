@@ -551,6 +551,62 @@ async def test_manual_translation_uses_japanese_residual_exception_rules(
 
 
 @pytest.mark.asyncio
+async def test_quality_report_treats_japanese_residual_as_error(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """质量报告把未放行的日文残留风险作为禁止写进游戏文件的问题。"""
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    pending_path = tmp_path / "pending-translations.json"
+
+    _ = await service.export_pending_translations(
+        game_title="テストゲーム",
+        output_path=pending_path,
+        limit=None,
+    )
+    payload = load_json_object(pending_path)
+    residual_path = ""
+    residual_original_lines: list[str] = []
+    for location_path, raw_entry in payload.items():
+        entry = ensure_json_object(coerce_json_value(raw_entry), location_path)
+        original_lines = [
+            line
+            for line in ensure_json_array(entry["original_lines"], f"{location_path}.original_lines")
+            if isinstance(line, str)
+        ]
+        if any(_contains_japanese_test_char(line) for line in original_lines):
+            residual_path = location_path
+            residual_original_lines = original_lines
+            break
+    assert residual_path
+
+    async with await registry.open_game("テストゲーム") as session:
+        await session.write_translation_items(
+            [
+                TranslationItem(
+                    location_path=residual_path,
+                    item_type="short_text",
+                    role=None,
+                    original_lines=residual_original_lines,
+                    source_line_paths=[],
+                    translation_lines=residual_original_lines,
+                )
+            ]
+        )
+
+    report = await service.quality_report(game_title="テストゲーム")
+
+    error_codes = {error.code for error in report.errors}
+    warning_codes = {warning.code for warning in report.warnings}
+    assert report.status == "error"
+    assert "japanese_residual" in error_codes
+    assert "japanese_residual" not in warning_codes
+    assert report.summary["japanese_residual_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_agent_reports_ignore_stale_plugin_rules(
     minimal_game_dir: Path,
     tmp_path: Path,
