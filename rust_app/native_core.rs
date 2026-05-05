@@ -161,7 +161,7 @@ struct PlaceholderBuild {
     placeholder_counts: HashMap<String, usize>,
 }
 
-pub(crate) fn scan_quality_impl(payload_json: &str) -> Result<String, String> {
+pub fn scan_quality_impl(payload_json: &str) -> Result<String, String> {
     let payload: QualityPayload = serde_json::from_str(payload_json)
         .map_err(|error| format!("Rust 质检输入 JSON 解析失败: {error}"))?;
     let rules = Arc::new(compile_rules(payload.text_rules)?);
@@ -206,7 +206,7 @@ pub(crate) fn scan_quality_impl(payload_json: &str) -> Result<String, String> {
         .map_err(|error| format!("Rust 质检输出 JSON 序列化失败: {error}"))
 }
 
-pub(crate) fn scan_write_protocol_impl(payload_json: &str) -> Result<String, String> {
+pub fn scan_write_protocol_impl(payload_json: &str) -> Result<String, String> {
     let payload: ProtocolPayload = serde_json::from_str(payload_json)
         .map_err(|error| format!("Rust 写入协议输入 JSON 解析失败: {error}"))?;
     let details = run_with_optional_pool(|| {
@@ -229,7 +229,7 @@ pub(crate) fn scan_write_protocol_impl(payload_json: &str) -> Result<String, Str
         .map_err(|error| format!("Rust 写入协议输出 JSON 序列化失败: {error}"))
 }
 
-pub(crate) fn collect_note_tag_sources_impl(payload_json: &str) -> Result<String, String> {
+pub fn collect_note_tag_sources_impl(payload_json: &str) -> Result<String, String> {
     let payload: NoteSourcesPayload = serde_json::from_str(payload_json)
         .map_err(|error| format!("Rust Note 标签输入 JSON 解析失败: {error}"))?;
     let file_pattern = payload.file_pattern.as_deref();
@@ -275,7 +275,7 @@ where
     job()
 }
 
-pub(crate) fn read_configured_thread_count() -> Option<usize> {
+pub fn read_configured_thread_count() -> Option<usize> {
     let raw_value = env::var("ATT_MZ_RUST_THREADS").ok()?;
     let parsed = raw_value.trim().parse::<usize>().ok()?;
     if parsed == 0 {
