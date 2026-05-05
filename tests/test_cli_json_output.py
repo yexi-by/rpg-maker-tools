@@ -11,6 +11,7 @@ from pytest import CaptureFixture
 from app.agent_toolkit import AgentReport
 from app.agent_toolkit.reports import issue
 from app.cli import build_parser
+from app.cli import build_progress_reporter
 from app.cli import build_translate_summary_report
 from app.cli import collect_write_back_gate_errors
 from app.cli import ensure_text_translation_not_blocked
@@ -319,6 +320,28 @@ def test_translate_command_accepts_json_summary_flag() -> None:
 
     assert namespace_optional_str(args, "game") == "demo"
     assert getattr(args, "json_output") is True
+
+
+def test_json_progress_reports_to_stderr_without_polluting_stdout(
+    capsys: CaptureFixture[str],
+) -> None:
+    """JSON 模式下长任务进度走 stderr，stdout 保持给最终 JSON。"""
+    args = Namespace(agent_mode=True, json_output=True)
+
+    with build_progress_reporter("正文翻译", args) as progress:
+        set_progress, advance_progress, set_status = progress.status_callbacks()
+        set_progress(0, 10)
+        set_status("还没成功保存译文 10 条，相同原文合并后 8 条，批次 2 个")
+        advance_progress(3)
+
+    captured = capsys.readouterr()
+
+    assert captured.out == ""
+    assert "进度 正文翻译" in captured.err
+    assert "[######--------------]" in captured.err
+    assert "3/10" in captured.err
+    assert "预计剩余" in captured.err
+    assert "还没成功保存译文 10 条" in captured.err
 
 
 def test_manual_translation_export_commands_are_black_box_friendly() -> None:

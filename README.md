@@ -91,6 +91,8 @@ claude --permission-mode bypassPermissions
 
 Agent 的期望工作流程如下：主代理负责运行 CLI、分两轮派发和复核子代理任务、亲自把关术语表译名、把规则保存到项目数据库、确认游戏控制符全覆盖，并在质量检查通过后向用户请求写回许可。
 
+使用 `--json` 时，stdout 只输出最终 JSON。`translate`、`write-back`、`write-terminology` 等长任务会把无 ANSI 文本进度条输出到 stderr，显示已完成数量、百分比、已用时间、预计剩余时间和当前状态；自动化脚本只解析 stdout，不要把 stderr 进度行当成结果 JSON。
+
 ```mermaid
 flowchart TD
     A["确认项目目录、游戏目录、工作区和写回许可"] --> B["doctor --no-check-llm"]

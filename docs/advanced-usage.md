@@ -69,6 +69,8 @@ uv run python main.py --agent-mode write-back --game <游戏标题> --json
 `translate` 返回 0 表示本轮命令正常结束，不代表所有文本都已经成功保存译文。没成功保存译文的文本和检查没通过的译文由 `translation-status`、`quality-report` 和手动填写译文表命令处理，禁止绕过 CLI 直接修改数据库。
 `translation-status --json` 的 `pending_count` 表示当前还有多少文本没成功保存译文，`run_pending_count` 表示最近一次运行开始时有多少文本需要处理。
 
+`--json` 的 stdout 只输出最终 JSON。长时间运行的 `translate`、`write-back`、`write-terminology` 会把无 ANSI 文本进度条输出到 stderr，包含已完成数量、百分比、已用时间、预计剩余时间和当前状态。自动化脚本解析 stdout；观察进度时看 stderr。
+
 普通 `write-back` 只把译文写进游戏文件，不覆盖字体引用。只有用户明确允许字体覆盖时，才可以在最终写回命令里追加 `--confirm-font-overwrite`。如果需要还原曾经由项目覆盖过的字体引用，使用：
 
 ```powershell
