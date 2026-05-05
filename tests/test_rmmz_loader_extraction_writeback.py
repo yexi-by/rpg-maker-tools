@@ -48,7 +48,7 @@ async def test_loader_only_keeps_standard_rmmz_data_files(minimal_game_dir: Path
 
 @pytest.mark.asyncio
 async def test_data_extraction_covers_core_text_sources(minimal_game_dir: Path) -> None:
-    """正文提取覆盖事件对白、选项、滚动文本、系统词汇和基础数据库。"""
+    """正文提取覆盖正文文本，并排除术语表直接写回字段。"""
     game_data = await load_game_data(minimal_game_dir)
     extracted = DataTextExtraction(game_data, get_default_text_rules()).extract_all_text()
     paths = {
@@ -71,7 +71,13 @@ async def test_data_extraction_covers_core_text_sources(minimal_game_dir: Path) 
     assert "Map002.json/1/0/0" in paths
     assert "System.json/gameTitle" in paths
     assert "System.json/terms/basic/1" not in paths
-    assert "Actors.json/1/name" in paths
+    assert "System.json/elements/1" not in paths
+    assert "System.json/skillTypes/1" not in paths
+    assert "Actors.json/1/name" not in paths
+    assert "Actors.json/1/nickname" not in paths
+    assert "Actors.json/1/profile" in paths
+    assert "Items.json/1/name" not in paths
+    assert "Skills.json/1/name" not in paths
     assert "Items.json/1/description" in paths
     assert "Skills.json/1/message1" in paths
 
@@ -730,9 +736,9 @@ async def test_old_game_reads_archived_files_and_adds_missing_backups(minimal_ga
     actor_item = next(
         candidate
         for candidate in reloaded_extracted["Actors.json"].translation_items
-        if candidate.location_path == "Actors.json/1/name"
+        if candidate.location_path == "Actors.json/1/profile"
     )
-    actor_item.translation_lines = ["勇者译名"]
+    actor_item.translation_lines = ["角色简介译文"]
     reset_writable_copies(reloaded_game_data)
     write_data_text(reloaded_game_data, [actor_item])
     write_game_files(reloaded_game_data, minimal_game_dir)
@@ -743,8 +749,8 @@ async def test_old_game_reads_archived_files_and_adds_missing_backups(minimal_ga
     active_actors = ensure_json_array(_read_test_json(minimal_game_dir / "data" / "Actors.json"), "Actors.json")
     origin_actor = ensure_json_object(origin_actors[1], "data_origin/Actors.json[1]")
     active_actor = ensure_json_object(active_actors[1], "Actors.json[1]")
-    assert origin_actor["name"] == "勇者"
-    assert active_actor["name"] == "勇者译名"
+    assert origin_actor["profile"] == "プロフィール"
+    assert active_actor["profile"] == "角色简介译文"
 
     plugin_game_data = await load_game_data(minimal_game_dir)
     reset_writable_copies(plugin_game_data)

@@ -22,12 +22,12 @@ from app.application.summaries import (
     EventCommandJsonExportSummary,
     EventCommandRuleImportSummary,
     FontRestoreSummary,
-    NameContextImportSummary,
-    NameContextWriteSummary,
     NoteTagJsonExportSummary,
     NoteTagRuleImportSummary,
     PluginJsonExportSummary,
     PluginRuleImportSummary,
+    TerminologyImportSummary,
+    TerminologyWriteSummary,
     TextTranslationSummary,
     WriteBackSummary,
 )
@@ -45,12 +45,14 @@ from app.event_command_text import (
     load_event_command_rule_import_file,
     resolve_event_command_codes,
 )
-from app.name_context import (
-    NameContextExportSummary,
-    NamePromptIndex,
-    apply_name_context_translations,
-    export_name_context_artifacts,
-    load_name_context_registry,
+from app.terminology import (
+    TerminologyExportSummary,
+    TerminologyExtraction,
+    TerminologyPromptIndex,
+    TerminologyRegistry,
+    apply_terminology_translations,
+    export_terminology_artifacts,
+    load_terminology_registry,
 )
 from app.note_tag_text import (
     NoteTagTextExtraction,
@@ -479,7 +481,10 @@ class TranslationHandler:
         set_progress, advance_progress, set_status = callbacks
         game_title = session.game_title
         game_data = await self._load_session_game_data(session)
-        name_prompt_index = await self._load_name_prompt_index(session=session)
+        terminology_prompt_index = await self._load_terminology_prompt_index(
+            session=session,
+            game_data=game_data,
+        )
 
         plugin_rules = await self._read_fresh_plugin_text_rules(
             session=session,
@@ -560,7 +565,7 @@ class TranslationHandler:
             translation_data_map=deduplicated_translation_data_map,
             setting=setting,
             text_rules=text_rules,
-            name_prompt_index=name_prompt_index,
+            terminology_prompt_index=terminology_prompt_index,
         )
         if run_limits.max_batches is not None:
             batches = batches[: run_limits.max_batches]
@@ -682,14 +687,15 @@ class TranslationHandler:
                 text_rules=text_rules,
                 translated_items=translated_items,
             )
+            terminology_registry = await session.read_terminology_registry()
             set_progress(0, len(translated_items))
 
-            if not translated_items:
-                logger.warning(f"[tag.warning]当前没有可回写译文[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count]")
+            if not translated_items and terminology_registry is None:
+                logger.warning(f"[tag.warning]当前没有可回写译文，也没有已导入术语表[/tag.warning] 游戏 [tag.count]{game_title}[/tag.count]")
                 return WriteBackSummary(
                     data_item_count=0,
                     plugin_item_count=0,
-                    name_written_count=0,
+                    terminology_written_count=0,
                     target_font_name=None,
                     source_font_count=0,
                     replaced_font_reference_count=0,
@@ -701,16 +707,16 @@ class TranslationHandler:
                 1 for item in translated_items if not item.location_path.startswith(f"{PLUGINS_FILE_NAME}/")
             )
             plugin_item_count = len(translated_items) - data_item_count
-            write_data_text(game_data, translated_items, text_rules=text_rules)
-            if data_item_count:
-                advance_progress(data_item_count)
-            write_plugin_text(game_data, translated_items)
-            if plugin_item_count:
-                advance_progress(plugin_item_count)
-            name_written_count = await self._apply_optional_name_context_write_back(
-                session=session,
-                game_data=game_data,
-            )
+            if translated_items:
+                write_data_text(game_data, translated_items, text_rules=text_rules)
+                if data_item_count:
+                    advance_progress(data_item_count)
+                write_plugin_text(game_data, translated_items)
+                if plugin_item_count:
+                    advance_progress(plugin_item_count)
+            terminology_written_count = 0
+            if terminology_registry is not None:
+                terminology_written_count = apply_terminology_translations(game_data, terminology_registry)
             font_summary = build_empty_font_replacement_summary()
             if confirm_font_overwrite:
                 font_summary = apply_font_replacement(
@@ -726,61 +732,65 @@ class TranslationHandler:
             write_game_files(game_data=game_data, game_root=session.game_path)
             if font_summary.target_font_name is not None:
                 logger.info(f"[tag.phase]字体引用已同步[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] 目标字体 [tag.path]{font_summary.target_font_name}[/tag.path] 原字体 [tag.count]{font_summary.source_font_count}[/tag.count] 个，替换引用 [tag.count]{font_summary.replaced_reference_count}[/tag.count] 处")
-            logger.success(f"[tag.success]游戏文本回写完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] data 文本 [tag.count]{data_item_count}[/tag.count] 条，插件文本 [tag.count]{plugin_item_count}[/tag.count] 条，标准名 [tag.count]{name_written_count}[/tag.count] 条")
+            logger.success(f"[tag.success]游戏文本回写完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] data 文本 [tag.count]{data_item_count}[/tag.count] 条，插件文本 [tag.count]{plugin_item_count}[/tag.count] 条，术语 [tag.count]{terminology_written_count}[/tag.count] 条")
             return WriteBackSummary(
                 data_item_count=data_item_count,
                 plugin_item_count=plugin_item_count,
-                name_written_count=name_written_count,
+                terminology_written_count=terminology_written_count,
                 target_font_name=font_summary.target_font_name,
                 source_font_count=font_summary.source_font_count,
                 replaced_font_reference_count=font_summary.replaced_reference_count,
                 font_copied=font_summary.copied,
             )
 
-    async def export_name_context(
+    async def export_terminology(
         self,
         game_title: str,
         output_dir: Path,
-    ) -> NameContextExportSummary:
-        """导出 `101` 名字框与地图显示名上下文文件。"""
+    ) -> TerminologyExportSummary:
+        """导出术语表工程文件。"""
         async with await self.game_registry.open_game(game_title) as session:
             game_data = await self._load_session_game_data(session)
-            summary = await export_name_context_artifacts(
+            summary = await export_terminology_artifacts(
                 game_data=game_data,
                 output_dir=output_dir,
             )
-            logger.success(f"[tag.success]标准名上下文导出完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 大 JSON [tag.path]{summary.registry_path}[/tag.path] 小 JSON [tag.count]{summary.sample_file_count}[/tag.count] 个")
+            logger.success(f"[tag.success]术语表工程导出完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 术语表 [tag.path]{summary.terms_path}[/tag.path] 上下文目录 [tag.path]{summary.contexts_dir}[/tag.path]")
             return summary
 
-    async def import_name_context(
+    async def import_terminology(
         self,
         game_title: str,
         input_path: Path,
-    ) -> NameContextImportSummary:
+    ) -> TerminologyImportSummary:
         """把外部 Agent 填写后的术语表 JSON 导入当前游戏数据库。"""
         async with await self.game_registry.open_game(game_title) as session:
-            registry = await load_name_context_registry(registry_path=input_path)
-            await session.replace_name_context_registry(registry)
-        imported_count = len(registry.speaker_names) + len(registry.map_display_names)
-        filled_count = sum(
-            1
-            for translated_text in [*registry.speaker_names.values(), *registry.map_display_names.values()]
-            if translated_text.strip()
-        )
+            game_data = await self._load_session_game_data(session)
+            registry = await load_terminology_registry(terms_path=input_path)
+            expected_registry, _speaker_contexts, _database_contexts = TerminologyExtraction(
+                game_data=game_data,
+            ).extract_registry_and_contexts()
+            validate_terminology_registry_shape(
+                imported_registry=registry,
+                expected_registry=expected_registry,
+            )
+            await session.replace_terminology_registry(registry)
+        imported_count = registry.total_entry_count()
+        filled_count = registry.filled_entry_count()
         logger.success(f"[tag.success]术语表导入完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 条目 [tag.count]{imported_count}[/tag.count] 条，已填写 [tag.count]{filled_count}[/tag.count] 条")
-        return NameContextImportSummary(
+        return TerminologyImportSummary(
             imported_entry_count=imported_count,
             filled_entry_count=filled_count,
         )
 
-    async def write_name_context(
+    async def write_terminology(
         self,
         game_title: str,
         callbacks: tuple[Callable[[int, int], None], Callable[[int], None]],
         setting_overrides: SettingOverrides | None = None,
         confirm_font_overwrite: bool = False,
-    ) -> NameContextWriteSummary:
-        """根据数据库中的术语表写回 `101` 名字框与地图显示名。"""
+    ) -> TerminologyWriteSummary:
+        """根据数据库中的术语表直接写回稳定名词。"""
         async with await self.game_registry.open_game(game_title) as session:
             set_progress, advance_progress = callbacks
             game_data = await self._load_session_game_data(session)
@@ -802,10 +812,10 @@ class TranslationHandler:
                 write_data_text(game_data, translated_items, text_rules=text_rules)
                 write_plugin_text(game_data, translated_items)
 
-            registry = await session.read_name_context_registry()
+            registry = await session.read_terminology_registry()
             if registry is None:
-                raise RuntimeError("当前游戏数据库中没有已导入术语表，请先执行 import-name-context")
-            written_count = apply_name_context_translations(game_data, registry)
+                raise RuntimeError("当前游戏数据库中没有已导入术语表，请先执行 import-terminology")
+            written_count = apply_terminology_translations(game_data, registry)
             set_progress(0, max(written_count, 1))
             advance_progress(written_count)
             font_summary = build_empty_font_replacement_summary()
@@ -822,8 +832,8 @@ class TranslationHandler:
             write_game_files(game_data=game_data, game_root=session.game_path)
             if font_summary.target_font_name is not None:
                 logger.info(f"[tag.phase]字体引用已同步[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] 目标字体 [tag.path]{font_summary.target_font_name}[/tag.path] 原字体 [tag.count]{font_summary.source_font_count}[/tag.count] 个，替换引用 [tag.count]{font_summary.replaced_reference_count}[/tag.count] 处")
-            logger.success(f"[tag.success]标准名写回完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 写回 [tag.count]{written_count}[/tag.count] 条，保留已有正文译文 [tag.count]{len(translated_items)}[/tag.count] 条")
-            return NameContextWriteSummary(written_count=written_count, preserved_translation_count=len(translated_items))
+            logger.success(f"[tag.success]术语写回完成[/tag.success] 游戏 [tag.count]{game_title}[/tag.count] 写回 [tag.count]{written_count}[/tag.count] 条，保留已有正文译文 [tag.count]{len(translated_items)}[/tag.count] 条")
+            return TerminologyWriteSummary(written_count=written_count, preserved_translation_count=len(translated_items))
 
     async def restore_font_replacement(
         self,
@@ -938,33 +948,21 @@ class TranslationHandler:
             for item in translation_data.translation_items
         }
 
-    async def _load_name_prompt_index(
-        self,
-        *,
-        session: TargetGameSession,
-    ) -> NamePromptIndex | None:
-        """读取数据库术语表，并转换为正文提示词索引。"""
-        registry = await session.read_name_context_registry()
-        if registry is None:
-            logger.info(f"[tag.skip]数据库没有已导入术语表，正文提示词不注入标准名[/tag.skip] 游戏 [tag.count]{session.game_title}[/tag.count]")
-            return None
-
-        index = NamePromptIndex.from_registry(registry)
-        logger.info(f"[tag.phase]已加载术语表[/tag.phase] 游戏 [tag.count]{session.game_title}[/tag.count] 可注入译名 [tag.count]{len(index.entries)}[/tag.count] 条")
-        return index
-
-    async def _apply_optional_name_context_write_back(
+    async def _load_terminology_prompt_index(
         self,
         *,
         session: TargetGameSession,
         game_data: GameData,
-    ) -> int:
-        """在正文回写时顺手写回数据库术语表中的标准名。"""
-        registry = await session.read_name_context_registry()
+    ) -> TerminologyPromptIndex | None:
+        """读取数据库术语表，并转换为正文提示词索引。"""
+        registry = await session.read_terminology_registry()
         if registry is None:
-            logger.info(f"[tag.skip]数据库未发现术语表，跳过 101 名字框和地图名写回[/tag.skip] 游戏 [tag.count]{session.game_title}[/tag.count]")
-            return 0
-        return apply_name_context_translations(game_data, registry)
+            logger.info(f"[tag.skip]数据库没有已导入术语表，正文提示词不注入标准译名[/tag.skip] 游戏 [tag.count]{session.game_title}[/tag.count]")
+            return None
+
+        index = TerminologyPromptIndex.from_registry(registry, game_data=game_data)
+        logger.info(f"[tag.phase]已加载术语表[/tag.phase] 游戏 [tag.count]{session.game_title}[/tag.count] 可注入译名 [tag.count]{len(index.entries)}[/tag.count] 条")
+        return index
 
     async def _read_fresh_plugin_text_rules(
         self,
@@ -1152,7 +1150,7 @@ class TranslationHandler:
         translation_data_map: dict[str, TranslationData],
         setting: Setting,
         text_rules: TextRules,
-        name_prompt_index: NamePromptIndex | None,
+        terminology_prompt_index: TerminologyPromptIndex | None,
     ) -> list[TranslationBatch]:
         """构建正文翻译批次。"""
         batches: list[TranslationBatch] = []
@@ -1165,7 +1163,7 @@ class TranslationHandler:
                     max_command_items=setting.translation_context.max_command_items,
                     system_prompt=setting.text_translation.system_prompt,
                     text_rules=text_rules,
-                    name_prompt_index=name_prompt_index,
+                    terminology_prompt_index=terminology_prompt_index,
                 )
             )
         return batches
@@ -1393,14 +1391,35 @@ class TranslationHandler:
         return type(error).__name__
 
 
+def validate_terminology_registry_shape(
+    *,
+    imported_registry: TerminologyRegistry,
+    expected_registry: TerminologyRegistry,
+) -> None:
+    """校验导入术语表与当前游戏可提取术语完全一致。"""
+    imported_map = imported_registry.as_category_map()
+    expected_map = expected_registry.as_category_map()
+    errors: list[str] = []
+    for category, expected_entries in expected_map.items():
+        imported_entries = imported_map[category]
+        missing_terms = sorted(set(expected_entries) - set(imported_entries))
+        extra_terms = sorted(set(imported_entries) - set(expected_entries))
+        if missing_terms:
+            errors.append(f"{category} 缺少 {len(missing_terms)} 个术语")
+        if extra_terms:
+            errors.append(f"{category} 多出 {len(extra_terms)} 个术语")
+    if errors:
+        raise ValueError("；".join(errors))
+
+
 __all__: list[str] = [
     "EventCommandJsonExportSummary",
     "EventCommandRuleImportSummary",
     "FontRestoreSummary",
-    "NameContextImportSummary",
-    "NameContextWriteSummary",
     "PluginJsonExportSummary",
     "PluginRuleImportSummary",
+    "TerminologyImportSummary",
+    "TerminologyWriteSummary",
     "TextTranslationSummary",
     "TranslationHandler",
     "WriteBackSummary",

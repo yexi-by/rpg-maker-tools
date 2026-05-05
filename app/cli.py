@@ -37,6 +37,8 @@ PARTIAL_WRITE_BACK_BLOCKING_ERROR_CODES: frozenset[str] = frozenset(
         "text_structure",
         "overwide_line",
         "write_back_protocol",
+        "terminology_missing",
+        "terminology_empty_translation",
     }
 )
 
@@ -420,36 +422,36 @@ def build_parser() -> argparse.ArgumentParser:
     _ = restore_font_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
     add_setting_override_arguments(restore_font_parser)
 
-    export_name_parser = subparsers.add_parser(
-        "export-name-context",
-        help="导出 101 名字框和地图显示名上下文 JSON，供外部 Agent 填写译名",
+    export_terminology_parser = subparsers.add_parser(
+        "export-terminology",
+        help="导出术语表工程 JSON 和只读上下文，供外部 Agent 填写译名",
     )
-    add_optional_target_arguments(export_name_parser)
-    _ = export_name_parser.add_argument(
+    add_optional_target_arguments(export_terminology_parser)
+    _ = export_terminology_parser.add_argument(
         "--output-dir",
         required=True,
         help="临时导出目录；建议放在项目目录之外",
     )
 
-    import_name_parser = subparsers.add_parser(
-        "import-name-context",
-        help="把外部 Agent 填写后的术语表大 JSON 导入游戏数据库",
+    import_terminology_parser = subparsers.add_parser(
+        "import-terminology",
+        help="把外部 Agent 填写后的术语表 JSON 导入游戏数据库",
     )
-    add_optional_target_arguments(import_name_parser)
-    _ = import_name_parser.add_argument("--input", required=True, help="已填写的大 JSON 路径")
-    _ = import_name_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+    add_optional_target_arguments(import_terminology_parser)
+    _ = import_terminology_parser.add_argument("--input", required=True, help="已填写的术语表 JSON 路径")
+    _ = import_terminology_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
-    write_name_parser = subparsers.add_parser(
-        "write-name-context",
-        help="根据数据库中的术语表写回 101 名字框和 MapXXX.displayName",
+    write_terminology_parser = subparsers.add_parser(
+        "write-terminology",
+        help="根据数据库中的术语表直接写回稳定名词",
     )
-    add_optional_target_arguments(write_name_parser)
-    _ = write_name_parser.add_argument(
+    add_optional_target_arguments(write_terminology_parser)
+    _ = write_terminology_parser.add_argument(
         "--confirm-font-overwrite",
         action="store_true",
         help="明确允许本次写回用配置字体覆盖游戏字体引用",
     )
-    add_setting_override_arguments(write_name_parser)
+    add_setting_override_arguments(write_terminology_parser)
 
     run_all_parser = subparsers.add_parser("run-all", help="按固定顺序执行正文翻译和回写")
     add_optional_target_arguments(run_all_parser)
@@ -693,12 +695,12 @@ async def dispatch_command(args: argparse.Namespace) -> int:
         return await run_write_back_command(args)
     if command == "restore-font":
         return await run_restore_font_command(args)
-    if command == "export-name-context":
-        return await run_export_name_context_command(args)
-    if command == "import-name-context":
-        return await run_import_name_context_command(args)
-    if command == "write-name-context":
-        return await run_write_name_context_command(args)
+    if command == "export-terminology":
+        return await run_export_terminology_command(args)
+    if command == "import-terminology":
+        return await run_import_terminology_command(args)
+    if command == "write-terminology":
+        return await run_write_terminology_command(args)
     if command == "run-all":
         return await run_all_command(args)
 
@@ -1170,28 +1172,28 @@ async def run_restore_font_command(args: argparse.Namespace) -> int:
     return 0
 
 
-async def run_export_name_context_command(args: argparse.Namespace) -> int:
-    """执行 `export-name-context` 命令。"""
+async def run_export_terminology_command(args: argparse.Namespace) -> int:
+    """执行 `export-terminology` 命令。"""
     game_title = await resolve_target_game_title(args)
     output_dir = read_required_path_arg(args, "output_dir")
     async with HandlerSession() as handler:
-        summary = await handler.export_name_context(game_title=game_title, output_dir=output_dir)
-    logger.success(f"[tag.success]标准名上下文可交给外部 Agent 处理[/tag.success] 大 JSON [tag.path]{summary.registry_path}[/tag.path] 小 JSON 目录 [tag.path]{summary.sample_dir}[/tag.path]")
+        summary = await handler.export_terminology(game_title=game_title, output_dir=output_dir)
+    logger.success(f"[tag.success]术语表工程可交给外部 Agent 处理[/tag.success] 术语表 [tag.path]{summary.terms_path}[/tag.path] 上下文目录 [tag.path]{summary.contexts_dir}[/tag.path]")
     return 0
 
 
-async def run_import_name_context_command(args: argparse.Namespace) -> int:
-    """执行 `import-name-context` 命令。"""
+async def run_import_terminology_command(args: argparse.Namespace) -> int:
+    """执行 `import-terminology` 命令。"""
     game_title = await resolve_target_game_title(args)
     input_path = read_required_path_arg(args, "input")
     try:
         async with HandlerSession() as handler:
-            summary = await handler.import_name_context(game_title=game_title, input_path=input_path)
+            summary = await handler.import_terminology(game_title=game_title, input_path=input_path)
     except Exception as error:
         if not read_bool_arg(args, "json_output"):
             raise
         report = AgentReport.from_parts(
-            errors=[issue("name_context_invalid", f"术语表导入失败: {type(error).__name__}: {error}")],
+            errors=[issue("terminology_invalid", f"术语表导入失败: {type(error).__name__}: {error}")],
             warnings=[],
             summary={"game": game_title, "input": str(input_path)},
             details={},
@@ -1214,8 +1216,8 @@ async def run_import_name_context_command(args: argparse.Namespace) -> int:
     return 0
 
 
-async def run_write_name_context_command(args: argparse.Namespace) -> int:
-    """执行 `write-name-context` 命令。"""
+async def run_write_terminology_command(args: argparse.Namespace) -> int:
+    """执行 `write-terminology` 命令。"""
     game_title = await resolve_target_game_title(args)
     setting_overrides = build_setting_overrides(args)
     async with HandlerSession() as handler:
@@ -1225,8 +1227,8 @@ async def run_write_name_context_command(args: argparse.Namespace) -> int:
             game_registry=handler.game_registry,
             require_complete_translation=False,
         )
-        with build_progress_reporter("标准名写回", args) as progress:
-            _ = await handler.write_name_context(
+        with build_progress_reporter("术语写回", args) as progress:
+            _ = await handler.write_terminology(
                 game_title=game_title,
                 callbacks=progress.progress_callbacks(),
                 setting_overrides=setting_overrides,
@@ -1401,7 +1403,7 @@ def build_write_back_summary_report(summary: WriteBackSummary) -> AgentReport:
         summary={
             "data_item_count": summary.data_item_count,
             "plugin_item_count": summary.plugin_item_count,
-            "name_written_count": summary.name_written_count,
+            "terminology_written_count": summary.terminology_written_count,
             "target_font_name": summary.target_font_name or "",
             "source_font_count": summary.source_font_count,
             "replaced_font_reference_count": summary.replaced_font_reference_count,

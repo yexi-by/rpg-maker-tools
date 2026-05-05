@@ -1,23 +1,26 @@
-"""标准名术语写回模块。"""
+"""术语表工程写回模块。"""
 
 from app.rmmz.schema import (
     COMMON_EVENTS_FILE_NAME,
     Code,
     GameData,
     MAP_PATTERN,
+    SYSTEM_FILE_NAME,
     TROOPS_FILE_NAME,
 )
 from app.rmmz.text_rules import JsonArray, JsonObject, JsonValue, ensure_json_array, ensure_json_object
 
-from .extraction import is_translatable_name_context_source
-from .schemas import NameContextRegistry
+from .extraction import BASE_NAME_CATEGORIES, SYSTEM_TERM_CATEGORIES, is_translatable_terminology_source
+from .schemas import TerminologyRegistry
 
 
-def apply_name_context_translations(game_data: GameData, registry: NameContextRegistry) -> int:
-    """把术语表译名写入 `101` 名字框和 `MapXXX.displayName`。"""
+def apply_terminology_translations(game_data: GameData, registry: TerminologyRegistry) -> int:
+    """把术语表译名写入名字框、地图显示名、数据库名称和系统类型。"""
     written_count = 0
     written_count += _write_map_display_names(game_data=game_data, translations=registry.map_display_names)
     written_count += _write_speaker_names(game_data=game_data, translations=registry.speaker_names)
+    written_count += _write_base_database_terms(game_data=game_data, registry=registry)
+    written_count += _write_system_terms(game_data=game_data, registry=registry)
     return written_count
 
 
@@ -35,7 +38,7 @@ def _write_map_display_names(*, game_data: GameData, translations: dict[str, str
         display_name = map_object.get("displayName")
         if not isinstance(display_name, str):
             continue
-        if not is_translatable_name_context_source(display_name):
+        if not is_translatable_terminology_source(display_name):
             continue
         translated_text = clean_translations.get(display_name)
         if translated_text is None:
@@ -135,12 +138,97 @@ def _write_speaker_names_to_commands(
         source_text = parameters[4]
         if not isinstance(source_text, str):
             continue
-        if not is_translatable_name_context_source(source_text):
+        if not is_translatable_terminology_source(source_text):
             continue
-        translated_text = translations.get(source_text)
+        translated_text = translations.get(source_text.strip())
         if translated_text is None:
             continue
         parameters[4] = translated_text
+        written_count += 1
+    return written_count
+
+
+def _write_base_database_terms(*, game_data: GameData, registry: TerminologyRegistry) -> int:
+    """写回标准数据库条目名称。"""
+    written_count = 0
+    category_map = registry.as_category_map()
+    for file_name, category in BASE_NAME_CATEGORIES.items():
+        written_count += _write_base_item_field(
+            game_data=game_data,
+            file_name=file_name,
+            key="name",
+            translations=_filled_translations(category_map[category]),
+        )
+    written_count += _write_base_item_field(
+        game_data=game_data,
+        file_name="Actors.json",
+        key="nickname",
+        translations=_filled_translations(registry.actor_nicknames),
+    )
+    return written_count
+
+
+def _write_base_item_field(
+    *,
+    game_data: GameData,
+    file_name: str,
+    key: str,
+    translations: dict[str, str],
+) -> int:
+    """按原字段值写回基础数据库条目。"""
+    if not translations:
+        return 0
+    if file_name not in game_data.writable_data:
+        return 0
+    data = ensure_json_array(game_data.writable_data[file_name], file_name)
+    written_count = 0
+    for index, raw_item in enumerate(data):
+        if raw_item is None:
+            continue
+        item = ensure_json_object(raw_item, f"{file_name}[{index}]")
+        source_text = item.get(key)
+        if not isinstance(source_text, str):
+            continue
+        translated_text = translations.get(source_text.strip())
+        if translated_text is None:
+            continue
+        item[key] = translated_text
+        written_count += 1
+    return written_count
+
+
+def _write_system_terms(*, game_data: GameData, registry: TerminologyRegistry) -> int:
+    """写回 `System.json` 的系统类型术语。"""
+    category_map = registry.as_category_map()
+    system_data = ensure_json_object(game_data.writable_data[SYSTEM_FILE_NAME], SYSTEM_FILE_NAME)
+    written_count = 0
+    for field_name, category in SYSTEM_TERM_CATEGORIES.items():
+        written_count += _write_system_array(
+            system_data=system_data,
+            field_name=field_name,
+            translations=_filled_translations(category_map[category]),
+        )
+    return written_count
+
+
+def _write_system_array(
+    *,
+    system_data: JsonObject,
+    field_name: str,
+    translations: dict[str, str],
+) -> int:
+    """按原数组值写回系统类型。"""
+    if not translations:
+        return 0
+    values = ensure_json_array(system_data[field_name], f"{SYSTEM_FILE_NAME}.{field_name}")
+    written_count = 0
+    for index, value in enumerate(values):
+        if not isinstance(value, str):
+            continue
+        translated_text = translations.get(value.strip())
+        if translated_text is None:
+            continue
+        values[index] = translated_text
         written_count += 1
     return written_count
 
@@ -150,7 +238,7 @@ def _filled_translations(translations: dict[str, str]) -> dict[str, str]:
     return {
         source_text.strip(): translated_text.strip()
         for source_text, translated_text in translations.items()
-        if is_translatable_name_context_source(source_text) and translated_text.strip()
+        if is_translatable_terminology_source(source_text) and translated_text.strip()
     }
 
 
@@ -173,4 +261,4 @@ def _ensure_command_parameters(command: JsonObject) -> JsonArray:
     return parameters
 
 
-__all__: list[str] = ["apply_name_context_translations"]
+__all__: list[str] = ["apply_terminology_translations"]

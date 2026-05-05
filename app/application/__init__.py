@@ -3,10 +3,10 @@
 from .handler import (
     EventCommandJsonExportSummary,
     EventCommandRuleImportSummary,
-    NameContextImportSummary,
-    NameContextWriteSummary,
     PluginJsonExportSummary,
     PluginRuleImportSummary,
+    TerminologyImportSummary,
+    TerminologyWriteSummary,
     TextTranslationSummary,
     TranslationHandler,
 )
@@ -14,10 +14,10 @@ from .handler import (
 __all__: list[str] = [
     "EventCommandJsonExportSummary",
     "EventCommandRuleImportSummary",
-    "NameContextImportSummary",
-    "NameContextWriteSummary",
     "PluginJsonExportSummary",
     "PluginRuleImportSummary",
+    "TerminologyImportSummary",
+    "TerminologyWriteSummary",
     "TextTranslationSummary",
     "TranslationHandler",
 ]

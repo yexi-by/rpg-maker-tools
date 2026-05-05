@@ -10,7 +10,7 @@ from collections.abc import Iterator
 from app.rmmz.schema import TranslationData, TranslationItem
 from app.llm.schemas import ChatMessage
 from app.rmmz.text_rules import TextRules
-from app.name_context.prompt import NamePromptIndex, format_name_prompt_section
+from app.terminology.prompt import TerminologyPromptIndex, format_terminology_prompt_section
 from app.translation.batch import TranslationBatch
 
 SCENE_PROMPT_TEMPLATE = "# 场景\n\n地图：{display_name}"
@@ -53,7 +53,7 @@ def iter_translation_context_batches(
     max_command_items: int,
     system_prompt: str,
     text_rules: TextRules,
-    name_prompt_index: NamePromptIndex | None = None,
+    terminology_prompt_index: TerminologyPromptIndex | None = None,
 ) -> Iterator[TranslationBatch]:
     """为单文件翻译数据生成上下文切批。"""
     if token_size <= 0:
@@ -91,7 +91,7 @@ def iter_translation_context_batches(
                 current_items=current_items,
                 display_name=display_name,
                 main_bodies=main_bodies,
-                name_prompt_index=name_prompt_index,
+                terminology_prompt_index=terminology_prompt_index,
             )
             current_length = 0
             current_items = []
@@ -123,7 +123,7 @@ def iter_translation_context_batches(
             current_items=current_items,
             display_name=display_name,
             main_bodies=main_bodies,
-            name_prompt_index=name_prompt_index,
+            terminology_prompt_index=terminology_prompt_index,
         )
         current_length = 0
         current_items = []
@@ -135,7 +135,7 @@ def iter_translation_context_batches(
             current_items=current_items,
             display_name=display_name,
             main_bodies=main_bodies,
-            name_prompt_index=name_prompt_index,
+            terminology_prompt_index=terminology_prompt_index,
         )
 
 
@@ -145,20 +145,20 @@ def _build_translation_batch(
     current_items: list[TranslationItem],
     display_name: str,
     main_bodies: list[str],
-    name_prompt_index: NamePromptIndex | None,
+    terminology_prompt_index: TerminologyPromptIndex | None,
 ) -> TranslationBatch:
     """组装单个翻译批次。"""
     user_prompt_sections = [
         SCENE_PROMPT_TEMPLATE.format(display_name=display_name),
     ]
-    if name_prompt_index is not None:
-        name_entries = name_prompt_index.select_for_batch(
+    if terminology_prompt_index is not None:
+        terminology_entries = terminology_prompt_index.select_for_batch(
             display_name=display_name,
             items=current_items,
         )
-        name_section = format_name_prompt_section(name_entries)
-        if name_section:
-            user_prompt_sections.append(name_section)
+        terminology_section = format_terminology_prompt_section(terminology_entries)
+        if terminology_section:
+            user_prompt_sections.append(terminology_section)
     user_prompt_sections.append(
         BODY_PROMPT_TEMPLATE.format(unit_text="".join(main_bodies))
     )

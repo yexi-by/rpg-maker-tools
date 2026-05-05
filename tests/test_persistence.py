@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from app.name_context.schemas import NameContextRegistry
+from app.terminology import TerminologyRegistry
 from app.persistence import GameRegistry
 from app.rmmz.schema import (
     EventCommandParameterFilter,
@@ -99,12 +99,16 @@ async def test_registry_and_target_session_use_injected_directory(minimal_game_d
         await session.replace_event_command_text_rules([event_rule])
         assert await session.read_event_command_text_rules() == [event_rule]
 
-        name_registry = NameContextRegistry(
+        terminology_registry = TerminologyRegistry(
             speaker_names={"アリス": "爱丽丝"},
             map_display_names={"始まりの町": "起始之镇"},
+            skill_names={"火の術": "火术"},
         )
-        await session.replace_name_context_registry(name_registry)
-        assert await session.read_name_context_registry() == name_registry
+        await session.replace_terminology_registry(terminology_registry)
+        assert await session.read_terminology_registry() == terminology_registry
+        empty_terminology_registry = TerminologyRegistry()
+        await session.replace_terminology_registry(empty_terminology_registry)
+        assert await session.read_terminology_registry() == empty_terminology_registry
 
         placeholder_rule = PlaceholderRuleRecord(
             pattern_text=r"\\F\[[^\]]+\]",

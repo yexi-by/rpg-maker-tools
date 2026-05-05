@@ -56,7 +56,7 @@ class NoteTagRuleImportSummary:
 
 
 @dataclass(slots=True)
-class NameContextImportSummary:
+class TerminologyImportSummary:
     """外部术语表导入任务摘要。"""
 
     imported_entry_count: int
@@ -89,7 +89,7 @@ class TextTranslationSummary:
 
 
 @dataclass(slots=True)
-class NameContextWriteSummary:
+class TerminologyWriteSummary:
     """数据库术语表写回任务摘要。"""
 
     written_count: int
@@ -102,7 +102,7 @@ class WriteBackSummary:
 
     data_item_count: int
     plugin_item_count: int
-    name_written_count: int
+    terminology_written_count: int
     target_font_name: str | None
     source_font_count: int
     replaced_font_reference_count: int
@@ -122,12 +122,12 @@ __all__: list[str] = [
     "EventCommandJsonExportSummary",
     "EventCommandRuleImportSummary",
     "FontRestoreSummary",
-    "NameContextImportSummary",
-    "NameContextWriteSummary",
     "NoteTagJsonExportSummary",
     "NoteTagRuleImportSummary",
     "PluginJsonExportSummary",
     "PluginRuleImportSummary",
+    "TerminologyImportSummary",
+    "TerminologyWriteSummary",
     "TextTranslationSummary",
     "WriteBackSummary",
 ]

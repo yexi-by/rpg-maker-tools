@@ -99,7 +99,7 @@ flowchart TD
     D --> E["prepare-agent-workspace 生成工作区"]
 
     E --> F["主 Agent 派发四类子代理"]
-    F --> G["name-context<br/>只写术语表"]
+    F --> G["terminology<br/>只写术语表"]
     F --> H["plugin-rules<br/>只写插件规则"]
     F --> I["event-command-rules<br/>只写事件指令规则"]
     F --> J["note-tag-rules<br/>只写 Note 标签规则"]

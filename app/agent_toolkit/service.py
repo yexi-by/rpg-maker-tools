@@ -73,8 +73,8 @@ from app.event_command_text import (
     parse_event_command_rule_import_text,
     resolve_event_command_codes,
 )
-from app.name_context import NameContextRegistry, export_name_context_artifacts, load_name_context_registry
-from app.name_context.files import write_registry_json
+from app.terminology import TerminologyCategory, TerminologyExtraction, TerminologyRegistry, export_terminology_artifacts, load_terminology_registry
+from app.terminology.files import write_terms_json
 from app.note_tag_text import (
     NoteTagTextExtraction,
     build_note_tag_rule_records_from_import,
@@ -508,7 +508,7 @@ class AgentToolkitService:
             event_rules = await session.read_event_command_text_rules()
             note_tag_rules = await session.read_note_tag_text_rules()
             japanese_residual_rules = await session.read_japanese_residual_rules()
-            name_registry = await session.read_name_context_registry()
+            terminology_registry = await session.read_terminology_registry()
             latest_run = await session.read_latest_translation_run()
             translation_data_map = await self._extract_active_translation_data_map(
                 session=session,
@@ -573,15 +573,13 @@ class AgentToolkitService:
             if item.model_response.strip()
         )
         llm_failure_counts = Counter(failure.category for failure in llm_failures)
-        filled_name_count = 0
-        total_name_count = 0
-        if name_registry is not None:
-            total_name_count = len(name_registry.speaker_names) + len(name_registry.map_display_names)
-            filled_name_count = sum(
-                1
-                for value in [*name_registry.speaker_names.values(), *name_registry.map_display_names.values()]
-                if value.strip()
-            )
+        filled_terminology_count = 0
+        total_terminology_count = 0
+        empty_terminology_count = 0
+        if terminology_registry is not None:
+            total_terminology_count = terminology_registry.total_entry_count()
+            filled_terminology_count = terminology_registry.filled_entry_count()
+            empty_terminology_count = total_terminology_count - filled_terminology_count
 
         if llm_failures and pending_paths:
             errors.append(issue("llm_failures", f"最新翻译运行存在 {len(llm_failures)} 条模型运行故障"))
@@ -601,6 +599,10 @@ class AgentToolkitService:
             errors.append(issue("overwide_line", f"发现 {len(overwide_line_items)} 行译文超过当前长文本宽度上限"))
         if write_back_protocol_items:
             errors.append(issue("write_back_protocol", f"发现 {len(write_back_protocol_items)} 条译文写回后会破坏游戏或插件解析协议"))
+        if terminology_registry is None:
+            errors.append(issue("terminology_missing", "当前游戏尚未导入术语表"))
+        elif empty_terminology_count:
+            errors.append(issue("terminology_empty_translation", f"术语表还有 {empty_terminology_count} 个词条没有填写译名"))
         if stale_paths:
             warnings.append(issue("stale_cache", f"发现 {len(stale_paths)} 条不在当前提取范围内的已保存译文"))
         if stale_plugin_rule_count:
@@ -622,8 +624,9 @@ class AgentToolkitService:
                 "note_tag_rule_count": sum(len(rule.tag_names) for rule in note_tag_rules),
                 "japanese_residual_rule_count": len(japanese_residual_rules),
                 "stale_japanese_residual_rule_count": len(stale_japanese_residual_rule_paths),
-                "name_context_total_count": total_name_count,
-                "name_context_filled_count": filled_name_count,
+                "terminology_total_count": total_terminology_count,
+                "terminology_filled_count": filled_terminology_count,
+                "terminology_empty_count": empty_terminology_count,
                 "latest_run_id": latest_run.run_id if latest_run is not None else "",
                 "latest_run_status": latest_run.status if latest_run is not None else "",
                 "llm_failure_count": len(llm_failures),
@@ -1440,7 +1443,7 @@ class AgentToolkitService:
         setting = load_setting(self.setting_path)
         async with await self.game_registry.open_game(game_title) as session:
             game_data = await self._load_game_data(session)
-            name_registry = await session.read_name_context_registry()
+            terminology_registry = await session.read_terminology_registry()
             plugin_rules, stale_plugin_rule_count = await self._read_fresh_plugin_text_rules(
                 session=session,
                 game_data=game_data,
@@ -1455,14 +1458,14 @@ class AgentToolkitService:
                 game_data=game_data,
                 text_rules=text_rules,
             )
-        name_summary = await export_name_context_artifacts(game_data=game_data, output_dir=target_dir / "name-context")
-        if name_registry is not None:
-            exported_registry = await load_name_context_registry(registry_path=name_summary.registry_path)
-            merged_registry = _merge_name_context_registry(
+        terminology_summary = await export_terminology_artifacts(game_data=game_data, output_dir=target_dir / "terminology")
+        if terminology_registry is not None:
+            exported_registry = await load_terminology_registry(terms_path=terminology_summary.terms_path)
+            merged_registry = _merge_terminology_registry(
                 exported_registry=exported_registry,
-                stored_registry=name_registry,
+                stored_registry=terminology_registry,
             )
-            await write_registry_json(name_summary.registry_path, merged_registry)
+            await write_terms_json(terminology_summary.terms_path, merged_registry)
         plugins_path = target_dir / "plugins.json"
         await export_plugins_json_file(game_data=game_data, output_path=plugins_path)
         plugin_rules_path = target_dir / "plugin-rules.json"
@@ -1504,8 +1507,10 @@ class AgentToolkitService:
         )
         await _write_json_object(placeholder_rules_path, placeholder_rule_payload)
         generated_summary: JsonObject = {
-            "speaker_entry_count": name_summary.speaker_entry_count,
-            "map_entry_count": name_summary.map_entry_count,
+            "speaker_entry_count": terminology_summary.speaker_entry_count,
+            "map_entry_count": terminology_summary.map_entry_count,
+            "terminology_entry_count": terminology_summary.entry_count,
+            "terminology_database_entry_count": terminology_summary.database_entry_count,
             "plugin_count": len(game_data.plugins_js),
             "plugin_rule_count": sum(len(rule.path_templates) for rule in plugin_rules),
             "stale_plugin_rule_count": stale_plugin_rule_count,
@@ -1517,8 +1522,8 @@ class AgentToolkitService:
             "placeholder_rule_draft_count": len(placeholder_rule_drafts),
         }
         manifest_files: JsonArray = [
-            str(name_summary.registry_path),
-            str(name_summary.sample_dir),
+            str(terminology_summary.terms_path),
+            str(terminology_summary.contexts_dir),
             str(plugins_path),
             str(plugin_rules_path),
             str(note_tag_candidates_path),
@@ -1547,21 +1552,39 @@ class AgentToolkitService:
         errors: list[AgentIssue] = []
         warnings: list[AgentIssue] = []
         details: JsonObject = {}
-        name_path = workspace / "name-context" / "name_registry.json"
+        terminology_path = workspace / "terminology" / "terms.json"
         plugin_rules_path = workspace / "plugin-rules.json"
         note_tag_rules_path = workspace / "note-tag-rules.json"
         event_rules_path = workspace / "event-command-rules.json"
         placeholder_rules_path = workspace / "placeholder-rules.json"
-        if name_path.exists():
-            registry = await load_name_context_registry(registry_path=name_path)
-            name_issues = _validate_name_registry(registry.speaker_names, registry.map_display_names)
-            warnings.extend(name_issues)
-            details["name_context"] = {
-                "speaker_count": len(registry.speaker_names),
-                "map_count": len(registry.map_display_names),
-            }
+        if terminology_path.exists():
+            registry: TerminologyRegistry | None = None
+            try:
+                registry = await load_terminology_registry(terms_path=terminology_path)
+                async with await self.game_registry.open_game(game_title) as session:
+                    game_data = await self._load_game_data(session)
+                expected_registry, _speaker_contexts, _database_contexts = TerminologyExtraction(
+                    game_data=game_data,
+                ).extract_registry_and_contexts()
+                _validate_terminology_registry_shape(
+                    imported_registry=registry,
+                    expected_registry=expected_registry,
+                    errors=errors,
+                )
+            except Exception as error:
+                errors.append(issue("terminology_validate_failed", f"术语表结构校验失败: {type(error).__name__}: {error}"))
+            if registry is not None:
+                terminology_issues = _validate_terminology_registry(registry)
+                errors.extend(issue_item for issue_item in terminology_issues if issue_item.code == "terminology_empty_translation")
+                warnings.extend(issue_item for issue_item in terminology_issues if issue_item.code != "terminology_empty_translation")
+                details["terminology"] = {
+                    "entry_count": registry.total_entry_count(),
+                    "filled_count": registry.filled_entry_count(),
+                    "speaker_count": len(registry.speaker_names),
+                    "map_count": len(registry.map_display_names),
+                }
         else:
-            warnings.append(issue("name_context_missing", "工作区缺少 name-context/name_registry.json"))
+            errors.append(issue("terminology_missing", "工作区缺少 terminology/terms.json"))
         if plugin_rules_path.exists():
             async with aiofiles.open(plugin_rules_path, "r", encoding="utf-8") as file:
                 plugin_report = await self.validate_plugin_rules(game_title=game_title, rules_text=await file.read())
@@ -1707,7 +1730,7 @@ class AgentToolkitService:
                 )
                 event_rules = await session.read_event_command_text_rules()
                 note_tag_rules = await session.read_note_tag_text_rules()
-                name_registry = await session.read_name_context_registry()
+                terminology_registry = await session.read_terminology_registry()
                 placeholder_rules = await session.read_placeholder_rules()
                 summary["game_registered"] = True
                 summary["plugin_rule_count"] = sum(len(rule.path_templates) for rule in plugin_rules)
@@ -1715,7 +1738,7 @@ class AgentToolkitService:
                 summary["event_command_rule_count"] = sum(len(rule.path_templates) for rule in event_rules)
                 summary["note_tag_rule_count"] = sum(len(rule.tag_names) for rule in note_tag_rules)
                 summary["placeholder_rule_count"] = len(placeholder_rules)
-                summary["name_context_imported"] = name_registry is not None
+                summary["terminology_imported"] = terminology_registry is not None
                 if not plugin_rules and stale_plugin_rule_count == 0:
                     warnings.append(issue("plugin_rules", "当前游戏尚未导入插件文本规则"))
                 if stale_plugin_rule_count:
@@ -1724,8 +1747,8 @@ class AgentToolkitService:
                     warnings.append(issue("event_command_rules", "当前游戏尚未导入事件指令文本规则"))
                 if not note_tag_rules:
                     warnings.append(issue("note_tag_rules", "当前游戏尚未导入 Note 标签文本规则"))
-                if name_registry is None:
-                    warnings.append(issue("name_context", "当前游戏尚未导入术语表"))
+                if terminology_registry is None:
+                    warnings.append(issue("terminology", "当前游戏尚未导入术语表"))
                 if not placeholder_rules:
                     warnings.append(issue("placeholder_rules", "当前游戏尚未导入自定义占位符规则"))
                 font_path = setting.write_back.replacement_font_path
@@ -1998,22 +2021,21 @@ async def _write_json_object(path: Path, payload: JsonObject) -> None:
         _ = await file.write(f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n")
 
 
-def _merge_name_context_registry(
+def _merge_terminology_registry(
     *,
-    exported_registry: NameContextRegistry,
-    stored_registry: NameContextRegistry,
-) -> NameContextRegistry:
+    exported_registry: TerminologyRegistry,
+    stored_registry: TerminologyRegistry,
+) -> TerminologyRegistry:
     """把数据库已有译名回填到当前游戏重新导出的术语表键集合。"""
-    return NameContextRegistry(
-        speaker_names={
-            source_text: stored_registry.speaker_names.get(source_text, translated_text)
-            for source_text, translated_text in exported_registry.speaker_names.items()
-        },
-        map_display_names={
-            source_text: stored_registry.map_display_names.get(source_text, translated_text)
-            for source_text, translated_text in exported_registry.map_display_names.items()
-        },
-    )
+    stored_map = stored_registry.as_category_map()
+    merged_map: dict[TerminologyCategory, dict[str, str]] = {
+        category: {
+            source_text: stored_map[category].get(source_text, translated_text)
+            for source_text, translated_text in exported_entries.items()
+        }
+        for category, exported_entries in exported_registry.as_category_map().items()
+    }
+    return TerminologyRegistry.from_category_map(merged_map)
 
 
 def _plugin_rule_records_to_import_json(records: Sequence[PluginTextRuleRecord]) -> JsonObject:
@@ -2375,23 +2397,45 @@ def _collect_unprotected_control_warning_samples(
     return samples
 
 
-def _validate_name_registry(
-    speaker_names: dict[str, str],
-    map_display_names: dict[str, str],
-) -> list[AgentIssue]:
+def _validate_terminology_registry(registry: TerminologyRegistry) -> list[AgentIssue]:
     """检查术语表填写质量。"""
     warnings: list[AgentIssue] = []
-    empty_count = sum(1 for value in [*speaker_names.values(), *map_display_names.values()] if not value.strip())
+    category_map = registry.as_category_map()
+    empty_count = registry.total_entry_count() - registry.filled_entry_count()
     if empty_count:
-        warnings.append(issue("name_context_empty_translation", f"术语表存在 {empty_count} 个空译名"))
-    translated_counter = Counter(value.strip() for value in speaker_names.values() if value.strip())
+        warnings.append(issue("terminology_empty_translation", f"术语表存在 {empty_count} 个空译名"))
+    translated_counter = Counter(
+        value.strip()
+        for entries in category_map.values()
+        for value in entries.values()
+        if value.strip()
+    )
     duplicate_count = sum(1 for count in translated_counter.values() if count > 1)
     if duplicate_count:
-        warnings.append(issue("name_context_duplicate_translation", f"术语表存在 {duplicate_count} 组重复译名，需要确认是否合理"))
-    variant_mismatch_count = _count_name_variant_mismatches(speaker_names)
+        warnings.append(issue("terminology_duplicate_translation", f"术语表存在 {duplicate_count} 组重复译名，需要确认是否合理"))
+    variant_mismatch_count = _count_name_variant_mismatches(registry.speaker_names)
     if variant_mismatch_count:
-        warnings.append(issue("name_context_variant_mismatch", f"名字框变体存在 {variant_mismatch_count} 处译名不一致风险"))
+        warnings.append(issue("terminology_variant_mismatch", f"名字框变体存在 {variant_mismatch_count} 处译名不一致风险"))
     return warnings
+
+
+def _validate_terminology_registry_shape(
+    *,
+    imported_registry: TerminologyRegistry,
+    expected_registry: TerminologyRegistry,
+    errors: list[AgentIssue],
+) -> None:
+    """检查工作区术语表 key 集合是否匹配当前游戏。"""
+    imported_map = imported_registry.as_category_map()
+    expected_map = expected_registry.as_category_map()
+    for category, expected_entries in expected_map.items():
+        imported_entries = imported_map[category]
+        missing_count = len(set(expected_entries) - set(imported_entries))
+        extra_count = len(set(imported_entries) - set(expected_entries))
+        if missing_count:
+            errors.append(issue("terminology_missing_terms", f"{category} 缺少 {missing_count} 个当前游戏术语"))
+        if extra_count:
+            errors.append(issue("terminology_extra_terms", f"{category} 多出 {extra_count} 个当前游戏不存在的术语"))
 
 
 def _first_original_line_samples(items: Iterable[TranslationItem], limit: int = 5) -> JsonArray:

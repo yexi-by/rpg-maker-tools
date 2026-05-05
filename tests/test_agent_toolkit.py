@@ -9,7 +9,6 @@ import pytest
 from app.agent_toolkit import AgentToolkitService
 from app.config import SettingOverrides
 from app.llm import LLMHandler
-from app.name_context.schemas import NameContextRegistry
 from app.persistence import GameRegistry
 from app.plugin_text import build_plugin_hash
 from app.rmmz.json_types import JsonObject, JsonValue, coerce_json_value, ensure_json_array, ensure_json_object
@@ -23,6 +22,7 @@ from app.rmmz.schema import (
     TranslationErrorItem,
     TranslationItem,
 )
+from app.terminology import TerminologyRegistry
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_SETTING_PATH = ROOT / "setting.example.toml"
@@ -261,16 +261,21 @@ async def test_prepare_agent_workspace_prefills_imported_database_rules(
         output_dir=seed_workspace,
         command_codes=None,
     )
-    exported_registry = load_json_object(seed_workspace / "name-context" / "name_registry.json")
-    speaker_names = ensure_json_object(coerce_json_value(exported_registry["speaker_names"]), "speaker_names")
-    map_display_names = ensure_json_object(coerce_json_value(exported_registry["map_display_names"]), "map_display_names")
-    filled_registry = NameContextRegistry(
-        speaker_names={source_text: f"{source_text}译" for source_text in speaker_names},
-        map_display_names={source_text: f"{source_text}译" for source_text in map_display_names},
+    exported_registry = TerminologyRegistry.model_validate(
+        load_json_object(seed_workspace / "terminology" / "terms.json")
+    )
+    filled_registry = TerminologyRegistry.from_category_map(
+        {
+            category: {
+                source_text: f"{source_text}译"
+                for source_text in entries
+            }
+            for category, entries in exported_registry.as_category_map().items()
+        }
     )
     game_data = await load_game_data(minimal_game_dir)
     async with await registry.open_game("テストゲーム") as session:
-        await session.replace_name_context_registry(filled_registry)
+        await session.replace_terminology_registry(filled_registry)
         await session.replace_plugin_text_rules(
             [
                 PluginTextRuleRecord(
@@ -309,7 +314,9 @@ async def test_prepare_agent_workspace_prefills_imported_database_rules(
     )
     validation_report = await service.validate_agent_workspace(game_title="テストゲーム", workspace=workspace)
 
-    prepared_registry = load_json_object(workspace / "name-context" / "name_registry.json")
+    prepared_registry = TerminologyRegistry.model_validate(
+        load_json_object(workspace / "terminology" / "terms.json")
+    )
     plugin_rules = load_json_object(workspace / "plugin-rules.json")
     event_rules = load_json_object(workspace / "event-command-rules.json")
     note_rules = load_json_object(workspace / "note-tag-rules.json")
@@ -320,8 +327,7 @@ async def test_prepare_agent_workspace_prefills_imported_database_rules(
     assert report.summary["event_command_rule_count"] == 1
     assert report.summary["note_tag_rule_count"] == 1
     assert report.summary["placeholder_rule_count"] == 1
-    assert prepared_registry["speaker_names"] == filled_registry.speaker_names
-    assert prepared_registry["map_display_names"] == filled_registry.map_display_names
+    assert prepared_registry == filled_registry
     assert plugin_rules == {"TestPlugin": ["$['parameters']['Message']"]}
     assert event_rules == {
         "357": [
@@ -336,7 +342,7 @@ async def test_prepare_agent_workspace_prefills_imported_database_rules(
     assert validation_report.status == "ok"
     assert "plugin_rules_missing" not in warning_codes
     assert "event_command_rules_missing" not in warning_codes
-    assert "name_context_empty_translation" not in warning_codes
+    assert "terminology_empty_translation" not in warning_codes
 
 
 @pytest.mark.asyncio
@@ -360,6 +366,30 @@ async def test_validate_agent_workspace_blocks_missing_note_tag_rules(
 
     assert report.status == "error"
     assert "note_tag_rules_missing" in {error.code for error in report.errors}
+
+
+@pytest.mark.asyncio
+async def test_validate_agent_workspace_reports_invalid_terminology_file(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """工作区验收会把坏术语表报告成结构化错误。"""
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    workspace = tmp_path / "workspace"
+
+    _ = await service.prepare_agent_workspace(
+        game_title="テストゲーム",
+        output_dir=workspace,
+        command_codes=None,
+    )
+    _ = (workspace / "terminology" / "terms.json").write_text("{}\n", encoding="utf-8")
+
+    report = await service.validate_agent_workspace(game_title="テストゲーム", workspace=workspace)
+
+    assert report.status == "error"
+    assert "terminology_validate_failed" in {error.code for error in report.errors}
 
 
 @pytest.mark.asyncio

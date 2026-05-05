@@ -226,13 +226,13 @@ def test_rule_commands_accept_input_files_and_json_output() -> None:
             "--json",
         ]
     )
-    name_import_args = parser.parse_args(
+    terminology_import_args = parser.parse_args(
         [
-            "import-name-context",
+            "import-terminology",
             "--game",
             "demo",
             "--input",
-            "name-context/name_registry.json",
+            "terminology/terms.json",
             "--json",
         ]
     )
@@ -256,8 +256,8 @@ def test_rule_commands_accept_input_files_and_json_output() -> None:
     assert namespace_optional_str(residual_args, "rules") is None
     assert namespace_optional_str(residual_import_args, "input") == "japanese-residual-rules.json"
     assert getattr(residual_import_args, "json_output") is True
-    assert namespace_optional_str(name_import_args, "input") == "name-context/name_registry.json"
-    assert getattr(name_import_args, "json_output") is True
+    assert namespace_optional_str(terminology_import_args, "input") == "terminology/terms.json"
+    assert getattr(terminology_import_args, "json_output") is True
 
 
 def test_translate_quality_errors_do_not_fail_process() -> None:

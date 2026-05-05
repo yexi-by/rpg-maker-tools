@@ -11,7 +11,7 @@ from typing import Self
 
 import aiosqlite
 
-from app.name_context.schemas import NameContextRegistry
+from app.terminology.schemas import TERMINOLOGY_CATEGORIES, TerminologyCategory, TerminologyRegistry
 from app.rmmz.schema import (
     EventCommandParameterFilter,
     EventCommandTextRuleRecord,
@@ -48,23 +48,24 @@ from .sql import (
     CREATE_JAPANESE_RESIDUAL_RULES_TABLE,
     CREATE_LLM_FAILURES_TABLE,
     CREATE_METADATA_TABLE,
-    CREATE_NAME_CONTEXT_TERMS_TABLE,
     CREATE_NOTE_TAG_TEXT_RULES_TABLE,
     CREATE_PLACEHOLDER_RULES_TABLE,
     CREATE_PLUGIN_TEXT_RULES_TABLE,
     CREATE_TRANSLATION_QUALITY_ERRORS_TABLE,
     CREATE_TRANSLATION_RUNS_TABLE,
     CREATE_TRANSLATION_TABLE,
+    CREATE_TERMINOLOGY_IMPORT_STATE_TABLE,
+    CREATE_TERMINOLOGY_TERMS_TABLE,
     DELETE_ALL_EVENT_COMMAND_TEXT_RULE_FILTERS,
     DELETE_ALL_EVENT_COMMAND_TEXT_RULE_GROUPS,
     DELETE_ALL_EVENT_COMMAND_TEXT_RULE_PATHS,
     DELETE_ALL_FONT_REPLACEMENT_RECORDS,
     DELETE_ALL_JAPANESE_RESIDUAL_RULES,
-    DELETE_ALL_NAME_CONTEXT_TERMS,
     DELETE_ALL_NOTE_TAG_TEXT_RULES,
     DELETE_ALL_PLACEHOLDER_RULES,
     DELETE_ALL_PLUGIN_TEXT_RULES,
     DELETE_ALL_TRANSLATION_QUALITY_ERRORS,
+    DELETE_ALL_TERMINOLOGY_TERMS,
     DELETE_TRANSLATION_ITEM_BY_PATH,
     DELETE_TRANSLATION_ITEMS_BY_PREFIX,
     INSERT_EVENT_COMMAND_TEXT_RULE_FILTER,
@@ -73,13 +74,14 @@ from .sql import (
     INSERT_FONT_REPLACEMENT_RECORD,
     INSERT_JAPANESE_RESIDUAL_RULE,
     INSERT_LLM_FAILURE,
-    INSERT_NAME_CONTEXT_TERM,
     INSERT_NOTE_TAG_TEXT_RULE,
     INSERT_PLACEHOLDER_RULE,
     INSERT_PLUGIN_TEXT_RULE,
     INSERT_TRANSLATION_QUALITY_ERROR,
     INSERT_TRANSLATION,
     METADATA_KEY,
+    INSERT_TERMINOLOGY_TERM,
+    SELECT_TERMINOLOGY_IMPORT_STATE,
     SELECT_LATEST_TRANSLATION_RUN,
     SELECT_FONT_REPLACEMENT_RECORDS,
     SELECT_JAPANESE_RESIDUAL_RULES,
@@ -88,7 +90,6 @@ from .sql import (
     SELECT_EVENT_COMMAND_TEXT_RULE_GROUPS,
     SELECT_EVENT_COMMAND_TEXT_RULE_PATHS,
     SELECT_METADATA,
-    SELECT_NAME_CONTEXT_TERMS,
     SELECT_NOTE_TAG_TEXT_RULES,
     SELECT_PLACEHOLDER_RULES,
     SELECT_PLUGIN_TEXT_RULES,
@@ -96,8 +97,11 @@ from .sql import (
     SELECT_TRANSLATION_RUN,
     SELECT_TRANSLATED_ITEMS,
     SELECT_TRANSLATION_PATHS,
+    SELECT_TERMINOLOGY_TERMS,
+    TERMINOLOGY_IMPORT_STATE_KEY,
     TRANSLATION_QUALITY_ERRORS_TABLE_NAME,
     UPSERT_METADATA,
+    UPSERT_TERMINOLOGY_IMPORT_STATE,
     UPSERT_TRANSLATION_RUN,
 )
 
@@ -148,7 +152,8 @@ async def create_static_tables(connection: aiosqlite.Connection) -> None:
     _ = await connection.execute(CREATE_EVENT_COMMAND_TEXT_RULE_GROUPS_TABLE)
     _ = await connection.execute(CREATE_EVENT_COMMAND_TEXT_RULE_FILTERS_TABLE)
     _ = await connection.execute(CREATE_EVENT_COMMAND_TEXT_RULE_PATHS_TABLE)
-    _ = await connection.execute(CREATE_NAME_CONTEXT_TERMS_TABLE)
+    _ = await connection.execute(CREATE_TERMINOLOGY_TERMS_TABLE)
+    _ = await connection.execute(CREATE_TERMINOLOGY_IMPORT_STATE_TABLE)
     _ = await connection.execute(CREATE_PLACEHOLDER_RULES_TABLE)
     _ = await connection.execute(CREATE_JAPANESE_RESIDUAL_RULES_TABLE)
     _ = await connection.execute(CREATE_FONT_REPLACEMENT_RECORDS_TABLE)
@@ -534,47 +539,48 @@ class TargetGameSession:
                 )
         await self.connection.commit()
 
-    async def replace_name_context_registry(
+    async def replace_terminology_registry(
         self,
-        registry: NameContextRegistry,
+        registry: TerminologyRegistry,
     ) -> None:
         """用一次外部导入结果替换当前游戏的全部术语表条目。"""
-        _ = await self.connection.execute(DELETE_ALL_NAME_CONTEXT_TERMS)
-        for source_text, translated_text in registry.speaker_names.items():
-            _ = await self.connection.execute(
-                INSERT_NAME_CONTEXT_TERM,
-                ("speaker_name", source_text, translated_text),
-            )
-        for source_text, translated_text in registry.map_display_names.items():
-            _ = await self.connection.execute(
-                INSERT_NAME_CONTEXT_TERM,
-                ("map_display_name", source_text, translated_text),
-            )
+        _ = await self.connection.execute(DELETE_ALL_TERMINOLOGY_TERMS)
+        _ = await self.connection.execute(
+            UPSERT_TERMINOLOGY_IMPORT_STATE,
+            (TERMINOLOGY_IMPORT_STATE_KEY, 1),
+        )
+        for category, entries in registry.as_category_map().items():
+            for source_text, translated_text in entries.items():
+                _ = await self.connection.execute(
+                    INSERT_TERMINOLOGY_TERM,
+                    (category, source_text, translated_text),
+                )
         await self.connection.commit()
 
-    async def read_name_context_registry(self) -> NameContextRegistry | None:
+    async def read_terminology_registry(self) -> TerminologyRegistry | None:
         """从数据库读取当前游戏已导入的术语表。"""
-        async with self.connection.execute(SELECT_NAME_CONTEXT_TERMS) as cursor:
+        async with self.connection.execute(SELECT_TERMINOLOGY_TERMS) as cursor:
             rows = await cursor.fetchall()
         if not rows:
-            return None
+            async with self.connection.execute(
+                SELECT_TERMINOLOGY_IMPORT_STATE,
+                (TERMINOLOGY_IMPORT_STATE_KEY,),
+            ) as cursor:
+                state_row = await cursor.fetchone()
+            if state_row is None:
+                return None
+            return TerminologyRegistry()
 
-        speaker_names: dict[str, str] = {}
-        map_display_names: dict[str, str] = {}
+        category_map: dict[TerminologyCategory, dict[str, str]] = {
+            category: {}
+            for category in TERMINOLOGY_CATEGORIES
+        }
         for row in rows:
-            kind = row_str(row, "kind", self.db_path)
+            category = parse_terminology_category(row_str(row, "category", self.db_path), self.db_path)
             source_text = row_str(row, "source_text", self.db_path)
             translated_text = row_str(row, "translated_text", self.db_path)
-            if kind == "speaker_name":
-                speaker_names[source_text] = translated_text
-            elif kind == "map_display_name":
-                map_display_names[source_text] = translated_text
-            else:
-                raise TypeError(f"数据库字段 kind 不是有效术语类型: {self.db_path}")
-        return NameContextRegistry(
-            speaker_names=speaker_names,
-            map_display_names=map_display_names,
-        )
+            category_map[category][source_text] = translated_text
+        return TerminologyRegistry.from_category_map(category_map)
 
     async def replace_placeholder_rules(
         self,
@@ -972,6 +978,13 @@ def parse_error_type(value: str, db_path: Path) -> ErrorType:
     if value in allowed:
         return value
     raise RuntimeError(f"数据库字段 error_type 不是有效译文检查错误类型: {db_path}")
+
+
+def parse_terminology_category(value: str, db_path: Path) -> TerminologyCategory:
+    """校验并收窄数据库中的术语类别。"""
+    if value in TERMINOLOGY_CATEGORIES:
+        return value
+    raise RuntimeError(f"数据库字段 category 不是有效术语类别: {db_path}")
 
 
 __all__: list[str] = [

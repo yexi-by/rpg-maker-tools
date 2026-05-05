@@ -135,25 +135,6 @@ class DataTextExtraction:
                 )
             )
 
-        lists_to_extract: dict[str, list[str] | list[str | None]] = {
-            "elements": system.elements,
-            "skillTypes": system.skillTypes,
-            "weaponTypes": system.weaponTypes,
-            "armorTypes": system.armorTypes,
-            "equipTypes": system.equipTypes,
-        }
-        for key, text_list in lists_to_extract.items():
-            for index, text in enumerate(text_list):
-                if text is None or not self._should_extract_text(text):
-                    continue
-                translation_data.translation_items.append(
-                    TranslationItem(
-                        location_path=f"{SYSTEM_FILE_NAME}/{key}/{index}",
-                        item_type="short_text",
-                        original_lines=[text],
-                    )
-                )
-
         terms_lists: dict[str, list[str] | list[str | None]] = {
             "basic": system.terms.basic,
             "commands": system.terms.commands,
@@ -197,8 +178,6 @@ class DataTextExtraction:
                     continue
 
                 texts_to_extract: dict[str, str] = {
-                    "name": base_item.name,
-                    "nickname": base_item.nickname,
                     "profile": base_item.profile,
                     "description": base_item.description,
                     "message1": base_item.message1,
