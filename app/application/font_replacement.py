@@ -12,6 +12,7 @@ from typing import cast
 import demjson3
 
 from app.application.file_writer import replace_json_file, replace_plugins_file
+from app.native_quality import collect_native_font_replacements
 from app.rmmz.schema import (
     DATA_DIRECTORY_NAME,
     DATA_ORIGIN_DIRECTORY_NAME,
@@ -22,7 +23,14 @@ from app.rmmz.schema import (
     PLUGINS_JS_PATTERN,
     PLUGINS_ORIGIN_FILE_NAME,
 )
-from app.rmmz.text_rules import JsonObject, JsonValue, coerce_json_value
+from app.rmmz.text_rules import (
+    JsonArray,
+    JsonObject,
+    JsonValue,
+    coerce_json_value,
+    ensure_json_array,
+    ensure_json_object,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FONTS_DIRECTORY_NAME = "fonts"
@@ -155,35 +163,170 @@ def replace_font_references(
     if not old_font_reference_tokens:
         return 0, []
 
-    replaced_count = 0
-    records: list[FontReplacementRecord] = []
-    for file_name, writable_value in list(game_data.writable_data.items()):
-        if file_name == PLUGINS_FILE_NAME:
-            continue
-        updated_value, count, item_records = replace_font_names_in_json_value_with_records(
-            value=writable_value,
-            old_font_names=old_font_reference_tokens,
-            replacement_font_name=replacement_font_name,
-            file_name=file_name,
-            value_path="",
-        )
-        if count:
-            game_data.writable_data[file_name] = updated_value
-            replaced_count += count
-            records.extend(item_records)
-
-    updated_plugins, plugin_count, plugin_records = replace_font_names_in_plugins_with_records(
-        plugins=game_data.writable_plugins_js,
+    plugins_payload: JsonArray = [
+        cast(JsonValue, plugin) for plugin in game_data.writable_plugins_js
+    ]
+    native_result = collect_native_font_replacements(
+        game_data=game_data.writable_data,
+        plugins_js=plugins_payload,
         old_font_names=old_font_reference_tokens,
         replacement_font_name=replacement_font_name,
     )
-    if plugin_count:
-        game_data.writable_plugins_js = updated_plugins
-        game_data.writable_data[PLUGINS_FILE_NAME] = serialize_plugins_js(updated_plugins)
-        replaced_count += plugin_count
-        records.extend(plugin_records)
+    data_changes = ensure_json_array(
+        native_result["data_changes"],
+        "font_replacements.data_changes",
+    )
+    plugin_changes = ensure_json_array(
+        native_result["plugin_changes"],
+        "font_replacements.plugin_changes",
+    )
+    replaced_count_value = native_result["replaced_count"]
+    if not isinstance(replaced_count_value, int) or isinstance(replaced_count_value, bool):
+        raise TypeError("font_replacements.replaced_count 必须是整数")
+    records = apply_native_font_replacement_changes(
+        game_data=game_data,
+        data_changes=data_changes,
+        plugin_changes=plugin_changes,
+        replacement_font_name=replacement_font_name,
+    )
+    if plugin_changes:
+        game_data.writable_data[PLUGINS_FILE_NAME] = serialize_plugins_js(
+            game_data.writable_plugins_js
+        )
+    return replaced_count_value, records
 
-    return replaced_count, records
+
+def apply_native_font_replacement_changes(
+    *,
+    game_data: GameData,
+    data_changes: JsonArray,
+    plugin_changes: JsonArray,
+    replacement_font_name: str,
+) -> list[FontReplacementRecord]:
+    """把 Rust 计算出的字体替换清单应用到本轮可写数据。"""
+    records: list[FontReplacementRecord] = []
+    for change_value in data_changes:
+        change = ensure_json_object(change_value, "font_replacements.data_changes[]")
+        file_name = read_font_change_text_field(change=change, field_name="file_name")
+        if file_name not in game_data.writable_data:
+            raise KeyError(f"字体替换目标文件不存在: {file_name}")
+        records.append(
+            apply_native_font_change(
+                root=game_data.writable_data[file_name],
+                change=change,
+                replacement_font_name=replacement_font_name,
+            )
+        )
+
+    plugins_root = cast(JsonValue, game_data.writable_plugins_js)
+    for change_value in plugin_changes:
+        change = ensure_json_object(change_value, "font_replacements.plugin_changes[]")
+        records.append(
+            apply_native_font_change(
+                root=plugins_root,
+                change=change,
+                replacement_font_name=replacement_font_name,
+            )
+        )
+    return records
+
+
+def apply_native_font_change(
+    *,
+    root: JsonValue,
+    change: JsonObject,
+    replacement_font_name: str,
+) -> FontReplacementRecord:
+    """应用单条字体替换并生成记录。"""
+    file_name = read_font_change_text_field(change=change, field_name="file_name")
+    value_path = read_font_change_text_field(change=change, field_name="value_path")
+    original_text = read_font_change_text_field(change=change, field_name="original_text")
+    replaced_text = read_font_change_text_field(change=change, field_name="replaced_text")
+    set_json_pointer_text(
+        root=root,
+        value_path=value_path,
+        original_text=original_text,
+        replaced_text=replaced_text,
+    )
+    return FontReplacementRecord(
+        file_name=file_name,
+        value_path=value_path,
+        original_text=original_text,
+        replaced_text=replaced_text,
+        replacement_font_name=replacement_font_name,
+    )
+
+
+def read_font_change_text_field(*, change: JsonObject, field_name: str) -> str:
+    """读取 Rust 字体替换清单中的字符串字段。"""
+    value = change[field_name]
+    if not isinstance(value, str):
+        raise TypeError(f"font_replacements.{field_name} 必须是字符串")
+    return value
+
+
+def set_json_pointer_text(
+    *,
+    root: JsonValue,
+    value_path: str,
+    original_text: str,
+    replaced_text: str,
+) -> None:
+    """按 JSON Pointer 路径替换字符串字段，并校验扫描来源没有漂移。"""
+    parts = split_json_pointer_path(value_path)
+    if not parts:
+        raise ValueError("字体替换路径不能为空")
+    current_value = root
+    for part in parts[:-1]:
+        current_value = resolve_json_pointer_child(
+            value=current_value,
+            part=part,
+            context=value_path,
+        )
+    last_part = parts[-1]
+    if isinstance(current_value, list):
+        index = parse_json_pointer_index(part=last_part, context=value_path)
+        current_text = current_value[index]
+        if current_text != original_text:
+            raise ValueError(f"字体替换目标内容已变化: {value_path}")
+        current_value[index] = replaced_text
+        return
+    if isinstance(current_value, dict):
+        current_text = current_value[last_part]
+        if current_text != original_text:
+            raise ValueError(f"字体替换目标内容已变化: {value_path}")
+        current_value[last_part] = replaced_text
+        return
+    raise TypeError(f"字体替换路径无法写入: {value_path}")
+
+
+def resolve_json_pointer_child(*, value: JsonValue, part: str, context: str) -> JsonValue:
+    """沿 JSON Pointer 路径向下定位一层。"""
+    if isinstance(value, list):
+        return value[parse_json_pointer_index(part=part, context=context)]
+    if isinstance(value, dict):
+        return value[part]
+    raise TypeError(f"字体替换路径无法继续定位: {context}")
+
+
+def parse_json_pointer_index(*, part: str, context: str) -> int:
+    """把 JSON Pointer 数组片段解析成下标。"""
+    try:
+        return int(part)
+    except ValueError as error:
+        raise ValueError(f"字体替换数组下标无效: {context}") from error
+
+
+def split_json_pointer_path(value_path: str) -> list[str]:
+    """拆分 Rust 返回的 JSON Pointer 路径。"""
+    if not value_path.startswith("/"):
+        raise ValueError(f"字体替换路径必须以 / 开头: {value_path}")
+    return [unescape_json_pointer_part(part) for part in value_path.split("/")[1:]]
+
+
+def unescape_json_pointer_part(part: str) -> str:
+    """还原 JSON Pointer 路径片段。"""
+    return part.replace("~1", "/").replace("~0", "~")
 
 
 def build_font_reference_tokens(old_font_names: list[str]) -> list[str]:
@@ -195,88 +338,6 @@ def build_font_reference_tokens(old_font_names: list[str]) -> list[str]:
         if font_stem:
             token_set.add(font_stem)
     return sorted(token_set, key=len, reverse=True)
-
-
-def replace_font_names_in_plugins(
-    *,
-    plugins: list[dict[str, JsonValue]],
-    old_font_names: list[str],
-    replacement_font_name: str,
-) -> tuple[list[dict[str, JsonValue]], int]:
-    """替换插件配置对象中的旧字体文件名。"""
-    replaced_plugins: list[dict[str, JsonValue]] = []
-    replaced_count = 0
-    for plugin in plugins:
-        updated_plugin, count = replace_font_names_in_json_object(
-            value=plugin,
-            old_font_names=old_font_names,
-            replacement_font_name=replacement_font_name,
-        )
-        replaced_plugins.append(updated_plugin)
-        replaced_count += count
-    return replaced_plugins, replaced_count
-
-
-def replace_font_names_in_plugins_with_records(
-    *,
-    plugins: list[dict[str, JsonValue]],
-    old_font_names: list[str],
-    replacement_font_name: str,
-) -> tuple[list[dict[str, JsonValue]], int, list[FontReplacementRecord]]:
-    """替换插件配置对象中的字体引用，并记录本次覆盖的新字体名。"""
-    replaced_plugins: list[dict[str, JsonValue]] = []
-    replaced_count = 0
-    records: list[FontReplacementRecord] = []
-    for plugin_index, plugin in enumerate(plugins):
-        updated_plugin, count, plugin_records = replace_font_names_in_json_object_with_records(
-            value=plugin,
-            old_font_names=old_font_names,
-            replacement_font_name=replacement_font_name,
-            file_name=PLUGINS_FILE_NAME,
-            value_path=f"/{plugin_index}",
-        )
-        replaced_plugins.append(updated_plugin)
-        replaced_count += count
-        records.extend(plugin_records)
-    return replaced_plugins, replaced_count, records
-
-
-def replace_font_names_in_json_object(
-    *,
-    value: JsonObject,
-    old_font_names: list[str],
-    replacement_font_name: str,
-) -> tuple[JsonObject, int]:
-    """替换 JSON 对象值里的旧字体文件名。"""
-    replaced_value, replaced_count = replace_font_names_in_json_value(
-        value=value,
-        old_font_names=old_font_names,
-        replacement_font_name=replacement_font_name,
-    )
-    if not isinstance(replaced_value, dict):
-        raise TypeError("字体替换后的插件配置不是 JSON 对象")
-    return replaced_value, replaced_count
-
-
-def replace_font_names_in_json_object_with_records(
-    *,
-    value: JsonObject,
-    old_font_names: list[str],
-    replacement_font_name: str,
-    file_name: str,
-    value_path: str,
-) -> tuple[JsonObject, int, list[FontReplacementRecord]]:
-    """替换 JSON 对象值里的旧字体文件名，并记录本次覆盖的新字体名。"""
-    replaced_value, replaced_count, records = replace_font_names_in_json_value_with_records(
-        value=value,
-        old_font_names=old_font_names,
-        replacement_font_name=replacement_font_name,
-        file_name=file_name,
-        value_path=value_path,
-    )
-    if not isinstance(replaced_value, dict):
-        raise TypeError("字体替换后的插件配置不是 JSON 对象")
-    return replaced_value, replaced_count, records
 
 
 def replace_font_names_in_json_value(
@@ -320,72 +381,6 @@ def replace_font_names_in_json_value(
         return replaced_object, replaced_count
 
     return value, 0
-
-
-def replace_font_names_in_json_value_with_records(
-    *,
-    value: JsonValue,
-    old_font_names: list[str],
-    replacement_font_name: str,
-    file_name: str,
-    value_path: str,
-) -> tuple[JsonValue, int, list[FontReplacementRecord]]:
-    """递归替换 JSON 值中的字体引用，并记录被覆盖的新字体名。"""
-    if isinstance(value, str):
-        replaced_text, replaced_count = replace_font_names_in_text(
-            text=value,
-            old_font_names=old_font_names,
-            replacement_font_name=replacement_font_name,
-        )
-        if replaced_count == 0:
-            return value, 0, []
-        return replaced_text, replaced_count, [
-            FontReplacementRecord(
-                file_name=file_name,
-                value_path=value_path,
-                original_text=value,
-                replaced_text=replaced_text,
-                replacement_font_name=replacement_font_name,
-            )
-        ]
-
-    if isinstance(value, list):
-        replaced_items: list[JsonValue] = []
-        replaced_count = 0
-        list_records: list[FontReplacementRecord] = []
-        for index, item in enumerate(value):
-            child_path = append_json_pointer_part(value_path, str(index))
-            replaced_item, count, item_records = replace_font_names_in_json_value_with_records(
-                value=item,
-                old_font_names=old_font_names,
-                replacement_font_name=replacement_font_name,
-                file_name=file_name,
-                value_path=child_path,
-            )
-            replaced_items.append(replaced_item)
-            replaced_count += count
-            list_records.extend(item_records)
-        return replaced_items, replaced_count, list_records
-
-    if isinstance(value, dict):
-        replaced_object: JsonObject = {}
-        replaced_count = 0
-        object_records: list[FontReplacementRecord] = []
-        for key, item in value.items():
-            child_path = append_json_pointer_part(value_path, key)
-            replaced_item, count, item_records = replace_font_names_in_json_value_with_records(
-                value=item,
-                old_font_names=old_font_names,
-                replacement_font_name=replacement_font_name,
-                file_name=file_name,
-                value_path=child_path,
-            )
-            replaced_object[key] = replaced_item
-            replaced_count += count
-            object_records.extend(item_records)
-        return replaced_object, replaced_count, object_records
-
-    return value, 0, []
 
 
 def replace_font_names_in_text(
@@ -775,16 +770,6 @@ def extract_font_reference_name(text: str) -> str:
     if separator_index < 0:
         return text
     return text[separator_index + 1:]
-
-
-def append_json_pointer_part(value_path: str, part: str) -> str:
-    """向 JSON Pointer 路径追加一段字段名或数组下标。"""
-    return f"{value_path}/{escape_json_pointer_part(part)}"
-
-
-def escape_json_pointer_part(part: str) -> str:
-    """转义 JSON Pointer 路径片段。"""
-    return part.replace("~", "~0").replace("/", "~1")
 
 
 def serialize_plugins_js(plugins: list[dict[str, JsonValue]]) -> str:

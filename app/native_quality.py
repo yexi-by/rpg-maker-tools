@@ -22,6 +22,10 @@ class NativeModule(Protocol):
         """运行 Rust 多线程 Note 标签来源扫描。"""
         raise NotImplementedError
 
+    def scan_font_replacements(self, payload_json: str) -> str:
+        """运行 Rust 多线程字体引用替换扫描。"""
+        raise NotImplementedError
+
     def scan_quality(self, payload_json: str) -> str:
         """运行 Rust 多线程质检。"""
         raise NotImplementedError
@@ -131,6 +135,29 @@ def collect_native_note_tag_sources(
         # json.loads 的返回值来自动态 JSON 边界，立即交给 coerce_json_value 收窄。
         coerce_json_value(cast(object, json.loads(result_text))),
         "native_note_tag_sources",
+    )
+
+
+def collect_native_font_replacements(
+    *,
+    game_data: JsonObject,
+    plugins_js: JsonArray,
+    old_font_names: list[str],
+    replacement_font_name: str,
+) -> JsonObject:
+    """调用 Rust 核心扫描本轮字体引用替换清单。"""
+    native_module = _load_native_module()
+    payload: JsonObject = {
+        "data": game_data,
+        "plugins": plugins_js,
+        "old_font_names": [name for name in old_font_names],
+        "replacement_font_name": replacement_font_name,
+    }
+    result_text = native_module.scan_font_replacements(json.dumps(payload, ensure_ascii=False))
+    return ensure_json_object(
+        # json.loads 的返回值来自动态 JSON 边界，立即交给 coerce_json_value 收窄。
+        coerce_json_value(cast(object, json.loads(result_text))),
+        "native_font_replacements",
     )
 
 
@@ -321,6 +348,7 @@ def _build_text_rules_payload(text_rules: TextRules) -> JsonObject:
 
 __all__ = [
     "NativeQualityDetails",
+    "collect_native_font_replacements",
     "collect_native_note_tag_sources",
     "collect_native_quality_details",
     "collect_native_write_protocol_details",
