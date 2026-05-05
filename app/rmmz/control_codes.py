@@ -106,6 +106,8 @@ SYMBOL_STANDARD_PLACEHOLDERS: dict[str, str] = {
 }
 LITERAL_LINE_BREAK_MARKER = r"\n"
 LITERAL_LINE_BREAK_PLACEHOLDER = "[RMMZ_LITERAL_LINE_BREAK]"
+REAL_LINE_BREAK_MARKER = "\n"
+REAL_LINE_BREAK_PLACEHOLDER = "[RMMZ_REAL_LINE_BREAK]"
 LITERAL_ESCAPE_PLACEHOLDERS: dict[str, str] = {
     "\\\"": "[RMMZ_LITERAL_DOUBLE_QUOTE]",
     "\\'": "[RMMZ_LITERAL_SINGLE_QUOTE]",
@@ -152,6 +154,7 @@ STANDARD_PLACEHOLDER_PATTERN: re.Pattern[str] = re.compile(
             ),
             r"\[RMMZ_MESSAGE_ARGUMENT_\d+\]",
             r"\[RMMZ_LITERAL_(?:UNICODE|HEX|OCTAL)_ESCAPE_[0-9A-F]+\]",
+            re.escape(REAL_LINE_BREAK_PLACEHOLDER),
             *(re.escape(placeholder) for placeholder in LITERAL_ESCAPE_PLACEHOLDERS.values()),
             *(
                 re.escape(placeholder)
@@ -374,6 +377,8 @@ __all__: list[str] = [
     "LITERAL_LINE_BREAK_MARKER",
     "LITERAL_LINE_BREAK_PLACEHOLDER",
     "RawControlSequenceCandidate",
+    "REAL_LINE_BREAK_MARKER",
+    "REAL_LINE_BREAK_PLACEHOLDER",
     "STANDARD_PLACEHOLDER_PATTERN",
     "SYMBOL_STANDARD_PLACEHOLDERS",
     "format_placeholder_template",

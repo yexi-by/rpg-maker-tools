@@ -5,14 +5,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_att_mz_skill_requires_parallel_subagents_when_available() -> None:
-    """支持子代理的平台必须并行处理外部分析任务。"""
+def test_att_mz_skill_defines_two_round_subagent_protocol() -> None:
+    """Skill 必须约束两轮子代理流程和主代理术语表审核责任。"""
     text = (ROOT / "skills" / "att-mz" / "SKILL.md").read_text(encoding="utf-8")
 
     required_phrases = [
         "必须启用子代理并行处理",
         "才允许串行处理",
-        "`terminology` 子代理",
+        "子代理轮次固定为两轮",
+        "### 第一轮：术语候选",
+        "术语表翻译必须由主代理亲自把关",
+        "`terminology/subtasks/sources/speaker_and_actor_terms.json`",
+        "`terminology/subtasks/candidates/item_terms.json`",
+        "主代理必须等待全部术语候选子代理完成",
+        "主代理必须严审信达雅、日文句意、中文自然度、专名统一、跨类别一致性和游戏 UI 语感",
+        "主代理必须亲自修改候选译名并合并到 `terminology/terms.json`",
+        "术语候选子代理任务单",
+        "### 第二轮：三类外部规则",
         "`plugin-rules` 子代理",
         "`event-command-rules` 子代理",
         "`note-tag-rules` 子代理",
@@ -23,11 +32,13 @@ def test_att_mz_skill_requires_parallel_subagents_when_available() -> None:
         "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()",
         "禁止继续导入、翻译或写回乱码数据",
         "必须核验 Unicode code point 或原始字节",
-        "### 黑盒执行原则",
-        "翻译任务中，把本项目当成闭源黑盒工具使用",
-        "所有业务数据进出只走 CLI、`<工作区>` JSON、当前游戏数据库中已导入的规则和游戏目录文件",
+        "### 只按任务文件和命令结果工作",
+        "翻译任务中，只按 CLI 输出、工作区 JSON、游戏目录和用户明确提供的信息判断",
+        "所有业务数据进出只走 CLI、`<工作区>` JSON、CLI 已保存到当前游戏状态的规则和游戏目录文件",
+        "### 执行前需要知道什么",
+        "不需要知道：源码、程序内部数据、模型提示词怎样生成、占位符怎样恢复",
         "### 输入-逻辑-输出总则",
-        "主 Agent 执行每个阶段前，必须先明确“输入是什么、处理逻辑是什么、输出什么”",
+        "每个阶段开始前，必须先明确“输入是什么、处理逻辑是什么、输出什么”",
         "### 命令 I/O 合约",
         "`doctor --no-check-llm --json`",
         "`doctor --game <游戏标题> --no-check-llm --json`",
@@ -81,30 +92,28 @@ def test_att_mz_skill_requires_parallel_subagents_when_available() -> None:
         "`allowed_terms` 是允许原样保留的日文片段字符串数组",
         "禁止在 `pending-translations.json` 内新增例外字段",
         "### 控制符字符级保留",
-        "未被替换的裸露片段必须字符级照抄原文",
+        "都必须当成不可翻译标记",
         r"原文是 `\F3[66」「` 时，译文也必须保留 `\F3[66」「`",
         r"禁止改成 `\F3[66]「`",
         r"禁止改成 `\F3[60」「`",
         "如果 CLI 报 `疑似控制符不一致`",
-        "占位符规则由主 Agent 亲自处理",
+        "占位符规则由主代理亲自处理",
         "基于当前会进入正文翻译的完整文本集合生成草稿",
         "`summary.uncovered_count` 不等于 0 时必须修规则，不能导入或翻译",
         "正确示例：输入候选",
-        "### 四类子代理任务契约",
-        "主 Agent 派发子代理时，必须把对应行的输入、逻辑和输出写进子代理 prompt",
+        "第二轮子代理任务契约",
         "格式为 `{正则表达式: 占位符模板}`",
         "格式为 `{插件名: [JSONPath, ...]}`",
-        "主 Agent 必须等待四类子代理全部完成",
-        "四类子代理全部导入后，主 Agent 必须重新运行 `build-placeholder-rules`",
+        "主代理必须等待三类规则子代理全部完成",
+        "三类外部规则全部导入后，主代理才能重新运行 `build-placeholder-rules`",
         "亲自审查、校验、覆盖扫描并导入占位符规则",
-        "任一子代理未完成、失败或校验未通过，或占位符规则未最终导入，不启动翻译",
+        "任一术语候选或规则子代理未完成、失败或校验未通过，或占位符规则未最终导入，不启动翻译",
         "### 子代理上下文包",
         "不要把大 JSON 正文塞进子代理 prompt",
         "只允许写自己负责的输出文件",
-        "完成后必须报告：改动文件、是否为空结果、空结果理由、未解决风险、建议主 Agent 运行的校验命令",
+        "完成后必须报告：改动文件、是否为空结果、空结果理由、未解决风险、建议主代理运行的校验命令",
         "推荐子代理 prompt 模板",
-        "### 子代理任务单模板",
-        "`terminology` 子代理任务单",
+        "### 三类规则任务单模板",
         "`plugin-rules` 子代理任务单",
         "`event-command-rules` 子代理任务单",
         "`note-tag-rules` 子代理任务单",
@@ -112,8 +121,8 @@ def test_att_mz_skill_requires_parallel_subagents_when_available() -> None:
         "必须复制对应任务单和本节示例",
         "错误示例",
         "{\"(?i)\\\\\\\\N\\\\d*\"",
-        "必须读取 `terminology/contexts/speakers/*.json`",
-        "完成报告必须写明读取了多少个 `terminology/contexts/speakers/*.json`",
+        "输入：读取 <工作区>/terminology/subtasks/sources/<术语分组>.json、<工作区>/terminology/contexts/speakers/*.json",
+        "不确定项也必须给出当前最合理译名",
         "$['parameters']['entries'][*]['label']",
         "资源路径、脚本、数字、颜色、布尔值和内部标识都排除",
         "code=357 parameters = [插件名, 指令名, 显示名, 参数对象]",
@@ -136,7 +145,7 @@ def test_att_mz_skill_requires_parallel_subagents_when_available() -> None:
         "推荐先用 `export-quality-fix-template --json` 生成可填写的修复表",
         "必须用 `reset-translations` 的 `location_paths` 显式文件",
         "write-back --game <游戏标题> --json",
-        "禁止直接改数据库",
+        "禁止绕过 CLI 手改项目数据",
         "直接改游戏 `data/*.json` 的 `note` 字段",
     ]
     for phrase in required_phrases:
@@ -154,8 +163,46 @@ def test_att_mz_skill_requires_parallel_subagents_when_available() -> None:
         "Skills.json",
         "Map*.json",
         "五类子代理",
+        "`terminology` 子代理：读取 `terminology/terms.json`",
+        "只写 `terminology/terms.json`",
+        "### 四类子代理任务契约",
+        "主代理必须等待四类子代理全部完成",
+        "四类子代理全部导入后",
         "`placeholder-rules` 子代理",
         "`placeholder-rules` 子代理任务单",
+        "主 Agent",
+        "外部 Agent",
+        "并行任务",
+        "主执行者",
+        "子任务执行者",
+        "你必须",
+        "人工处理者",
+        "人工填写",
     ]
     for phrase in forbidden_sample_phrases:
+        assert phrase not in text
+
+
+def test_text_translation_prompt_keeps_protocol_minimal() -> None:
+    """正文翻译提示词只说明可见任务，不解释项目内部保护机制。"""
+    text = (ROOT / "prompts" / "text_translation_system.md").read_text(encoding="utf-8")
+
+    required_phrases = [
+        "`[[术语表]]`",
+        "`short_text`：按一个完整字段翻译，`translation_lines` 必须只包含 1 个字符串",
+        "形如 `[RMMZ_...]` 或 `[CUSTOM_...]` 的片段是必须原样保留的文本标记。",
+    ]
+    for phrase in required_phrases:
+        assert phrase in text
+
+    forbidden_phrases = [
+        "# 术语表",
+        "如果原文内部已有换行",
+        "常用于变量",
+        "保护",
+        "恢复",
+        "写回",
+        "占位符",
+    ]
+    for phrase in forbidden_phrases:
         assert phrase not in text

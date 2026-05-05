@@ -12,7 +12,11 @@ from typing import Literal, Self
 from pydantic import BaseModel, Field, model_validator
 
 from app.rmmz.game_data import BaseItem, CommonEvent, MapData, System, Troop
-from app.rmmz.control_codes import LITERAL_LINE_BREAK_PLACEHOLDER
+from app.rmmz.control_codes import (
+    LITERAL_LINE_BREAK_PLACEHOLDER,
+    REAL_LINE_BREAK_MARKER,
+    REAL_LINE_BREAK_PLACEHOLDER,
+)
 from app.rmmz.text_rules import ControlSequenceSpan, JsonValue, TextRules, get_default_text_rules
 
 
@@ -102,8 +106,32 @@ class TranslationItem(BaseModel):
             self.placeholder_counts[placeholder] = self.placeholder_counts.get(placeholder, 0) + 1
             return placeholder
 
+        def replace_real_line_breaks(line: str) -> str:
+            """把字段内部真实换行纳入标准占位符计数。"""
+            real_break_count = line.count(REAL_LINE_BREAK_MARKER)
+            if real_break_count == 0:
+                return line
+
+            existing_original = self.placeholder_map.get(REAL_LINE_BREAK_PLACEHOLDER)
+            if existing_original is None:
+                self.placeholder_map[REAL_LINE_BREAK_PLACEHOLDER] = REAL_LINE_BREAK_MARKER
+                placeholder_sources[REAL_LINE_BREAK_PLACEHOLDER] = "standard"
+            elif existing_original != REAL_LINE_BREAK_MARKER:
+                raise ValueError(
+                    f"占位符 {REAL_LINE_BREAK_PLACEHOLDER} 同时匹配了多个不同片段"
+                )
+            self.placeholder_counts[REAL_LINE_BREAK_PLACEHOLDER] = (
+                self.placeholder_counts.get(REAL_LINE_BREAK_PLACEHOLDER, 0) + real_break_count
+            )
+            return line.replace(REAL_LINE_BREAK_MARKER, REAL_LINE_BREAK_PLACEHOLDER)
+
+        def replace_line(line: str) -> str:
+            """按标准控制符、自定义规则和真实换行顺序构建模型输入文本。"""
+            masked_line = rules.replace_rm_control_sequences(line, replace_func)
+            return replace_real_line_breaks(masked_line)
+
         self.original_lines_with_placeholders = [
-            rules.replace_rm_control_sequences(line, replace_func)
+            replace_line(line)
             for line in self.original_lines
         ]
 

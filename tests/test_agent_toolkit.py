@@ -227,14 +227,47 @@ async def test_prepare_agent_workspace_includes_placeholder_rule_draft(
     rules_path = workspace / "placeholder-rules.json"
     note_candidates_path = workspace / "note-tag-candidates.json"
     note_rules_path = workspace / "note-tag-rules.json"
+    speaker_source_path = workspace / "terminology" / "subtasks" / "sources" / "speaker_and_actor_terms.json"
+    speaker_candidate_path = workspace / "terminology" / "subtasks" / "candidates" / "speaker_and_actor_terms.json"
+    item_source_path = workspace / "terminology" / "subtasks" / "sources" / "item_terms.json"
+    item_candidate_path = workspace / "terminology" / "subtasks" / "candidates" / "item_terms.json"
+    manifest_path = workspace / "manifest.json"
     assert rules_path.exists()
     assert note_candidates_path.exists()
     assert note_rules_path.exists()
+    assert speaker_source_path.exists()
+    assert speaker_candidate_path.exists()
+    assert item_source_path.exists()
+    assert item_candidate_path.exists()
+    assert manifest_path.exists()
     rules = load_json_object(rules_path)
     note_rules = load_json_object(note_rules_path)
+    speaker_source = load_json_object(speaker_source_path)
+    speaker_candidate = load_json_object(speaker_candidate_path)
+    item_source = load_json_object(item_source_path)
+    item_candidate = load_json_object(item_candidate_path)
+    manifest = load_json_object(manifest_path)
+    speaker_names = ensure_json_object(coerce_json_value(speaker_source["speaker_names"]), "speaker_names")
+    item_names = ensure_json_object(coerce_json_value(item_source["item_names"]), "item_names")
+    workflow = ensure_json_object(coerce_json_value(manifest["workflow"]), "manifest.workflow")
+    subagent_rounds = ensure_json_array(
+        coerce_json_value(cast(object, workflow["subagent_rounds"])),
+        "manifest.workflow.subagent_rounds",
+    )
+    first_round = ensure_json_object(subagent_rounds[0], "manifest.workflow.subagent_rounds[0]")
+    second_round = ensure_json_object(subagent_rounds[1], "manifest.workflow.subagent_rounds[1]")
     assert rules == {r"(?i)\\F\d*\[[^\]\r\n]+\]": "[CUSTOM_FACE_PORTRAIT_{index}]"}
     assert note_rules == {}
+    assert speaker_source == speaker_candidate
+    assert item_source == item_candidate
+    assert "村人" in speaker_names
+    assert "回復薬" in item_names
     assert report.summary["placeholder_rule_draft_count"] == 1
+    assert report.summary["terminology_subtask_count"] == 5
+    assert first_round["name"] == "terminology_candidates"
+    assert first_round["owner"] == "主代理"
+    assert second_round["name"] == "external_text_rules"
+    assert "placeholder_phase" in workflow
     assert "note-tag-rules.json" in json.dumps(report.details, ensure_ascii=False)
 
 
@@ -350,7 +383,7 @@ async def test_validate_agent_workspace_blocks_missing_note_tag_rules(
     minimal_game_dir: Path,
     tmp_path: Path,
 ) -> None:
-    """Note 标签规则是四类子代理产物之一，缺失时工作区校验阻断。"""
+    """Note 标签规则是第二轮三类规则产物之一，缺失时工作区校验阻断。"""
     registry = GameRegistry(tmp_path / "db")
     _ = await registry.register_game(minimal_game_dir)
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
@@ -1485,6 +1518,34 @@ async def test_quality_report_flags_internal_placeholder_leak(
     placeholder_detail = ensure_json_object(placeholder_items[0], "placeholder_risk_items[0]")
     assert placeholder_detail["location_path"] == "CommonEvents.json/1/0"
     assert "译文残留项目内部占位符" in str(placeholder_detail["reason"])
+
+
+@pytest.mark.asyncio
+async def test_quality_report_accepts_saved_short_text_real_line_breaks(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """质量报告复查已保存译文时允许游戏文件需要的真实换行。"""
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    async with await registry.open_game("テストゲーム") as session:
+        await session.write_translation_items(
+            [
+                TranslationItem(
+                    location_path="Items.json/1/description",
+                    item_type="short_text",
+                    role=None,
+                    original_lines=["説明\n本文"],
+                    source_line_paths=["Items.json/1/description"],
+                    translation_lines=["说明\n正文"],
+                )
+            ]
+        )
+
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    report = await service.quality_report(game_title="テストゲーム")
+
+    assert report.summary["placeholder_risk_count"] == 0
 
 
 @pytest.mark.asyncio

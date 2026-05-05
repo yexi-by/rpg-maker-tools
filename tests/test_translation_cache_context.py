@@ -1,5 +1,6 @@
 """翻译缓存与提示词组装测试。"""
 
+from app.rmmz.control_codes import REAL_LINE_BREAK_PLACEHOLDER
 from app.rmmz.schema import TranslationData, TranslationItem
 from app.rmmz.text_rules import get_default_text_rules
 from app.translation import TranslationCache, iter_translation_context_batches
@@ -83,3 +84,32 @@ def test_translation_context_keeps_array_output_line_count_hint() -> None:
     user_prompt = batches[0].messages[1].text
 
     assert "line_count: 2" in user_prompt
+
+
+def test_short_text_real_line_break_is_hidden_from_prompt() -> None:
+    """单字段文本送模前必须把真实换行替换为文本标记。"""
+    data = TranslationData(
+        display_name=None,
+        translation_items=[
+            TranslationItem(
+                location_path="Items.json/1/description",
+                item_type="short_text",
+                original_lines=["武器スキル\n\\C[14]敵単体"],
+            )
+        ],
+    )
+
+    batches = list(
+        iter_translation_context_batches(
+            translation_data=data,
+            token_size=100,
+            factor=1.0,
+            max_command_items=3,
+            system_prompt="系统提示",
+            text_rules=get_default_text_rules(),
+        )
+    )
+    user_prompt = batches[0].messages[1].text
+
+    assert f"武器スキル{REAL_LINE_BREAK_PLACEHOLDER}[RMMZ_TEXT_COLOR_14]敵単体" in user_prompt
+    assert "武器スキル\n[RMMZ_TEXT_COLOR_14]" not in user_prompt

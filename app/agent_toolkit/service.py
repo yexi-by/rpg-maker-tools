@@ -41,7 +41,13 @@ from app.plugin_text import (
 )
 from app.plugin_text.write_back import write_plugin_text
 from app.rmmz import DataTextExtraction
-from app.rmmz.control_codes import ControlSequenceSpan, CustomPlaceholderRule, LITERAL_LINE_BREAK_MARKER
+from app.rmmz.control_codes import (
+    ControlSequenceSpan,
+    CustomPlaceholderRule,
+    LITERAL_LINE_BREAK_MARKER,
+    REAL_LINE_BREAK_MARKER,
+    REAL_LINE_BREAK_PLACEHOLDER,
+)
 from app.rmmz.schema import (
     GameData,
     EventCommandTextRuleRecord,
@@ -85,6 +91,33 @@ from app.note_tag_text.sources import note_file_pattern_matches
 from app.persistence.repository import current_timestamp_text
 
 type LlmCheckFunc = Callable[[LLMHandler, str], Awaitable[None]]
+
+TERMINOLOGY_SUBTASK_GROUPS: dict[str, tuple[TerminologyCategory, ...]] = {
+    "speaker_and_actor_terms": (
+        "speaker_names",
+        "actor_names",
+        "actor_nicknames",
+        "class_names",
+        "enemy_names",
+    ),
+    "map_and_system_terms": (
+        "map_display_names",
+        "system_elements",
+        "system_skill_types",
+        "system_weapon_types",
+        "system_armor_types",
+        "system_equip_types",
+    ),
+    "skill_and_state_terms": (
+        "skill_names",
+        "state_names",
+    ),
+    "item_terms": ("item_names",),
+    "equipment_terms": (
+        "weapon_names",
+        "armor_names",
+    ),
+}
 
 
 async def run_default_llm_check(llm_handler: LLMHandler, model: str) -> None:
@@ -1466,6 +1499,11 @@ class AgentToolkitService:
                 stored_registry=terminology_registry,
             )
             await write_terms_json(terminology_summary.terms_path, merged_registry)
+        terminology_subtasks_dir = target_dir / "terminology" / "subtasks"
+        terminology_subtask_summary = await _write_terminology_subtask_files(
+            terms_path=terminology_summary.terms_path,
+            subtasks_dir=terminology_subtasks_dir,
+        )
         plugins_path = target_dir / "plugins.json"
         await export_plugins_json_file(game_data=game_data, output_path=plugins_path)
         plugin_rules_path = target_dir / "plugin-rules.json"
@@ -1511,6 +1549,7 @@ class AgentToolkitService:
             "map_entry_count": terminology_summary.map_entry_count,
             "terminology_entry_count": terminology_summary.entry_count,
             "terminology_database_entry_count": terminology_summary.database_entry_count,
+            "terminology_subtask_count": len(TERMINOLOGY_SUBTASK_GROUPS),
             "plugin_count": len(game_data.plugins_js),
             "plugin_rule_count": sum(len(rule.path_templates) for rule in plugin_rules),
             "stale_plugin_rule_count": stale_plugin_rule_count,
@@ -1524,6 +1563,7 @@ class AgentToolkitService:
         manifest_files: JsonArray = [
             str(terminology_summary.terms_path),
             str(terminology_summary.contexts_dir),
+            str(terminology_subtasks_dir),
             str(plugins_path),
             str(plugin_rules_path),
             str(note_tag_candidates_path),
@@ -1536,6 +1576,7 @@ class AgentToolkitService:
         manifest: JsonObject = {
             "files": manifest_files,
             "generated": generated_summary,
+            "workflow": _agent_workflow_manifest(terminology_subtask_summary),
         }
         manifest_path = target_dir / "manifest.json"
         async with aiofiles.open(manifest_path, "w", encoding="utf-8") as file:
@@ -2019,6 +2060,68 @@ async def _write_json_object(path: Path, payload: JsonObject) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     async with aiofiles.open(path, "w", encoding="utf-8") as file:
         _ = await file.write(f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n")
+
+
+async def _write_terminology_subtask_files(*, terms_path: Path, subtasks_dir: Path) -> JsonObject:
+    """按术语字段组生成主代理派发子代理用的独立候选文件。"""
+    registry = await load_terminology_registry(terms_path=terms_path)
+    category_map = registry.as_category_map()
+    sources_dir = subtasks_dir / "sources"
+    candidates_dir = subtasks_dir / "candidates"
+    summary: JsonObject = {}
+    for group_name, categories in TERMINOLOGY_SUBTASK_GROUPS.items():
+        payload: JsonObject = {}
+        entry_count = 0
+        for category in categories:
+            entries = category_map[category]
+            entry_count += len(entries)
+            category_payload: JsonObject = {}
+            for source_text, translated_text in entries.items():
+                category_payload[source_text] = translated_text
+            payload[category] = category_payload
+        source_path = sources_dir / f"{group_name}.json"
+        candidate_path = candidates_dir / f"{group_name}.json"
+        await _write_json_object(source_path, payload)
+        await _write_json_object(candidate_path, payload)
+        summary[group_name] = {
+            "categories": list(categories),
+            "entry_count": entry_count,
+            "source": str(source_path),
+            "candidate": str(candidate_path),
+        }
+    return summary
+
+
+def _agent_workflow_manifest(terminology_subtask_summary: JsonObject) -> JsonObject:
+    """生成写入 manifest 的 Agent 工作流说明。"""
+    return {
+        "subagent_rounds": [
+            {
+                "round": 1,
+                "name": "terminology_candidates",
+                "owner": "主代理",
+                "description": "主代理按术语字段拆分任务，子代理只写候选文件；主代理必须逐项审查、统一译名、亲自修改并合并回 terminology/terms.json 后才能导入数据库。",
+                "subtasks": terminology_subtask_summary,
+                "final_file": "terminology/terms.json",
+                "import_command": "import-terminology --game <游戏标题> --input <工作区>/terminology/terms.json --json",
+            },
+            {
+                "round": 2,
+                "name": "external_text_rules",
+                "owner": "主代理",
+                "description": "术语表导入后，主代理再派发插件规则、事件指令规则和 Note 标签规则三个子代理，并逐项 validate/import。",
+                "subtasks": {
+                    "plugin-rules": "plugin-rules.json",
+                    "event-command-rules": "event-command-rules.json",
+                    "note-tag-rules": "note-tag-rules.json",
+                },
+            },
+        ],
+        "placeholder_phase": {
+            "owner": "主代理",
+            "description": "两轮子代理任务全部完成并导入后，主代理才能亲自生成、审查、覆盖扫描、校验并导入占位符规则。",
+        },
+    }
 
 
 def _merge_terminology_registry(
@@ -2655,7 +2758,10 @@ def _mask_translation_controls(*, line: str, item: TranslationItem, text_rules: 
             return placeholder
         return "[CUSTOM_UNEXPECTED_1]"
 
-    return text_rules.replace_rm_control_sequences(line, replacer)
+    masked_line = text_rules.replace_rm_control_sequences(line, replacer)
+    if reverse_map.get(REAL_LINE_BREAK_MARKER) == REAL_LINE_BREAK_PLACEHOLDER:
+        return masked_line.replace(REAL_LINE_BREAK_MARKER, REAL_LINE_BREAK_PLACEHOLDER)
+    return masked_line
 
 
 def _prepare_manual_translation_item(

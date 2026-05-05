@@ -6,7 +6,11 @@ import json
 import pytest
 
 from app.config.schemas import TextRulesSetting
-from app.rmmz.control_codes import CustomPlaceholderRule, LITERAL_LINE_BREAK_PLACEHOLDER
+from app.rmmz.control_codes import (
+    CustomPlaceholderRule,
+    LITERAL_LINE_BREAK_PLACEHOLDER,
+    REAL_LINE_BREAK_PLACEHOLDER,
+)
 from app.rmmz.schema import ItemType, TranslationErrorItem, TranslationItem
 from app.rmmz.text_rules import TextRules
 from app.translation.line_wrap import (
@@ -116,7 +120,7 @@ async def test_multiline_short_text_keeps_existing_line_breaks_without_wrapping(
 
     right_items, error_items = await _verify_single_item(
         item=item,
-        translation_lines=["说明\n「甲乙丙丁戊己，庚辛壬癸」"],
+        translation_lines=[f"说明{REAL_LINE_BREAK_PLACEHOLDER}「甲乙丙丁戊己，庚辛壬癸」"],
         text_rules=text_rules,
     )
 
@@ -717,10 +721,10 @@ async def test_short_text_inner_book_title_quote_converted_to_curly_quote_is_res
     )
     translated_text = (
         r"\C[2]事件完成"
-        "\n\n"
+        f"{REAL_LINE_BREAK_PLACEHOLDER}{REAL_LINE_BREAK_PLACEHOLDER}"
         r"\C[24]【详情】\C[0]"
-        "\n得到了研究室。"
-        "\n莉可倒是很精明地搞了个叫“莉可银行”的玩意儿。"
+        f"{REAL_LINE_BREAK_PLACEHOLDER}得到了研究室。"
+        f"{REAL_LINE_BREAK_PLACEHOLDER}莉可倒是很精明地搞了个叫“莉可银行”的玩意儿。"
     )
     item = TranslationItem(
         location_path="plugins.js/1/message",

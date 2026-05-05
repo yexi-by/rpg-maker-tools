@@ -11,7 +11,12 @@ from app.config.custom_placeholder_rules import (
     load_custom_placeholder_rules_text,
 )
 from app.config.schemas import TextRulesSetting
-from app.rmmz.control_codes import CustomPlaceholderRule, LITERAL_ESCAPE_PLACEHOLDERS, LITERAL_LINE_BREAK_PLACEHOLDER
+from app.rmmz.control_codes import (
+    CustomPlaceholderRule,
+    LITERAL_ESCAPE_PLACEHOLDERS,
+    LITERAL_LINE_BREAK_PLACEHOLDER,
+    REAL_LINE_BREAK_PLACEHOLDER,
+)
 from app.rmmz.schema import TranslationItem
 from app.rmmz.text_rules import TextRules, get_default_text_rules
 from app.translation.text_structure import validate_translation_text_structure
@@ -242,6 +247,44 @@ def test_literal_line_break_placeholder_structure_rejects_additions() -> None:
             translation_lines=["说明\\n正文\\n补充"],
             translation_lines_with_placeholders=item.translation_lines_with_placeholders,
         )
+
+
+def test_real_line_break_placeholder_roundtrips_short_text() -> None:
+    """字段内部真实换行会先占位，译文通过后再恢复。"""
+    rules = get_default_text_rules()
+    item = TranslationItem(
+        location_path="Items.json/1/description",
+        item_type="short_text",
+        original_lines=["説明\n本文"],
+    )
+
+    item.build_placeholders(rules)
+    assert item.original_lines_with_placeholders == [
+        f"説明{REAL_LINE_BREAK_PLACEHOLDER}本文"
+    ]
+
+    item.translation_lines_with_placeholders = [
+        f"说明{REAL_LINE_BREAK_PLACEHOLDER}正文"
+    ]
+    item.verify_placeholders(rules)
+    item.restore_placeholders()
+    assert item.translation_lines == ["说明\n正文"]
+
+
+def test_real_line_break_placeholder_rejects_missing_marker() -> None:
+    """模型把真实换行标记改回视觉换行时会被控制符校验拒绝。"""
+    rules = get_default_text_rules()
+    item = TranslationItem(
+        location_path="Items.json/1/description",
+        item_type="short_text",
+        original_lines=["説明\n本文"],
+    )
+
+    item.build_placeholders(rules)
+    item.translation_lines_with_placeholders = ["说明\n正文"]
+
+    with pytest.raises(ValueError, match=REAL_LINE_BREAK_PLACEHOLDER):
+        item.verify_placeholders(rules)
 
 
 def test_custom_placeholder_rules_load_from_json_file(tmp_path: Path) -> None:

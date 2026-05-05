@@ -213,7 +213,10 @@ def _append_item_to_batch(
 ) -> int:
     """将单个正文条目追加到当前批次。"""
     item.build_placeholders(text_rules)
-    masked_text = "\n".join(item.original_lines_with_placeholders)
+    if item.item_type == "short_text":
+        masked_text = "".join(item.original_lines_with_placeholders)
+    else:
+        masked_text = "\n".join(item.original_lines_with_placeholders)
     formatted_item = _format_translation_item(
         item=item,
         masked_text=masked_text,
