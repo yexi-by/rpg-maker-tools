@@ -217,6 +217,7 @@ class AgentToolkitService:
                         base_url=setting.llm.base_url,
                         api_key=setting.llm.api_key,
                         timeout=setting.llm.timeout,
+                        request_body_extra=setting.llm.request_body_extra,
                     )
                     await self.llm_check(self.llm_handler, setting.llm.model)
                     _append_check(details, "llm", "ok")

@@ -45,6 +45,18 @@ $env:RPG_MAKER_TOOLS_LLM_BASE_URL = "<模型服务地址>"
 $env:RPG_MAKER_TOOLS_LLM_API_KEY = "<API_KEY>"
 ```
 
+模型服务需要额外请求参数时，在 `<项目目录>/setting.toml` 的 `[llm]` 下写入 JSON 对象字符串。该对象会原样透传到 OpenAI 兼容 Chat Completions 请求体；当前流程需要先拿到完整模型 JSON 再检查并保存译文，因此配置 `stream=true` 或 `stream_options` 会直接报错。
+
+```toml
+[llm]
+request_body_extra = '''
+{
+  "reasoning_effort": "high",
+  "thinking": {"type": "enabled"}
+}
+'''
+```
+
 ## 基本命令
 
 ```bash

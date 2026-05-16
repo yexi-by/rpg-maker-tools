@@ -139,6 +139,7 @@ def _build_setting_summary(
         "[tag.phase]当前正在使用的配置[/tag.phase]",
         f"配置文件: [tag.path]{setting_path}[/tag.path]",
         f"正文接口: OpenAI 兼容 / 模型 [tag.count]{text_service.model}[/tag.count] / 地址 [tag.path]{text_service.base_url}[/tag.path] / 超时 [tag.count]{text_service.timeout}[/tag.count] 秒",
+        f"模型请求额外参数: [tag.count]{len(text_service.request_body_extra)}[/tag.count] 项",
         f"正文切块: 目标 [tag.count]{setting.translation_context.token_size}[/tag.count] token，换算系数 [tag.count]{setting.translation_context.factor}[/tag.count]，同角色最多连续 [tag.count]{setting.translation_context.max_command_items}[/tag.count] 条",
         f"正文翻译: [tag.count]{setting.text_translation.worker_count}[/tag.count] 个 worker，RPM [tag.count]{setting.text_translation.rpm or '不限'}[/tag.count]，失败重试 [tag.count]{setting.text_translation.retry_count}[/tag.count] 次，间隔 [tag.count]{setting.text_translation.retry_delay}[/tag.count] 秒",
         f"事件指令参数: 默认导出编码 [tag.count]{', '.join(map(str, setting.event_command_text.default_command_codes))}[/tag.count]",

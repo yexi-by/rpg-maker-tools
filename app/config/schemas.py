@@ -10,6 +10,8 @@ from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.llm_request_body_extra import LLMRequestBodyExtra, normalize_request_body_extra
+
 
 class StrictBaseModel(BaseModel):
     """项目统一使用的严格配置模型基类。"""
@@ -24,6 +26,17 @@ class LLMSetting(StrictBaseModel):
     api_key: str = Field(title="API 密钥", description="访问模型服务所需凭据。")
     model: str = Field(title="模型名称", description="实际调用的模型标识。")
     timeout: int = Field(gt=0, title="超时时间", description="单位为秒。")
+    request_body_extra: LLMRequestBodyExtra = Field(
+        default_factory=dict,
+        title="模型请求体额外参数",
+        description="透传到 OpenAI 兼容 Chat Completions 请求体的 JSON 对象。",
+    )
+
+    @field_validator("request_body_extra", mode="before")
+    @classmethod
+    def _validate_request_body_extra(cls, value: object) -> LLMRequestBodyExtra:
+        """解析并校验模型请求体额外参数。"""
+        return normalize_request_body_extra(value, context="llm.request_body_extra")
 
 
 class TranslationContextSetting(StrictBaseModel):

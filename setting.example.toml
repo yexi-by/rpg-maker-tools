@@ -3,6 +3,14 @@ base_url = "https://api.example.com/v1"
 api_key = "YOUR_API_KEY"
 model = "example-model"
 timeout = 600
+# 可选：透传给模型服务请求体的额外 JSON 参数。
+# 当前流程需要完整 JSON 响应后再检查并保存译文，因此不支持 stream=true 或 stream_options。
+# request_body_extra = '''
+# {
+#   "reasoning_effort": "high",
+#   "thinking": {"type": "enabled"}
+# }
+# '''
 
 [translation_context]
 token_size = 1024

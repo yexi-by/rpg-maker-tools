@@ -1,11 +1,11 @@
 """LLM 错误分类与业务层重试测试。"""
 
 from pathlib import Path
-from typing import override
+from typing import cast, override
 
 import httpx
 import pytest
-from openai import APIConnectionError, APIStatusError
+from openai import APIConnectionError, APIStatusError, AsyncOpenAI
 
 from app.llm import (
     ChatMessage,
@@ -14,6 +14,7 @@ from app.llm import (
     LLMRequestFailure,
     is_recoverable_llm_error,
 )
+from app.llm_request_body_extra import LLMRequestBodyExtra
 from app.observability import setup_logger
 from app.translation.retry import request_with_recoverable_retry
 
@@ -43,6 +44,59 @@ class FakeLLMHandler(LLMHandler):
         if self.failures:
             raise self.failures.pop(0)
         return "成功"
+
+
+class FakeCompletionMessage:
+    """模拟 OpenAI SDK 返回的消息对象。"""
+
+    def __init__(self, content: str) -> None:
+        """保存模型文本内容。"""
+        self.content: str = content
+
+
+class FakeChoice:
+    """模拟 OpenAI SDK 返回的候选项。"""
+
+    def __init__(self, content: str) -> None:
+        """保存候选项消息。"""
+        self.message: FakeCompletionMessage = FakeCompletionMessage(content)
+
+
+class FakeChatCompletionResponse:
+    """模拟 OpenAI SDK 的非流式响应。"""
+
+    def __init__(self, content: str) -> None:
+        """保存唯一候选项。"""
+        self.choices: list[FakeChoice] = [FakeChoice(content)]
+
+
+class FakeCompletions:
+    """记录 Chat Completions 请求参数的假实现。"""
+
+    def __init__(self) -> None:
+        """初始化请求记录。"""
+        self.calls: list[dict[str, object]] = []
+
+    async def create(self, **kwargs: object) -> FakeChatCompletionResponse:
+        """记录请求参数并返回固定文本。"""
+        self.calls.append(dict(kwargs))
+        return FakeChatCompletionResponse("成功")
+
+
+class FakeChat:
+    """模拟 OpenAI SDK 的 chat 命名空间。"""
+
+    def __init__(self, completions: FakeCompletions) -> None:
+        """保存 completions 假实现。"""
+        self.completions: FakeCompletions = completions
+
+
+class FakeOpenAIClient:
+    """模拟 OpenAI SDK 客户端。"""
+
+    def __init__(self, completions: FakeCompletions) -> None:
+        """保存 chat 命名空间。"""
+        self.chat: FakeChat = FakeChat(completions)
 
 
 def test_llm_error_classification_distinguishes_recoverable_status() -> None:
@@ -104,3 +158,37 @@ async def test_fatal_llm_error_stops_without_retry(tmp_path: Path) -> None:
     assert handler.call_count == 1
     assert caught_error.value.info.retryable is False
     assert caught_error.value.attempt_count == 1
+
+
+@pytest.mark.asyncio
+async def test_llm_handler_passes_request_body_extra_to_sdk() -> None:
+    """LLM 门面把配置里的额外请求体参数原样透传给 SDK。"""
+    handler = LLMHandler()
+    fake_completions = FakeCompletions()
+    handler.client = cast(AsyncOpenAI, cast(object, FakeOpenAIClient(fake_completions)))
+    request_body_extra: LLMRequestBodyExtra = {
+        "reasoning_effort": "high",
+        "thinking": {"type": "enabled"},
+    }
+    handler.request_body_extra = request_body_extra
+
+    result = await handler.get_ai_response(
+        messages=[ChatMessage(role="user", text="你好")],
+        model="fake-model",
+    )
+
+    assert result == "成功"
+    assert fake_completions.calls[0]["extra_body"] == request_body_extra
+
+
+def test_llm_handler_rejects_streaming_request_body_extra() -> None:
+    """LLM 门面拒绝当前流程不支持的流式返回参数。"""
+    handler = LLMHandler()
+
+    with pytest.raises(ValueError, match="当前不支持 LLM 流式返回"):
+        handler.configure(
+            base_url="https://example.invalid/v1",
+            api_key="fake-key",
+            timeout=10,
+            request_body_extra={"stream": True},
+        )

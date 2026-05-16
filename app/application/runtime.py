@@ -16,6 +16,7 @@ def load_runtime_setting(
         base_url=setting.llm.base_url,
         api_key=setting.llm.api_key,
         timeout=setting.llm.timeout,
+        request_body_extra=setting.llm.request_body_extra,
     )
     return setting
 

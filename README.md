@@ -68,6 +68,7 @@ $env:RPG_MAKER_TOOLS_LLM_API_KEY = "<API_KEY>"
 ```
 
 如果你的模型服务、模型名称或超时时间需要调整，编辑 `<项目目录>/setting.toml`。
+模型服务需要额外请求参数时，也在 `[llm]` 下配置 `request_body_extra` JSON 对象字符串；当前不支持模型流式返回，写入 `stream=true` 或 `stream_options` 会直接报错。
 
 ## 3. 让 Agent 能读取 Skill
 

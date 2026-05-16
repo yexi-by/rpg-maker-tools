@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from app.config import LLM_API_KEY_ENV_NAME, LLM_BASE_URL_ENV_NAME
 from app.config import SettingOverrides
@@ -148,3 +149,89 @@ default_command_codes = [357]
     assert setting.llm.base_url == "https://env.example.com"
     assert setting.llm.api_key == "env-key"
     assert setting.llm.model == "file-model"
+
+
+def test_load_setting_accepts_llm_request_body_extra_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """模型请求体额外参数可以用 JSON 对象字符串配置。"""
+    monkeypatch.delenv(LLM_BASE_URL_ENV_NAME, raising=False)
+    monkeypatch.delenv(LLM_API_KEY_ENV_NAME, raising=False)
+    setting_path = _write_minimal_setting(
+        tmp_path,
+        request_body_extra_text="""
+request_body_extra = '''
+{
+  "reasoning_effort": "high",
+  "thinking": {"type": "enabled"},
+  "max_completion_tokens": 2048
+}
+'''
+""",
+    )
+
+    setting = load_setting(setting_path=setting_path)
+
+    assert setting.llm.request_body_extra == {
+        "reasoning_effort": "high",
+        "thinking": {"type": "enabled"},
+        "max_completion_tokens": 2048,
+    }
+
+
+@pytest.mark.parametrize(
+    "request_body_extra_text",
+    [
+        'request_body_extra = \'\'\'{"stream": true}\'\'\'',
+        'request_body_extra = \'\'\'{"stream_options": {"include_usage": true}}\'\'\'',
+    ],
+)
+def test_load_setting_rejects_streaming_llm_request_body_extra(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request_body_extra_text: str,
+) -> None:
+    """模型请求体额外参数启用流式返回时必须说明原因并停止加载。"""
+    monkeypatch.delenv(LLM_BASE_URL_ENV_NAME, raising=False)
+    monkeypatch.delenv(LLM_API_KEY_ENV_NAME, raising=False)
+    setting_path = _write_minimal_setting(
+        tmp_path,
+        request_body_extra_text=request_body_extra_text,
+    )
+
+    with pytest.raises(ValidationError, match="当前不支持 LLM 流式返回"):
+        _ = load_setting(setting_path=setting_path)
+
+
+def _write_minimal_setting(tmp_path: Path, *, request_body_extra_text: str) -> Path:
+    """写入只包含配置加载测试所需字段的设置文件。"""
+    setting_path = tmp_path / "setting.toml"
+    _ = (tmp_path / "prompt.txt").write_text("系统提示词", encoding="utf-8")
+    _ = setting_path.write_text(
+        f"""
+[llm]
+base_url = "https://example.invalid"
+api_key = "from-file"
+model = "file-model"
+timeout = 10
+{request_body_extra_text}
+
+[translation_context]
+token_size = 10
+factor = 1.0
+max_command_items = 1
+
+[text_translation]
+worker_count = 1
+rpm = 10
+retry_count = 1
+retry_delay = 1
+system_prompt_file = "prompt.txt"
+
+[event_command_text]
+default_command_codes = [357]
+""",
+        encoding="utf-8",
+    )
+    return setting_path

@@ -8,6 +8,8 @@ from openai.types.chat import (
     ChatCompletionUserMessageParam,
 )
 
+from app.llm_request_body_extra import LLMRequestBodyExtra, normalize_request_body_extra
+
 from .errors import EmptyLLMResponseError
 from .schemas import ChatMessage
 
@@ -23,18 +25,32 @@ class LLMHandler:
     def __init__(self) -> None:
         """初始化尚未配置的 LLM 客户端。"""
         self.client: AsyncOpenAI | None = None
+        self.request_body_extra: LLMRequestBodyExtra = {}
 
     def clean(self) -> None:
         """清空已配置客户端。"""
         self.client = None
+        self.request_body_extra = {}
 
-    def configure(self, *, base_url: str, api_key: str, timeout: int) -> None:
+    def configure(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        timeout: int,
+        request_body_extra: LLMRequestBodyExtra | None = None,
+    ) -> None:
         """配置当前唯一的 OpenAI 兼容客户端。"""
+        normalized_request_body_extra = normalize_request_body_extra(
+            request_body_extra,
+            context="LLM 请求自定义参数",
+        )
         self.client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
             timeout=timeout,
         )
+        self.request_body_extra = normalized_request_body_extra
 
     async def get_ai_response(
         self,
@@ -67,12 +83,14 @@ class LLMHandler:
             response = await self.client.chat.completions.create(
                 model=model,
                 messages=request_messages,
+                extra_body=self.request_body_extra or None,
             )
         else:
             response = await self.client.chat.completions.create(
                 model=model,
                 messages=request_messages,
                 temperature=temperature,
+                extra_body=self.request_body_extra or None,
             )
 
         if not response.choices:
