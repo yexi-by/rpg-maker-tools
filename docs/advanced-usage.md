@@ -2,7 +2,7 @@
 
 Autonomous Translation Toolkit for RPG Maker MZ.
 
-A.T.T MZ 是面向 RPG Maker MZ 日文游戏的命令行翻译工具。项目负责提取游戏文本、保存译文记录、导入规则、生成质量报告和写回游戏文件；代理流程负责术语、插件字段、事件指令字段、data Note 标签字段和少量失败项的语义判断。
+A.T.T MZ 是面向 RPG Maker MZ 日文游戏的命令行翻译工具。项目负责提取游戏文本、保存译文记录、导入规则、生成质量报告和写回游戏文件；代理流程负责术语、插件字段、事件指令字段、data Note 标签字段、少量失败项和用户试玩反馈的语义判断。第一次写回生成的是可试玩汉化结果，后续需要按用户反馈继续查缺补漏。
 
 ## 环境要求
 
@@ -103,7 +103,7 @@ uv run python main.py --agent-mode write-back --game <游戏标题> --json
 
 `--json` 的 stdout 只输出最终 JSON。长时间运行的 `translate`、`quality-report`、`write-back`、`write-terminology` 会把无 ANSI 文本进度条输出到 stderr，包含已完成数量、百分比、已用时间、预计剩余时间和当前状态。自动化脚本解析 stdout；观察进度时看 stderr。
 
-普通 `write-back` 只把译文写进游戏文件，不覆盖字体引用。只有用户明确允许字体覆盖时，才可以在最终写回命令里追加 `--confirm-font-overwrite`。如果需要还原曾经由项目覆盖过的字体引用，使用：
+普通 `write-back` 只把译文写进游戏文件，不覆盖字体引用。只有用户明确允许字体覆盖时，才可以在本轮写回命令里追加 `--confirm-font-overwrite`。如果需要还原曾经由项目覆盖过的字体引用，使用：
 
 ```powershell
 uv run python main.py --agent-mode restore-font --game <游戏标题> --json
@@ -113,7 +113,7 @@ uv run python main.py --agent-mode restore-font --game <游戏标题> --json
 
 ## Agent 自动翻译示范（以 Claude Code 为例）
 
-下面示范面向第一次使用的 Agent 操作者。A.T.T MZ 不绑定某一个 Agent；Codex、Claude Code 或其他能读取项目文件并运行命令的工具都可以使用。核心思路是：先让 Agent 读取本项目 Skill，再由它按 CLI 协议准备工作区、分析规则、小批量翻译、质量检查、手动填写失败译文和写回。
+下面示范面向第一次使用的 Agent 操作者。A.T.T MZ 不绑定某一个 Agent；Codex、Claude Code 或其他能读取项目文件并运行命令的工具都可以使用。核心思路是：先让 Agent 读取本项目 Skill，再由它按 CLI 协议准备工作区、分析规则、小批量翻译、质量检查、手动填写失败译文并写回第一版可试玩汉化结果；用户试玩后继续把问题反馈给 Agent 迭代修复。
 
 友情提示：Windows 终端容易把中日文和控制符显示成乱码。启动 Agent 前，先在同一个 PowerShell 会话里设置 UTF-8：
 
@@ -152,11 +152,12 @@ claude --permission-mode bypassPermissions
 6. 质量问题优先用 export-quality-fix-template 导出可填写的修复表，再用 import-manual-translations 导入。
 7. 如果还有没成功保存译文的文本，使用 export-untranslated-translations 导出完整译文表，只填写 translation_lines，也就是中文译文行。
 8. 不直接修改数据库，不跳过 validate，不在 quality-report 报告错误时执行 write-back，也就是把译文写进游戏文件。
-9. 最终写回前先向我确认；我确认后再执行 write-back --json。
+9. 本轮写回前先向我确认；我确认后再执行 write-back --json。
 10. 除非我单独明确允许覆盖字体，否则不要添加 --confirm-font-overwrite。
+11. 写回完成后提醒我先实际游玩，把漏翻、误翻、显示异常和语气不自然的地方反馈回来；收到反馈后先整理成修复清单，再定位问题、修译文或补规则、重新运行质量检查，并在我确认后再次写回。
 ```
 
-新手建议先让 Agent 跑到小批量质量报告为止，确认没有占位符、乱码、超宽行和日文残留问题后，再让它继续全量翻译。若 Agent 输出出现乱码，先停止当前阶段，重新设置 UTF-8 后再重跑相关命令，不要基于乱码内容修译文或规则。
+新手建议先让 Agent 跑到小批量质量报告为止，确认没有占位符、乱码、超宽行和明显日文残留后，再让它继续全量翻译。第一次写回后先试玩，不要把第一版当成最终完成；若 Agent 输出出现乱码，先停止当前阶段，重新设置 UTF-8 后再重跑相关命令，不要基于乱码内容修译文或规则。
 
 ## 外部分析数据
 
