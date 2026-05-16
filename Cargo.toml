@@ -1,17 +1,32 @@
-[package]
-name = "att-mz-native"
+[workspace]
+members = [
+    "crates/att-mz-cli",
+    "crates/att-mz-core",
+    "xtask",
+]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+rust-version = "1.95"
 
-[lib]
-name = "_native"
-path = "rust_app/lib.rs"
-crate-type = ["cdylib"]
-
-[dependencies]
+[workspace.dependencies]
+anyhow = "1.0"
+att-mz-core = { path = "crates/att-mz-core" }
+clap = { version = "4.5", features = ["derive"] }
 fancy-regex = "0.16"
-pyo3 = { version = "0.28.3", features = ["extension-module"] }
 rayon = "1.11"
 regex = "1.12"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
+sha1 = "0.10"
+sha2 = "0.10"
+tempfile = "3.14"
+thiserror = "2.0"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

@@ -1,33 +1,22 @@
-# Python cache and bytecode
-__pycache__/
-*.py[cod]
-
-# Virtual environments
-.venv/
-venv/
-
-# Test and tooling caches
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+# Build and tooling caches
 target/
+dist/
+.tools/
 
 # IDE and OS files
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
-app/_native*.pdb
 
 # Runtime logs and generated scripts
 logs/
 scripts/
 
-
-
 AGENTS.md
 data/
 tmp/
+
 # Local secrets and machine-specific settings
 setting.toml
 

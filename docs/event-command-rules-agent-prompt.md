@@ -58,7 +58,7 @@
 写完后建议主代理运行：
 
 ```powershell
-uv run python main.py --agent-mode validate-event-command-rules --game <游戏标题> --input <工作区>/event-command-rules.json --json
+<att-mz> validate-event-command-rules --game <游戏标题> --input <工作区>/event-command-rules.json --json
 ```
 
 如果校验失败，只修 `<工作区>/event-command-rules.json` 后重跑同一校验命令；不要绕过 CLI 导入。

@@ -1,0 +1,18 @@
+[package]
+name = "att-mz"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "att-mz"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+att-mz-core.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
