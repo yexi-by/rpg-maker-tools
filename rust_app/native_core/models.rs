@@ -1,0 +1,151 @@
+//! Rust 原生核心数据模型。
+//!
+//! 本模块定义 Python JSON 边界进入 Rust 后使用的载荷、输出和内部共享结构。
+
+use fancy_regex::Regex as FancyRegex;
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct QualityPayload {
+    pub(crate) items: Vec<NativeTranslationItem>,
+    pub(crate) text_rules: NativeTextRules,
+    pub(crate) japanese_residual_rules: Vec<NativeJapaneseResidualRule>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ProtocolPayload {
+    pub(crate) entries: Vec<ProtocolEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct NoteSourcesPayload {
+    pub(crate) data: HashMap<String, Value>,
+    pub(crate) file_pattern: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct NoteTagSourceOutput {
+    pub(crate) file_name: String,
+    pub(crate) owner_path: Vec<String>,
+    pub(crate) note_text: String,
+    pub(crate) location_prefix: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct FontReplacementPayload {
+    pub(crate) data: HashMap<String, Value>,
+    pub(crate) plugins: Vec<Value>,
+    pub(crate) old_font_names: Vec<String>,
+    pub(crate) replacement_font_name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct FontReplacementOutput {
+    pub(crate) data_changes: Vec<FontReplacementChange>,
+    pub(crate) plugin_changes: Vec<FontReplacementChange>,
+    pub(crate) replaced_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct FontReplacementChange {
+    pub(crate) file_name: String,
+    pub(crate) value_path: String,
+    pub(crate) original_text: String,
+    pub(crate) replaced_text: String,
+    pub(crate) count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ProtocolEntry {
+    pub(crate) item: NativeTranslationItem,
+    pub(crate) mode: String,
+    pub(crate) current_value: Option<Value>,
+    pub(crate) path_parts: Vec<String>,
+    pub(crate) note_text: Option<String>,
+    pub(crate) tag_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct NativeTranslationItem {
+    pub(crate) location_path: String,
+    pub(crate) item_type: String,
+    pub(crate) role: Option<String>,
+    pub(crate) original_lines: Vec<String>,
+    pub(crate) translation_lines: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct NativeTextRules {
+    pub(crate) custom_placeholder_rules: Vec<NativeCustomPlaceholderRule>,
+    pub(crate) allowed_japanese_chars: Vec<String>,
+    pub(crate) allowed_japanese_tail_chars: Vec<String>,
+    pub(crate) japanese_segment_pattern: String,
+    pub(crate) line_width_count_pattern: String,
+    pub(crate) residual_escape_sequence_pattern: String,
+    pub(crate) long_text_line_width_limit: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct NativeCustomPlaceholderRule {
+    pub(crate) pattern_text: String,
+    pub(crate) placeholder_template: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct NativeJapaneseResidualRule {
+    pub(crate) location_path: String,
+    pub(crate) allowed_terms: Vec<String>,
+    pub(crate) reason: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct QualityScanOutput {
+    pub(crate) japanese_residual_items: Vec<Value>,
+    pub(crate) text_structure_items: Vec<Value>,
+    pub(crate) placeholder_risk_items: Vec<Value>,
+    pub(crate) overwide_line_items: Vec<Value>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompiledRules {
+    pub(crate) custom_placeholder_rules: Vec<CompiledCustomRule>,
+    pub(crate) allowed_japanese_chars: HashSet<char>,
+    pub(crate) allowed_japanese_tail_chars: HashSet<char>,
+    pub(crate) japanese_segment_re: Regex,
+    pub(crate) line_width_count_re: Regex,
+    pub(crate) residual_escape_sequence_re: Regex,
+    pub(crate) long_text_line_width_limit: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompiledCustomRule {
+    pub(crate) pattern: FancyRegex,
+    pub(crate) placeholder_template: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ControlSpan {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) original: String,
+    pub(crate) placeholder: Option<String>,
+    pub(crate) custom_template: Option<String>,
+    pub(crate) source: SpanSource,
+    pub(crate) priority: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SpanSource {
+    Standard,
+    Custom,
+}
+
+#[derive(Debug)]
+pub(crate) struct PlaceholderBuild {
+    pub(crate) original_lines_with_placeholders: Vec<String>,
+    pub(crate) placeholder_map: HashMap<String, String>,
+    pub(crate) placeholder_counts: HashMap<String, usize>,
+}

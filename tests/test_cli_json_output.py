@@ -15,6 +15,8 @@ from app.cli import build_progress_reporter
 from app.cli import build_translate_summary_report
 from app.cli import collect_write_back_gate_errors
 from app.cli import ensure_text_translation_not_blocked
+from app.cli import parser_command_names
+from app.cli import registered_command_names
 from app.cli import write_report_outputs
 from app.application.summaries import TextTranslationSummary
 from app.rmmz.json_types import coerce_json_value, ensure_json_object
@@ -27,6 +29,13 @@ def namespace_optional_str(args: object, name: str) -> str | None:
         return None
     assert isinstance(raw_value, str)
     return raw_value
+
+
+def test_parser_commands_have_dispatch_handlers() -> None:
+    """解析器暴露的每个子命令都必须在分发器中有处理函数。"""
+    parser = build_parser()
+
+    assert parser_command_names(parser) == registered_command_names()
 
 
 def test_json_command_reports_unexpected_error_as_parseable_json(
