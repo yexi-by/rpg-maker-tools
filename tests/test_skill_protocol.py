@@ -364,6 +364,9 @@ def test_release_packaging_script_uses_release_skill_template() -> None:
         "ensure_github_actions_environment",
         "GITHUB_ACTIONS",
         "发行版构建只能在 GitHub Actions release 工作流中执行",
+        "configure_stdio_encoding",
+        'encoding="utf-8"',
+        'errors="replace"',
     ]
     for phrase in required_phrases:
         assert phrase in text

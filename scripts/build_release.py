@@ -11,8 +11,10 @@ import argparse
 import os
 import shutil
 import subprocess
+import sys
 import zipfile
 from dataclasses import dataclass
+from io import TextIOWrapper
 from pathlib import Path
 from typing import cast
 
@@ -67,6 +69,13 @@ def ensure_source_exists(path: Path) -> None:
     """确认发布资源存在。"""
     if not path.exists():
         raise FileNotFoundError(f"发布资源不存在: {path}")
+
+
+def configure_stdio_encoding() -> None:
+    """把发布脚本输出固定为 UTF-8，避免 GitHub Windows runner 使用窄编码。"""
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, TextIOWrapper):
+            stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 def ensure_github_actions_environment() -> None:
@@ -152,13 +161,23 @@ def copy_release_resources(release_dir: Path) -> None:
 def run_smoke_tests(release_dir: Path) -> None:
     """验证发行版入口能启动并能读取空注册表。"""
     exe_path = release_dir / "att-mz.exe"
-    subprocess.run([str(exe_path), "--help"], cwd=release_dir, check=True, capture_output=True, text=True)
+    subprocess.run(
+        [str(exe_path), "--help"],
+        cwd=release_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
     subprocess.run(
         [str(exe_path), "list", "--json"],
         cwd=release_dir,
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
 
 
@@ -195,6 +214,7 @@ def create_release_zip(release_dir: Path, zip_path: Path) -> None:
 
 def main() -> int:
     """执行发行版构建。"""
+    configure_stdio_encoding()
     ensure_github_actions_environment()
     options = parse_args()
     release_dir = options.output_dir / RELEASE_DIRECTORY_NAME
