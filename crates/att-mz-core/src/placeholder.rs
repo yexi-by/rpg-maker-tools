@@ -4,6 +4,7 @@
 //! 入库前完成正则编译、空匹配检查和模板形状检查，避免无效规则污染长期数据库。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use fancy_regex::Regex as FancyRegex;
 use regex::Regex;
@@ -177,7 +178,8 @@ pub fn build_placeholder_context(
             last_end = span.end;
         }
         text_for_model.push_str(&original_line[last_end..]);
-        if text_for_model.contains('\n') {
+        let real_line_break_count = text_for_model.matches('\n').count();
+        if real_line_break_count > 0 {
             register_placeholder_mapping(
                 &mut original_to_placeholder,
                 &mut placeholder_to_original,
@@ -185,6 +187,9 @@ pub fn build_placeholder_context(
                 "\n",
                 REAL_LINE_BREAK_PLACEHOLDER,
             )?;
+            if let Some(count) = placeholder_counts.get_mut(REAL_LINE_BREAK_PLACEHOLDER) {
+                *count += real_line_break_count.saturating_sub(1);
+            }
             text_for_model = text_for_model.replace('\n', REAL_LINE_BREAK_PLACEHOLDER);
         }
         text_for_model_lines.push(text_for_model);
@@ -358,17 +363,21 @@ fn validate_custom_placeholder_rule(pattern_text: &str, placeholder_template: &s
         )));
     }
     let preview = format_placeholder_template(placeholder_template)?;
-    let standard_pattern = Regex::new(r"(?i)^\[RMMZ_[A-Z0-9_]+\]$")
-        .map_err(|error| AttMzError::InvalidConfig(format!("标准占位符检查正则不可用: {error}")))?;
+    let standard_pattern = cached_regex(
+        &STANDARD_PLACEHOLDER_TEMPLATE_RE,
+        r"(?i)^\[RMMZ_[A-Z0-9_]+\]$",
+        "标准占位符检查正则不可用",
+    )?;
     if standard_pattern.is_match(&preview) {
         return Err(AttMzError::InvalidConfig(format!(
             "自定义占位符模板不能生成 RMMZ 标准占位符: {placeholder_template}"
         )));
     }
-    let custom_pattern = Regex::new(r"(?i)^\[CUSTOM_[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_\d+\]$")
-        .map_err(|error| {
-            AttMzError::InvalidConfig(format!("自定义占位符检查正则不可用: {error}"))
-        })?;
+    let custom_pattern = cached_regex(
+        &CUSTOM_PLACEHOLDER_TEMPLATE_RE,
+        r"(?i)^\[CUSTOM_[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_\d+\]$",
+        "自定义占位符检查正则不可用",
+    )?;
     if !custom_pattern.is_match(&preview) {
         return Err(AttMzError::InvalidConfig(format!(
             "自定义占位符模板必须生成形如 [CUSTOM_NAME_1] 的方括号占位符，当前生成: {preview}"
@@ -377,10 +386,27 @@ fn validate_custom_placeholder_rule(pattern_text: &str, placeholder_template: &s
     Ok(())
 }
 
-fn compile_custom_placeholder_regex(pattern_text: &str) -> Result<FancyRegex> {
-    FancyRegex::new(pattern_text).map_err(|error| {
+fn compile_custom_placeholder_regex(pattern_text: &str) -> Result<Arc<FancyRegex>> {
+    let cache = custom_placeholder_regex_cache();
+    {
+        let guard = cache.lock().map_err(|error| {
+            AttMzError::InvalidConfig(format!("自定义占位符正则缓存不可用: {error}"))
+        })?;
+        if let Some(pattern) = guard.get(pattern_text) {
+            return Ok(pattern.clone());
+        }
+    }
+
+    let compiled = Arc::new(FancyRegex::new(pattern_text).map_err(|error| {
         AttMzError::InvalidConfig(format!("自定义占位符正则无效: {pattern_text}: {error}"))
-    })
+    })?);
+    let mut guard = cache.lock().map_err(|error| {
+        AttMzError::InvalidConfig(format!("自定义占位符正则缓存不可用: {error}"))
+    })?;
+    Ok(guard
+        .entry(pattern_text.to_string())
+        .or_insert_with(|| compiled.clone())
+        .clone())
 }
 
 fn append_placeholder_rule_safety_issues(
@@ -532,8 +558,11 @@ fn select_control_spans(rules: &[PlaceholderRule], text: &str) -> Result<Vec<Con
 
 fn standard_control_spans(text: &str) -> Result<Vec<ControlSpan>> {
     let mut spans = Vec::new();
-    let indexed = Regex::new(r"\\(?P<code>PX|PY|FS|V|N|P|C|I)\[(?P<param>\d+)\]")
-        .map_err(|error| AttMzError::InvalidConfig(format!("标准控制符正则不可用: {error}")))?;
+    let indexed = cached_regex(
+        &STANDARD_INDEXED_CONTROL_RE,
+        r"\\(?P<code>PX|PY|FS|V|N|P|C|I)\[(?P<param>\d+)\]",
+        "标准控制符正则不可用",
+    )?;
     for captures in indexed.captures_iter(text) {
         let Some(matched) = captures.get(0) else {
             continue;
@@ -557,8 +586,11 @@ fn standard_control_spans(text: &str) -> Result<Vec<ControlSpan>> {
             kind: SpanKind::Standard(format!("[RMMZ_{name}_{param}]")),
         });
     }
-    let no_param = Regex::new(r"\\G")
-        .map_err(|error| AttMzError::InvalidConfig(format!("标准控制符正则不可用: {error}")))?;
+    let no_param = cached_regex(
+        &STANDARD_NO_PARAM_CONTROL_RE,
+        r"\\G",
+        "标准控制符正则不可用",
+    )?;
     for matched in no_param.find_iter(text) {
         if next_char_after(text, matched.end())
             .is_some_and(|char_value| char_value.is_ascii_alphabetic() || char_value == '[')
@@ -573,8 +605,11 @@ fn standard_control_spans(text: &str) -> Result<Vec<ControlSpan>> {
             kind: SpanKind::Standard("[RMMZ_CURRENCY_UNIT]".to_string()),
         });
     }
-    let symbol = Regex::new(r"\\(?P<symbol>[{}\\$.\|!><^])")
-        .map_err(|error| AttMzError::InvalidConfig(format!("标准控制符正则不可用: {error}")))?;
+    let symbol = cached_regex(
+        &STANDARD_SYMBOL_CONTROL_RE,
+        r"\\(?P<symbol>[{}\\$.\|!><^])",
+        "标准控制符正则不可用",
+    )?;
     for captures in symbol.captures_iter(text) {
         let Some(matched) = captures.get(0) else {
             continue;
@@ -594,8 +629,11 @@ fn standard_control_spans(text: &str) -> Result<Vec<ControlSpan>> {
             kind: SpanKind::Standard(placeholder.to_string()),
         });
     }
-    let percent = Regex::new(r"%(?P<param>\d+)")
-        .map_err(|error| AttMzError::InvalidConfig(format!("标准控制符正则不可用: {error}")))?;
+    let percent = cached_regex(
+        &STANDARD_PERCENT_ARGUMENT_RE,
+        r"%(?P<param>\d+)",
+        "标准控制符正则不可用",
+    )?;
     for captures in percent.captures_iter(text) {
         let Some(matched) = captures.get(0) else {
             continue;
@@ -672,26 +710,42 @@ fn symbol_placeholder(symbol: &str) -> Option<&'static str> {
 fn literal_escape_spans(text: &str) -> Result<Vec<ControlSpan>> {
     let mut spans = Vec::new();
     for (original, placeholder) in literal_escape_placeholders() {
-        let pattern = Regex::new(&regex::escape(original))
-            .map_err(|error| AttMzError::InvalidConfig(format!("字面量转义正则不可用: {error}")))?;
-        for matched in pattern.find_iter(text) {
+        for (start, matched_text) in text.match_indices(original) {
             spans.push(ControlSpan {
-                start: matched.start(),
-                end: matched.end(),
-                original: matched.as_str().to_string(),
+                start,
+                end: start + matched_text.len(),
+                original: matched_text.to_string(),
                 priority: 0,
                 kind: SpanKind::Standard(placeholder.to_string()),
             });
         }
     }
-    for (escape_name, pattern_text) in [
-        ("UNICODE", r"\\(?:u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})"),
-        ("HEX", r"\\x[0-9A-Fa-f]{2}"),
-        ("OCTAL", r"\\[0-7]{1,3}"),
+    for (escape_name, pattern) in [
+        (
+            "UNICODE",
+            cached_regex(
+                &LITERAL_UNICODE_ESCAPE_RE,
+                r"\\(?:u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})",
+                "字面量动态转义正则不可用",
+            )?,
+        ),
+        (
+            "HEX",
+            cached_regex(
+                &LITERAL_HEX_ESCAPE_RE,
+                r"\\x[0-9A-Fa-f]{2}",
+                "字面量动态转义正则不可用",
+            )?,
+        ),
+        (
+            "OCTAL",
+            cached_regex(
+                &LITERAL_OCTAL_ESCAPE_RE,
+                r"\\[0-7]{1,3}",
+                "字面量动态转义正则不可用",
+            )?,
+        ),
     ] {
-        let pattern = Regex::new(pattern_text).map_err(|error| {
-            AttMzError::InvalidConfig(format!("字面量动态转义正则不可用: {error}"))
-        })?;
         for matched in pattern.find_iter(text) {
             if escape_name == "OCTAL"
                 && next_char_after(text, matched.end()).is_some_and(|char_value| char_value == '[')
@@ -763,11 +817,12 @@ fn register_placeholder_mapping(
     Ok(())
 }
 
-fn all_placeholder_pattern() -> Result<Regex> {
-    Regex::new(
+fn all_placeholder_pattern() -> Result<&'static Regex> {
+    cached_regex(
+        &ALL_PLACEHOLDER_RE,
         r"(?i)\[RMMZ_(?:VARIABLE|ACTOR_NAME|PARTY_MEMBER_NAME|TEXT_COLOR|ICON|TEXT_X_POSITION|TEXT_Y_POSITION|FONT_SIZE)_\d+\]|\[RMMZ_MESSAGE_ARGUMENT_\d+\]|\[RMMZ_LITERAL_(?:UNICODE|HEX|OCTAL)_ESCAPE_[0-9A-F]+\]|\[RMMZ_REAL_LINE_BREAK\]|\[RMMZ_LITERAL_LINE_BREAK\]|\[RMMZ_LITERAL_DOUBLE_QUOTE\]|\[RMMZ_LITERAL_SINGLE_QUOTE\]|\[RMMZ_LITERAL_SLASH\]|\[RMMZ_LITERAL_QUESTION_MARK\]|\[RMMZ_LITERAL_BELL\]|\[RMMZ_LITERAL_BACKSPACE\]|\[RMMZ_LITERAL_FORM_FEED\]|\[RMMZ_LITERAL_CARRIAGE_RETURN\]|\[RMMZ_LITERAL_TAB\]|\[RMMZ_LITERAL_VERTICAL_TAB\]|\[RMMZ_CURRENCY_UNIT\]|\[RMMZ_FONT_LARGER\]|\[RMMZ_FONT_SMALLER\]|\[RMMZ_BACKSLASH\]|\[RMMZ_SHOW_GOLD_WINDOW\]|\[RMMZ_WAIT_SHORT\]|\[RMMZ_WAIT_LONG\]|\[RMMZ_WAIT_INPUT\]|\[RMMZ_INSTANT_TEXT_ON\]|\[RMMZ_INSTANT_TEXT_OFF\]|\[RMMZ_NO_WAIT\]|\[CUSTOM_[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_\d+\]",
+        "占位符识别正则不可用",
     )
-    .map_err(|error| AttMzError::InvalidConfig(format!("占位符识别正则不可用: {error}")))
 }
 
 fn build_unprotected_control_warnings(
@@ -819,8 +874,10 @@ fn build_unprotected_control_warnings(
 }
 
 fn raw_control_sequence_candidates(text: &str) -> Vec<RawCandidate> {
-    let Ok(pattern) = Regex::new(
+    let Ok(pattern) = cached_regex(
+        &RAW_CONTROL_SEQUENCE_RE,
         r"\\[A-Za-z]+\d*\[[A-Za-z0-9_./:-]{1,32}[^\]\w\s\[\]\\]|\\[A-Za-z]+\d*(?:\[[^\]\r\n]{0,64}\])?|\\[{}\$\.\|!><\^]",
+        "疑似控制符扫描正则不可用",
     ) else {
         return Vec::new();
     };
@@ -917,6 +974,38 @@ enum SpanKind {
 const LITERAL_LINE_BREAK_PLACEHOLDER: &str = "[RMMZ_LITERAL_LINE_BREAK]";
 const REAL_LINE_BREAK_PLACEHOLDER: &str = "[RMMZ_REAL_LINE_BREAK]";
 
+static STANDARD_PLACEHOLDER_TEMPLATE_RE: OnceLock<Regex> = OnceLock::new();
+static CUSTOM_PLACEHOLDER_TEMPLATE_RE: OnceLock<Regex> = OnceLock::new();
+static STANDARD_INDEXED_CONTROL_RE: OnceLock<Regex> = OnceLock::new();
+static STANDARD_NO_PARAM_CONTROL_RE: OnceLock<Regex> = OnceLock::new();
+static STANDARD_SYMBOL_CONTROL_RE: OnceLock<Regex> = OnceLock::new();
+static STANDARD_PERCENT_ARGUMENT_RE: OnceLock<Regex> = OnceLock::new();
+static LITERAL_UNICODE_ESCAPE_RE: OnceLock<Regex> = OnceLock::new();
+static LITERAL_HEX_ESCAPE_RE: OnceLock<Regex> = OnceLock::new();
+static LITERAL_OCTAL_ESCAPE_RE: OnceLock<Regex> = OnceLock::new();
+static ALL_PLACEHOLDER_RE: OnceLock<Regex> = OnceLock::new();
+static RAW_CONTROL_SEQUENCE_RE: OnceLock<Regex> = OnceLock::new();
+static CUSTOM_PLACEHOLDER_REGEX_CACHE: OnceLock<Mutex<BTreeMap<String, Arc<FancyRegex>>>> =
+    OnceLock::new();
+
+fn cached_regex(
+    slot: &'static OnceLock<Regex>,
+    pattern_text: &'static str,
+    context: &str,
+) -> Result<&'static Regex> {
+    if slot.get().is_none() {
+        let compiled = Regex::new(pattern_text)
+            .map_err(|error| AttMzError::InvalidConfig(format!("{context}: {error}")))?;
+        let _set_result = slot.set(compiled);
+    }
+    slot.get()
+        .ok_or_else(|| AttMzError::InvalidConfig(format!("{context}: 正则缓存初始化失败")))
+}
+
+fn custom_placeholder_regex_cache() -> &'static Mutex<BTreeMap<String, Arc<FancyRegex>>> {
+    CUSTOM_PLACEHOLDER_REGEX_CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
 struct RawCandidate {
     start: usize,
     end: usize,
@@ -969,6 +1058,26 @@ mod tests {
         );
         assert_eq!(samples[0]["restored_text"], r"\F[GuideA]こんにちは\V[1]");
         assert_eq!(samples[0]["roundtrip_ok"], true);
+    }
+
+    #[test]
+    fn real_line_break_placeholder_count_tracks_all_breaks() {
+        let context = build_placeholder_context(&[], &["第一行\n第二行\n第三行".to_string()])
+            .expect("真实换行应可遮蔽");
+        assert_eq!(
+            context.placeholder_counts.get(REAL_LINE_BREAK_PLACEHOLDER),
+            Some(&2)
+        );
+
+        let masked = mask_translation_controls(&[], &context, &["一\n二\n三".to_string()])
+            .expect("译文真实换行应可遮蔽");
+        verify_placeholder_counts(&context, &masked).expect("真实换行数量一致时应通过");
+
+        let wrong_masked = mask_translation_controls(&[], &context, &["一\n二".to_string()])
+            .expect("译文真实换行应可遮蔽");
+        let error = verify_placeholder_counts(&context, &wrong_masked)
+            .expect_err("真实换行数量减少时应失败");
+        assert!(error.to_string().contains("数量错误"));
     }
 
     #[test]

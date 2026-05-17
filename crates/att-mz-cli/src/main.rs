@@ -1814,6 +1814,16 @@ fn run_import_placeholder_rules_command(
             );
         }
     };
+    let validation_report =
+        att_mz_core::validate_placeholder_rules_report(&rules, &[], "import-placeholder-rules");
+    if !validation_report.errors.is_empty() {
+        return emit_report(
+            validation_report,
+            None,
+            args.json_output,
+            "自定义占位符规则导入报告",
+        );
+    }
     match registry.replace_placeholder_rules(&game_record.game_title, &rules) {
         Ok(imported_rule_count) => {
             if args.json_output {

@@ -30,8 +30,8 @@ use crate::placeholder_scan::ActiveTextItem;
 use crate::report::{AgentReport, issue};
 use crate::rmmz::read_data_json_files;
 use crate::translation_state::{
-    check_japanese_residual_for_item, load_active_translation_items,
-    normalize_manual_translation_lines, validate_translation_text_structure,
+    check_japanese_residual_for_item, compile_line_width_pattern, load_active_translation_items,
+    normalize_manual_translation_lines_with_pattern, validate_translation_text_structure,
 };
 use crate::{GameRecord, GameRegistry};
 
@@ -1202,6 +1202,20 @@ fn verify_translation_response(
     text_rules: &TextRuleOptions,
     residual_rules: &BTreeMap<String, JapaneseResidualRuleRecord>,
 ) -> std::result::Result<Vec<TranslationItemRecord>, Vec<TranslationErrorItemRecord>> {
+    let width_pattern = compile_line_width_pattern(text_rules).map_err(|error| {
+        items
+            .iter()
+            .map(|item| {
+                translation_error(
+                    item,
+                    Vec::new(),
+                    "文本规则配置不可用",
+                    vec![error.to_string()],
+                    ai_result,
+                )
+            })
+            .collect::<Vec<_>>()
+    })?;
     let response_items = match parse_translation_response(ai_result) {
         Ok(response_items) => response_items,
         Err(error) => {
@@ -1264,6 +1278,7 @@ fn verify_translation_response(
             model_lines,
             custom_rules,
             text_rules,
+            &width_pattern,
             residual_rules.get(&item.location_path),
         ) {
             Ok(record) => right_items.push(record),
@@ -1369,6 +1384,7 @@ fn verify_single_item(
     model_lines: &[String],
     custom_rules: &[PlaceholderRule],
     text_rules: &TextRuleOptions,
+    width_pattern: &regex::Regex,
     residual_rule: Option<&JapaneseResidualRuleRecord>,
 ) -> std::result::Result<TranslationItemRecord, Box<TranslationErrorItemRecord>> {
     if item.item_type == "short_text" && model_lines.len() != 1 {
@@ -1396,16 +1412,21 @@ fn verify_single_item(
             "",
         )));
     }
-    let normalized_lines = normalize_manual_translation_lines(item, model_lines, text_rules)
-        .map_err(|error| {
-            Box::new(translation_error(
-                item,
-                model_lines.to_vec(),
-                "文本结构不匹配",
-                vec![error.to_string()],
-                "",
-            ))
-        })?;
+    let normalized_lines = normalize_manual_translation_lines_with_pattern(
+        item,
+        model_lines,
+        text_rules,
+        width_pattern,
+    )
+    .map_err(|error| {
+        Box::new(translation_error(
+            item,
+            model_lines.to_vec(),
+            "文本结构不匹配",
+            vec![error.to_string()],
+            "",
+        ))
+    })?;
     let context =
         build_placeholder_context(custom_rules, &item.original_lines).map_err(|error| {
             Box::new(translation_error(
@@ -1459,7 +1480,7 @@ fn verify_single_item(
             "",
         ))
     })?;
-    check_japanese_residual_for_item(item, &restored_lines, residual_rule, text_rules).map_err(
+    check_japanese_residual_for_item(item, &masked_lines, residual_rule, text_rules).map_err(
         |error| {
             Box::new(translation_error(
                 item,
@@ -1669,11 +1690,14 @@ mod tests {
             source_line_paths: Vec::new(),
         };
 
+        let options = TextRuleOptions::default();
+        let width_pattern = compile_line_width_pattern(&options).expect("行宽正则应可编译");
         let record = verify_single_item(
             &item,
             &["你好[RMMZ_VARIABLE_1]".to_string()],
             &[],
-            &TextRuleOptions::default(),
+            &options,
+            &width_pattern,
             None,
         )
         .expect("模型译文应通过校验");

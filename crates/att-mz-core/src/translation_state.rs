@@ -817,6 +817,7 @@ pub fn import_manual_translations_report(
         .iter()
         .map(|record| (record.location_path.as_str(), record))
         .collect::<BTreeMap<_, _>>();
+    let width_pattern = compile_line_width_pattern(text_rules)?;
 
     let mut errors = Vec::new();
     let mut valid_items = Vec::new();
@@ -852,6 +853,7 @@ pub fn import_manual_translations_report(
                     &custom_rules,
                     residual_rule_map.get(location_path.as_str()).copied(),
                     text_rules,
+                    &width_pattern,
                 )
             });
         match result {
@@ -1614,6 +1616,7 @@ pub(crate) fn prepare_manual_translation_item(
     custom_rules: &[PlaceholderRule],
     residual_rule: Option<&JapaneseResidualRuleRecord>,
     text_rules: &TextRuleOptions,
+    width_pattern: &Regex,
 ) -> Result<TranslationItemRecord> {
     if translation_lines.is_empty() || !translation_lines.iter().any(|line| !line.trim().is_empty())
     {
@@ -1643,8 +1646,12 @@ pub(crate) fn prepare_manual_translation_item(
         )));
     }
 
-    let normalized_translation_lines =
-        normalize_manual_translation_lines(item, &translation_lines, text_rules)?;
+    let normalized_translation_lines = normalize_manual_translation_lines_with_pattern(
+        item,
+        &translation_lines,
+        text_rules,
+        width_pattern,
+    )?;
     let placeholder_context = build_placeholder_context(custom_rules, &item.original_lines)?;
     let masked_translation_lines = mask_translation_controls(
         custom_rules,
@@ -1669,12 +1676,7 @@ pub(crate) fn prepare_manual_translation_item(
             format_control_counts(&translated_raw_controls),
         )));
     }
-    check_japanese_residual_for_item(
-        item,
-        &normalized_translation_lines,
-        residual_rule,
-        text_rules,
-    )?;
+    check_japanese_residual_for_item(item, &masked_translation_lines, residual_rule, text_rules)?;
 
     Ok(TranslationItemRecord {
         location_path: item.location_path.clone(),
@@ -1686,10 +1688,26 @@ pub(crate) fn prepare_manual_translation_item(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn normalize_manual_translation_lines(
     item: &ActiveTextItem,
     translation_lines: &[String],
     text_rules: &TextRuleOptions,
+) -> Result<Vec<String>> {
+    let width_pattern = compile_line_width_pattern(text_rules)?;
+    normalize_manual_translation_lines_with_pattern(
+        item,
+        translation_lines,
+        text_rules,
+        &width_pattern,
+    )
+}
+
+pub(crate) fn normalize_manual_translation_lines_with_pattern(
+    item: &ActiveTextItem,
+    translation_lines: &[String],
+    text_rules: &TextRuleOptions,
+    width_pattern: &Regex,
 ) -> Result<Vec<String>> {
     let cleaned_lines = translation_lines
         .iter()
@@ -1700,13 +1718,20 @@ pub(crate) fn normalize_manual_translation_lines(
     if item.item_type != "long_text" {
         return Ok(normalized_lines);
     }
-    split_overwide_lines(&normalized_lines, text_rules)
+    split_overwide_lines(&normalized_lines, text_rules, width_pattern)
 }
 
-fn split_overwide_lines(lines: &[String], text_rules: &TextRuleOptions) -> Result<Vec<String>> {
-    let width_pattern = Regex::new(&text_rules.line_width_count_pattern).map_err(|error| {
+pub(crate) fn compile_line_width_pattern(text_rules: &TextRuleOptions) -> Result<Regex> {
+    Regex::new(&text_rules.line_width_count_pattern).map_err(|error| {
         AttMzError::InvalidConfig(format!("text_rules.line_width_count_pattern 无效: {error}"))
-    })?;
+    })
+}
+
+fn split_overwide_lines(
+    lines: &[String],
+    text_rules: &TextRuleOptions,
+    width_pattern: &Regex,
+) -> Result<Vec<String>> {
     let mut output = Vec::new();
     let mut active_wrapping_pair: Option<(String, String)> = None;
     for line in lines {
@@ -1729,7 +1754,7 @@ fn split_overwide_lines(lines: &[String], text_rules: &TextRuleOptions) -> Resul
         output.extend(split_single_overwide_line(
             line,
             text_rules,
-            &width_pattern,
+            width_pattern,
             first_line_prefix,
             wrapped_tail_prefix,
         ));
@@ -3074,6 +3099,61 @@ mod tests {
         )
         .expect("译文应可重置");
         assert_eq!(reset_report.summary["reset_count"], json!(1));
+    }
+
+    #[test]
+    fn manual_import_ignores_japanese_inside_protected_control_parameters() {
+        let temp = tempfile::tempdir().expect("临时目录应创建成功");
+        let game = create_manual_test_game(temp.path(), "ManualControlParam");
+        fs::write(
+            game.join("data/CommonEvents.json"),
+            json!([
+                null,
+                {
+                    "id": 1,
+                    "name": "event",
+                    "list": [
+                        {"code": 101, "parameters": [0, 0, 0, 2, ""]},
+                        {"code": 401, "parameters": [r"\fn[うずら]\C[27]「ふーん……？」\fn"]},
+                        {"code": 0, "parameters": []}
+                    ]
+                }
+            ])
+            .to_string(),
+        )
+        .expect("CommonEvents.json 应写入成功");
+        let registry = GameRegistry {
+            db_directory: temp.path().join("db"),
+        };
+        let game_record = registry.register_game(&game).expect("游戏应注册成功");
+        registry
+            .replace_placeholder_rules(
+                &game_record.game_title,
+                &[PlaceholderRule {
+                    pattern_text: r"(?i)\\FN\d*\[[^\]\r\n]+\]".to_string(),
+                    placeholder_template: "[CUSTOM_FONT_NAME_{index}]".to_string(),
+                }],
+            )
+            .expect("字体名控制符规则应写入成功");
+        let input_path = temp.path().join("manual-control-param.json");
+        let payload = json!({
+            "CommonEvents.json/1/0": {
+                "translation_lines": [r"\fn[うずら]\C[27]「嗯……？」\fn"]
+            }
+        });
+        write_json_file(&input_path, &payload).expect("手动译文表应写入成功");
+
+        let report = import_manual_translations_report(
+            &registry,
+            &game_record,
+            &input_path,
+            DEFAULT_SOURCE_TEXT_REQUIRED_PATTERN,
+            &TextRuleOptions::default(),
+        )
+        .expect("报告应生成成功");
+
+        assert_eq!(report.status, "ok");
+        assert_eq!(report.summary["imported_count"], json!(1));
     }
 
     #[test]

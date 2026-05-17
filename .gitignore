@@ -2,6 +2,7 @@
 target/
 dist/
 .tools/
+__pycache__/
 
 # IDE and OS files
 .idea/
@@ -21,3 +22,7 @@ tmp/
 setting.toml
 
 outputs/
+
+# 切到 Rust CLI 分支后，本地残留的 Python 主分支目录。
+/app/
+/tests/
