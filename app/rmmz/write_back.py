@@ -2,7 +2,7 @@
 正文回写模块。
 
 负责将 `TranslationItem` 的翻译结果写回 `GameData.writable_data`。这一层只操作
-标准 RMMZ 数据与外部规则命中的事件指令参数，不处理任何非标准 JSON 文件。
+标准 RPG Maker MV/MZ 数据与外部规则命中的事件指令参数，不处理任何非标准 JSON 文件。
 """
 
 from app.note_tag_text import replace_note_tag_value

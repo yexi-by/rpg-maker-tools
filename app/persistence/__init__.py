@@ -2,6 +2,7 @@
 
 from .repository import (
     DB_DIRECTORY,
+    GameMetadata,
     GameRecord,
     GameRegistry,
     TargetGameSession,
@@ -11,6 +12,7 @@ from .repository import (
 
 __all__: list[str] = [
     "DB_DIRECTORY",
+    "GameMetadata",
     "GameRecord",
     "GameRegistry",
     "TargetGameSession",

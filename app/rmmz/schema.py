@@ -2,12 +2,13 @@
 核心业务数据模型定义模块。
 
 本模块定义 CLI 翻译流程使用的业务模型：翻译条目、插件文本规则和
-标准 RPG Maker MZ 文件名常量。
+标准 RPG Maker MV/MZ 文件名常量。
 """
 
 import re
 from dataclasses import dataclass
 from enum import IntEnum
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -18,6 +19,7 @@ from app.rmmz.control_codes import (
     REAL_LINE_BREAK_MARKER,
     REAL_LINE_BREAK_PLACEHOLDER,
 )
+from app.rmmz.engine import EngineKind
 from app.rmmz.text_rules import ControlSequenceSpan, JsonValue, TextRules, get_default_text_rules
 
 
@@ -42,6 +44,8 @@ class Code(IntEnum):
     TEXT = 401
     CHOICES = 102
     SCROLL_TEXT = 405
+    MV_PLUGIN_COMMAND = 356
+    MZ_PLUGIN_COMMAND = 357
     PLUGIN_TEXT = 357
 
 
@@ -353,10 +357,47 @@ FIXED_FILE_NAMES: set[str] = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class GameLayout:
+    """描述用户目录与真实游戏内容目录的对应关系。"""
+
+    game_root: Path
+    content_root: Path
+    data_dir: Path
+    data_origin_dir: Path
+    js_dir: Path
+    plugins_path: Path
+    plugins_origin_path: Path
+    package_path: Path
+    engine_kind: EngineKind
+    engine_version: str
+    is_www_layout: bool
+
+    @property
+    def engine_label(self) -> str:
+        """返回面向用户展示的引擎名称。"""
+        if self.engine_kind == "mv":
+            return "RPG Maker MV"
+        return "RPG Maker MZ"
+
+    @property
+    def source_plugins_path(self) -> Path:
+        """返回本轮读取插件配置时应优先使用的文件。"""
+        if self.plugins_origin_path.exists():
+            return self.plugins_origin_path
+        return self.plugins_path
+
+    @property
+    def has_origin_backup(self) -> bool:
+        """判断当前游戏是否已经存在原件留档。"""
+        return self.data_origin_dir.exists() or self.plugins_origin_path.exists()
+
+
 @dataclass(slots=True)
 class GameData:
     """游戏数据聚合模型。"""
 
+    layout: GameLayout
     data: dict[str, JsonValue]
     writable_data: dict[str, JsonValue]
     map_data: dict[str, MapData]
@@ -380,12 +421,14 @@ __all__: list[str] = [
     "COMMON_EVENTS_FILE_NAME",
     "DATA_DIRECTORY_NAME",
     "DATA_ORIGIN_DIRECTORY_NAME",
+    "EngineKind",
     "ErrorType",
     "EventCommandParameterFilter",
     "EventCommandTextRuleRecord",
     "FIXED_FILE_NAMES",
     "FontReplacementRecord",
     "GameData",
+    "GameLayout",
     "ItemType",
     "JS_DIRECTORY_NAME",
     "MAP_INFOS_FILE_NAME",

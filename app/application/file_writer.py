@@ -12,12 +12,8 @@ from pathlib import Path
 import shutil
 
 from app.rmmz.schema import (
-    DATA_DIRECTORY_NAME,
-    DATA_ORIGIN_DIRECTORY_NAME,
     GameData,
-    JS_DIRECTORY_NAME,
     PLUGINS_FILE_NAME,
-    PLUGINS_ORIGIN_FILE_NAME,
 )
 from app.rmmz.text_rules import JsonValue
 
@@ -28,9 +24,10 @@ def reset_writable_copies(game_data: GameData) -> None:
     game_data.writable_plugins_js = copy.deepcopy(game_data.plugins_js)
 
 
-def write_game_files(game_data: GameData, game_root: Path) -> None:
+def write_game_files(game_data: GameData, game_root: Path | None = None) -> None:
     """把本轮受影响的游戏文件替换到激活版路径。"""
-    active_data_dir, origin_data_dir, active_plugins_path, origin_plugins_path = build_game_layout_paths(game_root)
+    _ = game_root
+    active_data_dir, origin_data_dir, active_plugins_path, origin_plugins_path = build_game_layout_paths(game_data)
     changed_data_files = collect_changed_data_file_names(game_data)
     plugins_changed = is_plugins_file_changed(game_data)
 
@@ -54,7 +51,7 @@ def write_game_files(game_data: GameData, game_root: Path) -> None:
         game_data=game_data,
         changed_data_files=changed_data_files,
         active_data_dir=active_data_dir,
-        temp_dir=game_root,
+        temp_dir=game_data.layout.content_root,
     )
     if plugins_changed:
         plugins_content = game_data.writable_data[PLUGINS_FILE_NAME]
@@ -84,13 +81,10 @@ def is_plugins_file_changed(game_data: GameData) -> bool:
     return writable_plugins != original_plugins
 
 
-def build_game_layout_paths(game_root: Path) -> tuple[Path, Path, Path, Path]:
+def build_game_layout_paths(game_data: GameData) -> tuple[Path, Path, Path, Path]:
     """构造当前游戏目录下激活版与原件备份路径。"""
-    active_data_dir = game_root / DATA_DIRECTORY_NAME
-    origin_data_dir = game_root / DATA_ORIGIN_DIRECTORY_NAME
-    active_plugins_path = game_root / JS_DIRECTORY_NAME / PLUGINS_FILE_NAME
-    origin_plugins_path = game_root / JS_DIRECTORY_NAME / PLUGINS_ORIGIN_FILE_NAME
-    return active_data_dir, origin_data_dir, active_plugins_path, origin_plugins_path
+    layout = game_data.layout
+    return layout.data_dir, layout.data_origin_dir, layout.plugins_path, layout.plugins_origin_path
 
 
 def ensure_active_layout_exists(*, active_data_dir: Path, active_plugins_path: Path) -> None:

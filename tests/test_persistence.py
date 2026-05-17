@@ -24,6 +24,8 @@ async def test_registry_and_target_session_use_injected_directory(minimal_game_d
     registry = GameRegistry(db_dir)
     record = await registry.register_game(minimal_game_dir)
     assert record.game_title == "テストゲーム"
+    assert record.engine_kind == "mz"
+    assert record.content_root == minimal_game_dir
     assert [item.game_title for item in await registry.list_games()] == ["テストゲーム"]
 
     async with await registry.open_game("テストゲーム") as session:
@@ -79,6 +81,8 @@ async def test_registry_and_target_session_use_injected_directory(minimal_game_d
         assert await session.read_translation_location_paths() == {
             "System.json/gameTitle"
         }
+        assert session.engine_kind == "mz"
+        assert session.content_root == minimal_game_dir
 
         rule = PluginTextRuleRecord(
             plugin_index=0,
@@ -174,6 +178,25 @@ async def test_registry_and_target_session_use_injected_directory(minimal_game_d
         )
         llm_failures = await session.read_llm_failures(run_record.run_id)
         assert llm_failures[0].category == "rate_limit"
+
+
+@pytest.mark.asyncio
+async def test_registry_stores_mv_engine_and_content_root(
+    minimal_mv_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """MV 外层目录注册时会保存引擎类型和真实内容目录。"""
+    registry = GameRegistry(tmp_path / "db")
+
+    record = await registry.register_game(minimal_mv_game_dir)
+
+    assert record.game_title == "MVテストゲーム"
+    assert record.engine_kind == "mv"
+    assert record.engine_version == "1.6.1"
+    assert record.content_root == minimal_mv_game_dir / "www"
+    async with await registry.open_game("MVテストゲーム") as session:
+        assert session.engine_kind == "mv"
+        assert session.content_root == minimal_mv_game_dir / "www"
 
 
 @pytest.mark.asyncio

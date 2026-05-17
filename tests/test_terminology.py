@@ -102,6 +102,39 @@ async def test_export_terminology_writes_terms_and_contexts(
     assert summary.database_context_path.exists()
 
 
+@pytest.mark.asyncio
+async def test_mv_terminology_skips_mz_name_box_parameter(
+    minimal_mv_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """MV 不把 101.parameters[4] 当名字框，也不会为了写回补第 5 个参数。"""
+    game_data = await load_game_data(minimal_mv_game_dir)
+    summary = await export_terminology_artifacts(
+        game_data=game_data,
+        output_dir=tmp_path / "mv-terminology",
+    )
+    registry = TerminologyRegistry.model_validate_json(
+        summary.field_terms_path.read_text(encoding="utf-8")
+    )
+
+    assert registry.speaker_names == {}
+    assert summary.sample_file_count == 0
+
+    reset_writable_copies(game_data)
+    written_count = apply_terminology_translations(
+        game_data,
+        TerminologyRegistry(speaker_names={"案内人": "向导"}),
+    )
+
+    assert written_count == 0
+    common_events = ensure_json_array(game_data.writable_data["CommonEvents.json"], "CommonEvents")
+    event = ensure_json_object(common_events[1], "CommonEvents[1]")
+    commands = ensure_json_array(event["list"], "CommonEvents[1].list")
+    name_command = ensure_json_object(commands[0], "CommonEvents[1].list[0]")
+    parameters = ensure_json_array(name_command["parameters"], "CommonEvents[1].list[0].parameters")
+    assert len(parameters) == 4
+
+
 def test_speaker_sample_file_name_uses_readable_source_name() -> None:
     """对白样本文件名直接使用清洗后的原文名字。"""
     assert build_speaker_sample_file_name("パティ") == "パティ.json"

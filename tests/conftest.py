@@ -1,4 +1,4 @@
-"""测试夹具：构造最小可用的 RPG Maker MZ 游戏目录。"""
+"""测试夹具：构造最小可用的 RPG Maker MV/MZ 游戏目录。"""
 
 import json
 from pathlib import Path
@@ -15,7 +15,7 @@ def write_json(path: Path, value: JsonValue) -> None:
 
 @pytest.fixture
 def minimal_game_dir(tmp_path: Path) -> Path:
-    """创建只包含核心流程所需文件的最小 RMMZ 游戏目录。"""
+    """创建只包含核心流程所需文件的最小 MZ 游戏目录。"""
     game_root = tmp_path / "mini-game"
     data_dir = game_root / "data"
     js_dir = game_root / "js"
@@ -259,6 +259,128 @@ def minimal_game_dir(tmp_path: Path) -> Path:
                 ),
             },
         },
+    ]
+    plugins_text = f"var $plugins = {json.dumps(plugins, ensure_ascii=False, indent=2)};\n"
+    _ = (js_dir / "plugins.js").write_text(plugins_text, encoding="utf-8")
+    return game_root
+
+
+@pytest.fixture
+def minimal_mv_game_dir(tmp_path: Path) -> Path:
+    """创建外层目录含可执行文件、真实数据位于 www 的最小 MV 游戏目录。"""
+    game_root = tmp_path / "mini-mv-game"
+    content_root = game_root / "www"
+    data_dir = content_root / "data"
+    js_dir = content_root / "js"
+    data_dir.mkdir(parents=True)
+    js_dir.mkdir(parents=True)
+
+    _ = (game_root / "Game.exe").write_bytes(b"")
+    write_json(game_root / "package.json", {"window": {"title": ""}, "main": "www/index.html"})
+    _ = (js_dir / "rpg_core.js").write_text(
+        "Utils.RPGMAKER_NAME = 'MV';\nUtils.RPGMAKER_VERSION = \"1.6.1\";\n",
+        encoding="utf-8",
+    )
+    write_json(
+        data_dir / "System.json",
+        {
+            "gameTitle": "MVテストゲーム",
+            "terms": {
+                "basic": ["", "HP"],
+                "commands": ["", "戦う"],
+                "params": ["攻撃"],
+                "messages": {"alwaysDash": "常時ダッシュ"},
+            },
+            "elements": ["", "炎"],
+            "skillTypes": ["", "魔法"],
+            "weaponTypes": ["", "剣"],
+            "armorTypes": ["", "盾"],
+            "equipTypes": ["", "武器"],
+        },
+    )
+    write_json(
+        data_dir / "CommonEvents.json",
+        [
+            None,
+            {
+                "id": 1,
+                "list": [
+                    {"code": 101, "parameters": [0, 0, 0, 2]},
+                    {"code": 401, "parameters": ["MVの本文です"]},
+                    {
+                        "code": 356,
+                        "parameters": [
+                            "ShowMvText text:MVプラグイン本文 name:案内人",
+                        ],
+                    },
+                    {"code": 0, "parameters": []},
+                ],
+            },
+        ],
+    )
+    write_json(
+        data_dir / "Troops.json",
+        [
+            None,
+            {
+                "id": 1,
+                "pages": [
+                    {
+                        "list": [
+                            {"code": 101, "parameters": [0, 0, 0, 2]},
+                            {"code": 401, "parameters": ["敵の本文"]},
+                            {"code": 0, "parameters": []},
+                        ]
+                    }
+                ],
+            },
+        ],
+    )
+    write_json(
+        data_dir / "Map001.json",
+        {
+            "displayName": "MVの町",
+            "note": "",
+            "events": [
+                None,
+                {
+                    "id": 1,
+                    "name": "案内イベント",
+                    "note": "",
+                    "pages": [
+                        {
+                            "list": [
+                                {"code": 101, "parameters": [0, 0, 0, 2]},
+                                {"code": 401, "parameters": ["マップ本文"]},
+                                {"code": 0, "parameters": []},
+                            ]
+                        }
+                    ],
+                },
+            ],
+        },
+    )
+    write_json(
+        data_dir / "Actors.json",
+        [
+            None,
+            {
+                "id": 1,
+                "name": "MV勇者",
+                "note": "",
+                "nickname": "MVニック",
+                "profile": "MVプロフィール",
+            },
+        ],
+    )
+
+    plugins: list[JsonValue] = [
+        {
+            "name": "MvPlugin",
+            "status": True,
+            "description": "MVテスト説明",
+            "parameters": {"Message": "MVプラグイン設定本文"},
+        }
     ]
     plugins_text = f"var $plugins = {json.dumps(plugins, ensure_ascii=False, indent=2)};\n"
     _ = (js_dir / "plugins.js").write_text(plugins_text, encoding="utf-8")

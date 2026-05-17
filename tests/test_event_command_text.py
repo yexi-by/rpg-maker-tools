@@ -61,6 +61,39 @@ async def test_event_command_json_export_uses_configured_command_codes(
     }
 
 
+@pytest.mark.asyncio
+async def test_mv_event_command_json_export_uses_engine_default_356(
+    minimal_mv_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """MV 未显式传入编码时使用引擎默认的 356 插件命令。"""
+    game_data = await load_game_data(minimal_mv_game_dir)
+    setting = EventCommandTextSetting.model_validate(
+        {
+            "default_command_codes": [357],
+            "default_command_codes_by_engine": {"mv": [356], "mz": [357]},
+        }
+    )
+    output_path = tmp_path / "mv-event-commands.json"
+
+    command_count = await export_event_commands_json_file(
+        game_data=game_data,
+        output_path=output_path,
+        command_codes=resolve_event_command_codes(
+            command_codes=None,
+            default_command_codes=setting.default_codes_for_engine(game_data.layout.engine_kind),
+        ),
+    )
+
+    assert command_count == 1
+    json_value_adapter: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
+    exported_value = json_value_adapter.validate_json(output_path.read_text(encoding="utf-8"))
+    root = ensure_json_object(exported_value, "mv-event-commands.json")
+    commands = ensure_json_array(root["356"], "mv-event-commands.json.356")
+    parameters = ensure_json_array(commands[0], "mv-event-commands.json.356[0]")
+    assert parameters == ["ShowMvText text:MVプラグイン本文 name:案内人"]
+
+
 def test_event_command_code_resolution_uses_configured_default_array() -> None:
     """事件指令导出编码未传入时使用配置数组，命令参数可覆盖配置。"""
     assert resolve_event_command_codes(
@@ -71,6 +104,19 @@ def test_event_command_code_resolution_uses_configured_default_array() -> None:
         command_codes={102, 103},
         default_command_codes=[357],
     ) == frozenset({102, 103})
+
+
+def test_event_command_setting_prefers_engine_default_over_legacy_default() -> None:
+    """按引擎默认编码优先于旧默认编码，显式编码仍由调用方覆盖。"""
+    setting = EventCommandTextSetting.model_validate(
+        {
+            "default_command_codes": [357],
+            "default_command_codes_by_engine": {"mv": [356], "mz": [357]},
+        }
+    )
+
+    assert setting.default_codes_for_engine("mv") == [356]
+    assert setting.default_codes_for_engine("mz") == [357]
 
 
 def test_event_command_text_setting_requires_default_code_array() -> None:

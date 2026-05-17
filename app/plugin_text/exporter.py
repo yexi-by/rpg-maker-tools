@@ -1,6 +1,6 @@
 """插件配置 JSON 导出模块。
 
-负责把 RPG Maker MZ `js/plugins.js` 中的 `$plugins` 数组导出为纯 JSON 文件，
+负责把 RPG Maker MV/MZ `js/plugins.js` 中的 `$plugins` 数组导出为纯 JSON 文件，
 供外部 Agent 直接阅读原始插件配置结构。
 """
 

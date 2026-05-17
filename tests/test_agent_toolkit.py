@@ -126,6 +126,35 @@ async def test_build_placeholder_rules_groups_similar_candidates(
 
 
 @pytest.mark.asyncio
+async def test_build_placeholder_rules_keeps_bare_uppercase_marker_case_sensitive(
+    minimal_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """裸大写自定义标记草稿不能忽略大小写误匹配字面量换行。"""
+    common_events_path = minimal_game_dir / "data" / "CommonEvents.json"
+    raw_value = coerce_json_value(cast(object, json.loads(common_events_path.read_text(encoding="utf-8"))))
+    common_events = ensure_json_array(raw_value, "CommonEvents.json")
+    event = ensure_json_object(common_events[1], "CommonEvents.json[1]")
+    commands = ensure_json_array(event["list"], "CommonEvents.json[1].list")
+    text_command = ensure_json_object(commands[1], "CommonEvents.json[1].list[1]")
+    parameters = ensure_json_array(text_command["parameters"], "CommonEvents.json[1].list[1].parameters")
+    parameters[0] = r"\N<案内人>こんにちは"
+    _ = common_events_path.write_text(json.dumps(raw_value, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_game_dir)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    output_path = tmp_path / "placeholder-rules.json"
+
+    report = await service.build_placeholder_rules(game_title="テストゲーム", output_path=output_path)
+
+    assert report.status == "ok"
+    rules = load_json_object(output_path)
+    assert rules[r"\\N\d*(?![A-Za-z\[])"] == "[CUSTOM_PLUGIN_N_MARKER_{index}]"
+    assert r"(?i)\\N\d*(?![A-Za-z\[])" not in rules
+
+
+@pytest.mark.asyncio
 async def test_placeholder_rule_draft_uses_active_translation_sources(
     minimal_game_dir: Path,
     tmp_path: Path,
@@ -252,6 +281,7 @@ async def test_prepare_agent_workspace_includes_placeholder_rule_draft(
     item_source = load_json_object(item_source_path)
     item_candidate = load_json_object(item_candidate_path)
     manifest = load_json_object(manifest_path)
+    layout = ensure_json_object(coerce_json_value(manifest["layout"]), "manifest.layout")
     speaker_names = ensure_json_object(coerce_json_value(speaker_source["speaker_names"]), "speaker_names")
     item_names = ensure_json_object(coerce_json_value(item_source["item_names"]), "item_names")
     workflow = ensure_json_object(coerce_json_value(manifest["workflow"]), "manifest.workflow")
@@ -268,6 +298,8 @@ async def test_prepare_agent_workspace_includes_placeholder_rule_draft(
     assert item_source == item_candidate
     assert "村人" in speaker_names
     assert "回復薬" in item_names
+    assert layout["engine_kind"] == "mz"
+    assert report.summary["event_command_codes"] == [357]
     assert report.summary["placeholder_rule_draft_count"] == 1
     assert report.summary["terminology_subtask_count"] == 5
     assert first_round["name"] == "terminology_candidates"
@@ -275,6 +307,35 @@ async def test_prepare_agent_workspace_includes_placeholder_rule_draft(
     assert second_round["name"] == "external_text_rules"
     assert "placeholder_phase" in workflow
     assert "note-tag-rules.json" in json.dumps(report.details, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_workspace_uses_mv_event_command_default(
+    minimal_mv_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """MV 工作区摘要和事件指令样本按 356 插件命令生成。"""
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_mv_game_dir)
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    workspace = tmp_path / "mv-workspace"
+
+    report = await service.prepare_agent_workspace(
+        game_title="MVテストゲーム",
+        output_dir=workspace,
+        command_codes=None,
+    )
+
+    event_commands = load_json_object(workspace / "event-commands.json")
+    manifest = load_json_object(workspace / "manifest.json")
+    layout = ensure_json_object(coerce_json_value(manifest["layout"]), "manifest.layout")
+    commands = ensure_json_array(coerce_json_value(event_commands["356"]), "event-commands.356")
+    assert report.status == "ok"
+    assert report.summary["engine_kind"] == "mv"
+    assert report.summary["event_command_codes"] == [356]
+    assert layout["engine_kind"] == "mv"
+    assert "www" in str(layout["data_dir"])
+    assert len(commands) == 1
 
 
 @pytest.mark.asyncio

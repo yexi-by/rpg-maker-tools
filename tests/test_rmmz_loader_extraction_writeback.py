@@ -1,4 +1,4 @@
-"""RMMZ 标准数据加载、提取与正文回写测试。"""
+"""RPG Maker MV/MZ 标准数据加载、提取与正文回写测试。"""
 
 import json
 from pathlib import Path
@@ -16,7 +16,7 @@ from app.application.font_replacement import (
 from app.config.schemas import TextRulesSetting
 from app.note_tag_text import NoteTagTextExtraction, build_note_tag_rule_records_from_import
 from app.note_tag_text.exporter import collect_note_tag_candidates
-from app.rmmz import DataTextExtraction, load_game_data
+from app.rmmz import DataTextExtraction, load_game_data, read_game_title, resolve_game_layout
 from app.rmmz.control_codes import CustomPlaceholderRule
 from app.rmmz.schema import NoteTagTextRuleRecord, PLUGINS_FILE_NAME
 from app.rmmz.text_rules import JsonValue, TextRules, coerce_json_value, ensure_json_array, ensure_json_object, get_default_text_rules
@@ -44,6 +44,44 @@ async def test_loader_only_keeps_standard_rmmz_data_files(minimal_game_dir: Path
     assert "Map002.json" in game_data.map_data
     assert game_data.plugins_js[0]["name"] == "TestPlugin"
     assert game_data.plugins_js[1]["name"] == "ComplexPlugin"
+
+
+@pytest.mark.asyncio
+async def test_mv_outer_layout_loads_www_data_and_system_title(minimal_mv_game_dir: Path) -> None:
+    """MV 外层目录布局会定位到 www 内容目录，并用 System 标题兜底注册。"""
+    layout = resolve_game_layout(minimal_mv_game_dir)
+    game_data = await load_game_data(minimal_mv_game_dir)
+
+    assert layout.engine_kind == "mv"
+    assert layout.engine_version == "1.6.1"
+    assert layout.content_root == minimal_mv_game_dir / "www"
+    assert layout.data_dir == minimal_mv_game_dir / "www" / "data"
+    assert read_game_title(minimal_mv_game_dir) == "MVテストゲーム"
+    assert game_data.layout.engine_kind == "mv"
+    assert "Map001.json" in game_data.map_data
+    assert game_data.plugins_js[0]["name"] == "MvPlugin"
+
+
+@pytest.mark.asyncio
+async def test_mv_write_back_uses_www_active_and_origin_paths(minimal_mv_game_dir: Path) -> None:
+    """MV 外层目录写回只触碰 www 内的 data 和 plugins.js。"""
+    game_data = await load_game_data(minimal_mv_game_dir)
+    reset_writable_copies(game_data)
+    system_object = ensure_json_object(game_data.writable_data["System.json"], "System.json")
+    system_object["gameTitle"] = "MV测试游戏"
+    game_data.writable_data[PLUGINS_FILE_NAME] = "var $plugins = [];\n"
+
+    write_game_files(game_data, minimal_mv_game_dir)
+
+    assert (minimal_mv_game_dir / "www" / "data_origin" / "System.json").exists()
+    assert (minimal_mv_game_dir / "www" / "js" / "plugins_origin.js").exists()
+    assert not (minimal_mv_game_dir / "data_origin").exists()
+    assert not (minimal_mv_game_dir / "js").exists()
+    restored_system = ensure_json_object(
+        _read_test_json(minimal_mv_game_dir / "www" / "data_origin" / "System.json"),
+        "System.json",
+    )
+    assert restored_system["gameTitle"] == "MVテストゲーム"
 
 
 @pytest.mark.asyncio
@@ -870,6 +908,137 @@ async def test_font_replacement_updates_only_writable_outputs(
     assert another_font not in original_system
 
     assert replacement_name not in original_system
+
+
+@pytest.mark.asyncio
+async def test_mv_font_replacement_updates_gamefont_css_and_css_declared_font_stems(
+    minimal_mv_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """MV 字体覆盖会同步改写 gamefont.css，并识别样式表里声明但缺失的旧字体。"""
+    fonts_dir = minimal_mv_game_dir / "www" / "fonts"
+    fonts_dir.mkdir()
+    old_font = "YujiSyuku-Regular.ttf"
+    css_only_font = "衡山毛筆フォント_0.TTF"
+    _ = (fonts_dir / old_font).write_bytes(b"old font")
+    gamefont_css_path = fonts_dir / "gamefont.css"
+    _ = gamefont_css_path.write_text(
+        "\n".join(
+            [
+                "@font-face {",
+                "  font-family: GameFont;",
+                "  src: url('YujiSyuku-Regular.ttf');",
+                "}",
+                "@font-face {",
+                "  font-family: 'GameFont2';",
+                f"  src: url(\"{css_only_font}\");",
+                "}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    replacement_font = tmp_path / "NotoSansSC-Regular.ttf"
+    _ = replacement_font.write_bytes(b"new font")
+
+    game_data = await load_game_data(minimal_mv_game_dir)
+    reset_writable_copies(game_data)
+    plugin = ensure_json_object(game_data.writable_plugins_js[0], "plugins[0]")
+    parameters = ensure_json_object(plugin["parameters"], "plugins[0].parameters")
+    parameters["BrushFont"] = Path(css_only_font).stem
+    common_events = ensure_json_array(game_data.writable_data["CommonEvents.json"], "CommonEvents")
+    common_event = ensure_json_object(common_events[1], "CommonEvents[1]")
+    command_list = ensure_json_array(common_event["list"], "CommonEvents[1].list")
+    command = ensure_json_object(command_list[2], "CommonEvents[1].list[2]")
+    command["parameters"] = ["MultiFont change GameFont2"]
+
+    summary = apply_font_replacement(
+        game_data=game_data,
+        game_root=minimal_mv_game_dir,
+        replacement_font_path=str(replacement_font),
+    )
+
+    replacement_name = replacement_font.name
+    origin_css_path = fonts_dir / "gamefont_origin.css"
+    active_css = gamefont_css_path.read_text(encoding="utf-8")
+    origin_css = origin_css_path.read_text(encoding="utf-8")
+    writable_plugin = ensure_json_object(game_data.writable_plugins_js[0], "plugins[0]")
+    writable_parameters = ensure_json_object(writable_plugin["parameters"], "plugins[0].parameters")
+    writable_common_events = ensure_json_array(game_data.writable_data["CommonEvents.json"], "CommonEvents")
+    writable_common_event = ensure_json_object(writable_common_events[1], "CommonEvents[1]")
+    writable_command_list = ensure_json_array(writable_common_event["list"], "CommonEvents[1].list")
+    writable_command = ensure_json_object(writable_command_list[2], "CommonEvents[1].list[2]")
+
+    assert (fonts_dir / replacement_name).exists()
+    assert origin_css_path.exists()
+    assert "YujiSyuku-Regular.ttf" in origin_css
+    assert "衡山毛筆フォント_0.TTF" in origin_css
+    assert active_css.count(replacement_name) == 2
+    assert "YujiSyuku-Regular.ttf" not in active_css
+    assert "衡山毛筆フォント_0.TTF" not in active_css
+    assert writable_parameters["BrushFont"] == replacement_name
+    assert writable_command["parameters"] == ["MultiFont change GameFont2"]
+    assert summary.source_font_count == 2
+    assert summary.replaced_reference_count == 3
+    assert len(summary.records) == 3
+
+
+@pytest.mark.asyncio
+async def test_restore_font_references_restores_mv_gamefont_css_without_rolling_back_other_css(
+    minimal_mv_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """字体还原会按 gamefont.css 原件留档恢复 MV 字体族入口。"""
+    fonts_dir = minimal_mv_game_dir / "www" / "fonts"
+    fonts_dir.mkdir()
+    old_font = "YujiSyuku-Regular.ttf"
+    css_only_font = "衡山毛筆フォント_0.TTF"
+    _ = (fonts_dir / old_font).write_bytes(b"old font")
+    gamefont_css_path = fonts_dir / "gamefont.css"
+    _ = gamefont_css_path.write_text(
+        "\n".join(
+            [
+                "@font-face {",
+                "  font-family: GameFont;",
+                "  src: url('YujiSyuku-Regular.ttf');",
+                "}",
+                "@font-face {",
+                "  font-family: 'GameFont2';",
+                f"  src: url(\"{css_only_font}\");",
+                "}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    replacement_font = tmp_path / "NotoSansSC-Regular.ttf"
+    _ = replacement_font.write_bytes(b"new font")
+
+    game_data = await load_game_data(minimal_mv_game_dir)
+    reset_writable_copies(game_data)
+    _ = apply_font_replacement(
+        game_data=game_data,
+        game_root=minimal_mv_game_dir,
+        replacement_font_path=str(replacement_font),
+    )
+    active_css = gamefont_css_path.read_text(encoding="utf-8")
+    _ = gamefont_css_path.write_text(
+        f"{active_css}\n/* 已写入译文后新增的样式 */\n",
+        encoding="utf-8",
+    )
+
+    restore_summary = restore_font_references_from_origin_backups(
+        game_root=minimal_mv_game_dir,
+        replacement_font_names=[replacement_font.name],
+    )
+
+    restored_css = gamefont_css_path.read_text(encoding="utf-8")
+    assert restore_summary.restored_field_count == 2
+    assert restore_summary.restored_reference_count == 2
+    assert "url('YujiSyuku-Regular.ttf')" in restored_css
+    assert "url(\"衡山毛筆フォント_0.TTF\")" in restored_css
+    assert replacement_font.name not in restored_css
+    assert "已写入译文后新增的样式" in restored_css
 
 
 @pytest.mark.asyncio

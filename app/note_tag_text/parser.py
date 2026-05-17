@@ -1,4 +1,4 @@
-"""RMMZ Note 元标签解析与安全替换工具。"""
+"""RPG Maker MV/MZ Note 元标签解析与安全替换工具。"""
 
 import re
 from dataclasses import dataclass

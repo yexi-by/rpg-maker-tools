@@ -2,7 +2,7 @@
 插件正文回写模块。
 
 负责将 `plugins.js` 路径规则提取出的译文写回 `GameData.writable_plugins_js`，并重新
-序列化为 RPG Maker MZ 标准 `var $plugins = ...;` 文本。
+序列化为 RPG Maker MV/MZ 标准 `var $plugins = ...;` 文本。
 """
 
 import json

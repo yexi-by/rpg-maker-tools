@@ -1,7 +1,7 @@
 """
 RPG Maker 原始数据结构模型模块。
 
-这里定义与 RPG Maker MZ 标准 `data/*.json` 高度对应的基础模型，供加载、
+这里定义与 RPG Maker MV/MZ 标准 `data/*.json` 高度对应的基础模型，供加载、
 提取和回写流程共享。
 """
 

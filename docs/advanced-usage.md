@@ -1,8 +1,8 @@
 # A.T.T MZ 技术文档
 
-Autonomous Translation Toolkit for RPG Maker MZ.
+Autonomous Translation Toolkit for RPG Maker MV/MZ.
 
-A.T.T MZ 是面向 RPG Maker MZ 日文游戏的命令行翻译与质量检查工具。项目负责提取游戏文本、管理译文记录、导入规则、生成质量报告和写回游戏文件。语义判断（术语、插件字段、事件指令字段、data Note 标签字段、少量失败项和用户试玩反馈）由 Agent 按 `skills/att-mz/SKILL.md` 协议执行。
+A.T.T MZ 是面向 RPG Maker MV/MZ 日文游戏的命令行翻译与质量检查工具。项目负责提取游戏文本、管理译文记录、导入规则、生成质量报告和写回游戏文件。语义判断（术语、插件字段、事件指令字段、data Note 标签字段、少量失败项和用户试玩反馈）由 Agent 按 `skills/att-mz/SKILL.md` 协议执行。
 
 ## 环境要求
 
@@ -118,7 +118,7 @@ uv run python main.py --agent-mode prepare-agent-workspace --game <游戏标题>
 uv run python main.py --agent-mode import-terminology --game <游戏标题> --input <工作区>/terminology/field-terms.json --glossary-input <工作区>/terminology/glossary.json --json
 ```
 
-字段译名表会覆盖 101 名字框、地图显示名、数据库名称和系统类型等游戏字段；正文术语表只服务正文翻译提示词命中。不要把字段包装形式、定位信息或说明字段写进正文术语表。
+字段译名表会覆盖地图显示名、数据库名称、系统类型，以及 MZ 标准 `101.parameters[4]` 名字框等游戏字段；MV 的说话人通常来自插件、文本控制符或自定义文本协议，需要通过插件规则、事件指令规则、占位符规则和正文术语表处理。正文术语表只服务正文翻译提示词命中，不要把字段包装形式、定位信息或说明字段写进正文术语表。
 
 ### 外部规则
 
@@ -206,7 +206,7 @@ uv run python main.py --agent-mode export-quality-fix-template --game <游戏标
 uv run python main.py --agent-mode import-manual-translations --game <游戏标题> --input <工作区>/quality-fix-template.json --json
 ```
 
-修复表中的 `text_for_model_lines` 仅供对照，不能复制进 `translation_lines`。`translation_lines` 必须使用 `original_lines` 里的游戏原始控制符；若仍看到 `[RMMZ_...]` 或 `[CUSTOM_...]`，先对照 `original_lines` 改回反斜杠形式再导入。
+修复表中的 `text_for_model_lines` 仅供对照，不能复制进 `translation_lines`。`translation_lines` 必须使用 `original_lines` 里的游戏原始控制符；若仍看到内置游戏控制符占位符或自定义占位符，先对照 `original_lines` 改回反斜杠形式再导入。
 
 ### 重置译文
 
@@ -243,7 +243,7 @@ uv run python main.py --agent-mode import-japanese-residual-rules --game <游戏
 uv run python main.py --agent-mode restore-font --game <游戏标题> --json
 ```
 
-字体还原对比 `data/*.json` 与 `data_origin/*.json`、`js/plugins.js` 与 `js/plugins_origin.js`，只把候选覆盖字体名替回原件里的实际旧字体引用。若需临时指定候选覆盖字体名，追加 `--replacement-font-path <字体文件>`。
+字体还原对比 `data/*.json` 与 `data_origin/*.json`、`js/plugins.js` 与 `js/plugins_origin.js`，以及存在时的 `fonts/gamefont.css` 与 `fonts/gamefont_origin.css`，只把候选覆盖字体名替回原件里的实际旧字体引用。若需临时指定候选覆盖字体名，追加 `--replacement-font-path <字体文件>`。
 
 ## Agent 启动示范
 
@@ -270,7 +270,7 @@ claude --permission-mode bypassPermissions
 在 Agent 交互界面提交任务说明：
 
 ```text
-请使用 <项目目录>/skills/att-mz/SKILL.md 执行 RPG Maker MZ 游戏自动翻译。
+请使用 <项目目录>/skills/att-mz/SKILL.md 执行 RPG Maker MV/MZ 游戏自动翻译。
 
 项目目录：<项目目录>
 游戏目录：<游戏目录>

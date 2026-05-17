@@ -124,7 +124,10 @@ CREATE_METADATA_TABLE = f"""
     CREATE TABLE IF NOT EXISTS [{METADATA_TABLE_NAME}] (
         metadata_key TEXT PRIMARY KEY,
         game_title   TEXT NOT NULL,
-        game_path    TEXT NOT NULL
+        game_path    TEXT NOT NULL,
+        engine_kind  TEXT NOT NULL,
+        content_root TEXT NOT NULL,
+        engine_version TEXT NOT NULL
     )
 ;
 """
@@ -223,8 +226,8 @@ INSERT_TRANSLATION = f"""
 UPSERT_METADATA = f"""
 --sql
     INSERT OR REPLACE INTO [{METADATA_TABLE_NAME}]
-    (metadata_key, game_title, game_path)
-    VALUES (?, ?, ?)
+    (metadata_key, game_title, game_path, engine_kind, content_root, engine_version)
+    VALUES (?, ?, ?, ?, ?, ?)
 ;
 """
 
@@ -392,7 +395,7 @@ SELECT_TRANSLATED_ITEMS = f"""
 
 SELECT_METADATA = f"""
 --sql
-    SELECT game_title, game_path
+    SELECT game_title, game_path, engine_kind, content_root, engine_version
     FROM [{METADATA_TABLE_NAME}]
     WHERE metadata_key = ?
     LIMIT 1

@@ -2,7 +2,7 @@
 配置模型定义模块。
 
 本模块定义 CLI 翻译流程的运行配置：正文模型服务、正文切批、
-正文翻译和文本过滤规则。RMMZ 标准控制符由代码协议负责保护，自定义正则
+正文翻译和文本过滤规则。RPG Maker 标准控制符由代码协议负责保护，自定义正则
 占位符规则由项目根目录的 JSON 文件提供。
 """
 
@@ -11,6 +11,7 @@ from typing import Annotated, ClassVar
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.llm_request_body_extra import LLMRequestBodyExtra, normalize_request_body_extra
+from app.rmmz.engine import EngineKind
 
 
 class StrictBaseModel(BaseModel):
@@ -68,22 +69,56 @@ class EventCommandTextSetting(StrictBaseModel):
         min_length=1,
         title="默认导出的事件指令编码",
     )
+    default_command_codes_by_engine: dict[EngineKind, list[EventCommandCode]] = Field(
+        default_factory=dict,
+        title="按引擎区分的默认事件指令编码",
+    )
 
     @field_validator("default_command_codes")
     @classmethod
     def _validate_default_command_codes(cls, value: list[int]) -> list[int]:
         """默认事件指令编码必须是非空、非负且去重后的数组。"""
-        if not value:
-            raise ValueError("event_command_text.default_command_codes 不能为空")
+        return normalize_event_command_codes(
+            value,
+            context="event_command_text.default_command_codes",
+        )
 
-        normalized_codes: list[int] = []
-        seen_codes: set[int] = set()
-        for command_code in value:
-            if command_code in seen_codes:
-                continue
-            normalized_codes.append(command_code)
-            seen_codes.add(command_code)
-        return normalized_codes
+    @field_validator("default_command_codes_by_engine")
+    @classmethod
+    def _validate_default_command_codes_by_engine(
+        cls,
+        value: dict[EngineKind, list[int]],
+    ) -> dict[EngineKind, list[int]]:
+        """按引擎配置的事件指令编码必须逐项非空并去重。"""
+        normalized_map: dict[EngineKind, list[int]] = {}
+        for engine_kind, command_codes in value.items():
+            normalized_map[engine_kind] = normalize_event_command_codes(
+                command_codes,
+                context=f"event_command_text.default_command_codes_by_engine.{engine_kind}",
+            )
+        return normalized_map
+
+    def default_codes_for_engine(self, engine_kind: EngineKind) -> list[int]:
+        """按引擎返回默认事件指令编码，引擎配置优先于旧配置。"""
+        engine_codes = self.default_command_codes_by_engine.get(engine_kind)
+        if engine_codes is not None:
+            return list(engine_codes)
+        return list(self.default_command_codes)
+
+
+def normalize_event_command_codes(value: list[int], *, context: str) -> list[int]:
+    """校验并去重事件指令编码数组。"""
+    if not value:
+        raise ValueError(f"{context} 不能为空")
+
+    normalized_codes: list[int] = []
+    seen_codes: set[int] = set()
+    for command_code in value:
+        if command_code in seen_codes:
+            continue
+        normalized_codes.append(command_code)
+        seen_codes.add(command_code)
+    return normalized_codes
 
 
 class WriteBackSetting(StrictBaseModel):

@@ -22,7 +22,7 @@ def run_dialogue_probe(
     """
     执行游戏对话结构的探针检查。
 
-    由于 RPG Maker 中完整的对话块通常由 101(NAME) 和后续连续的 401(TEXT) 指令组成，
+    由于 RPG Maker 中完整的对话块通常由 101 和后续连续的 401 文本指令组成，
     如果在没有 101 或者前置不是 401 的情况下突然出现了 401 文本指令，意味着该游戏
     使用了非常规的插件命令或是未支持的结构。
     该函数会在项目启动并完成游戏数据解析后立即运行。如果探针不通过，则抛出异常并阻止启动。
@@ -92,7 +92,7 @@ def _check_command_list(commands: list[EventCommand], location_info: str) -> Non
     for command_index, command in enumerate(commands):
         if command.code == Code.TEXT and previous_code not in (Code.NAME, Code.TEXT):
             raise ValueError(
-                f"对话探针检查失败: {location_info} 中发现孤立的 Code 401, 当前指令索引 {command_index}, 前置指令 Code 为 {previous_code}"
+                f"对话探针检查失败: {location_info} 中发现孤立的 RPG Maker 401 文本指令，当前指令索引 {command_index}，前一条指令编码为 {previous_code}"
             )
 
         previous_code = command.code

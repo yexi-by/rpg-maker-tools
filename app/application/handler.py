@@ -90,7 +90,7 @@ from app.rmmz.control_codes import CustomPlaceholderRule
 from app.llm import LLMHandler, LLMRequestFailure
 from app.rmmz.text_rules import TextRules
 from app.translation import TextTranslation, TranslationBatch, TranslationCache, iter_translation_context_batches
-from app.rmmz.loader import load_game_data, read_game_title, resolve_game_directory
+from app.rmmz.loader import load_game_data, read_game_title, resolve_game_directory, resolve_game_layout
 from app.observability.logging import logger
 from app.rmmz.write_back import write_data_text
 from app.plugin_text.write_back import write_plugin_text
@@ -212,10 +212,11 @@ class TranslationHandler:
     async def add_game(self, game_path: str | Path) -> str:
         """注册一个新的游戏。"""
         resolved_game_path = resolve_game_directory(game_path)
+        layout = resolve_game_layout(resolved_game_path)
         game_title = read_game_title(resolved_game_path)
         _ = await load_game_data(resolved_game_path)
         record = await self.game_registry.register_game(resolved_game_path)
-        logger.success(f"[tag.success]游戏已加入核心 CLI[/tag.success] 标题 [tag.count]{game_title}[/tag.count] 路径 [tag.path]{record.game_path}[/tag.path]")
+        logger.success(f"[tag.success]游戏已加入核心 CLI[/tag.success] 标题 [tag.count]{game_title}[/tag.count] 引擎 [tag.count]{layout.engine_label}[/tag.count] 数据目录 [tag.path]{layout.data_dir}[/tag.path] 路径 [tag.path]{record.game_path}[/tag.path]")
         return game_title
 
     async def import_plugin_rules(
@@ -280,7 +281,9 @@ class TranslationHandler:
             default_command_codes: list[int] | None = None
             if command_codes is None:
                 setting = self._load_setting()
-                default_command_codes = setting.event_command_text.default_command_codes
+                default_command_codes = setting.event_command_text.default_codes_for_engine(
+                    game_data.layout.engine_kind
+                )
             effective_command_codes = resolve_event_command_codes(
                 command_codes=command_codes,
                 default_command_codes=default_command_codes,
@@ -849,6 +852,7 @@ class TranslationHandler:
         """按原件留档对比还原游戏数据中的字体引用。"""
         setting = self._load_setting(setting_overrides=setting_overrides)
         async with await self.game_registry.open_game(game_title) as session:
+            game_data = await self._load_session_game_data(session)
             records = await session.read_font_replacement_records()
             target_font_names = collect_replacement_font_names(
                 replacement_font_path=setting.write_back.replacement_font_path,
@@ -863,7 +867,7 @@ class TranslationHandler:
                 )
 
             restore_summary = restore_font_references_from_origin_backups(
-                game_root=session.game_path,
+                game_data=game_data,
                 replacement_font_names=target_font_names,
             )
             if records:

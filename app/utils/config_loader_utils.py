@@ -135,6 +135,12 @@ def _build_setting_summary(
     text_service = setting.llm
     text_prompt_file = _read_prompt_file_name(raw_config=raw_config, section_path=["text_translation"])
 
+    engine_code_parts = [
+        f"{engine.upper()}={','.join(map(str, codes))}"
+        for engine, codes in sorted(setting.event_command_text.default_command_codes_by_engine.items())
+    ]
+    engine_code_label = "；".join(engine_code_parts) if engine_code_parts else "未配置"
+
     lines = [
         "[tag.phase]当前正在使用的配置[/tag.phase]",
         f"配置文件: [tag.path]{setting_path}[/tag.path]",
@@ -142,7 +148,7 @@ def _build_setting_summary(
         f"模型请求额外参数: [tag.count]{len(text_service.request_body_extra)}[/tag.count] 项",
         f"正文切块: 目标 [tag.count]{setting.translation_context.token_size}[/tag.count] token，换算系数 [tag.count]{setting.translation_context.factor}[/tag.count]，同角色最多连续 [tag.count]{setting.translation_context.max_command_items}[/tag.count] 条",
         f"正文翻译: [tag.count]{setting.text_translation.worker_count}[/tag.count] 个 worker，RPM [tag.count]{setting.text_translation.rpm or '不限'}[/tag.count]，失败重试 [tag.count]{setting.text_translation.retry_count}[/tag.count] 次，间隔 [tag.count]{setting.text_translation.retry_delay}[/tag.count] 秒",
-        f"事件指令参数: 默认导出编码 [tag.count]{', '.join(map(str, setting.event_command_text.default_command_codes))}[/tag.count]",
+        f"事件指令参数: 旧默认编码 [tag.count]{', '.join(map(str, setting.event_command_text.default_command_codes))}[/tag.count]，按引擎默认 [tag.count]{engine_code_label}[/tag.count]",
         f"候选覆盖字体: [tag.path]{setting.write_back.replacement_font_path or '未配置'}[/tag.path]",
         f"文本规则: 行切分标点 [tag.count]{len(setting.text_rules.line_split_punctuations)}[/tag.count] 个，长文本宽度 [tag.count]{setting.text_rules.long_text_line_width_limit}[/tag.count]，提取剥离标点 [tag.count]{len(setting.text_rules.strip_wrapping_punctuation_pairs)}[/tag.count] 组，译文保形标点 [tag.count]{len(setting.text_rules.preserve_wrapping_punctuation_pairs)}[/tag.count] 组",
         f"提示词文件: 正文=[tag.path]{text_prompt_file}[/tag.path]",

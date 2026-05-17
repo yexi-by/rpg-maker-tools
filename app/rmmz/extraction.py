@@ -1,7 +1,7 @@
 """
 标准 data 目录文本提取模块。
 
-提取器处理 RPG Maker MZ 官方数据文件中的玩家可见文本。标准事件命令里的
+提取器处理 RPG Maker MV/MZ 官方数据文件中的玩家可见文本。标准事件命令里的
 对白、选项和滚动文本由本模块直接提取。
 """
 
@@ -22,7 +22,7 @@ type CommandListKey = tuple[str | int, ...]
 
 
 class DataTextExtraction:
-    """标准 RMMZ data 文本提取器。"""
+    """标准 RPG Maker MV/MZ data 文本提取器。"""
 
     def __init__(self, game_data: GameData, text_rules: TextRules) -> None:
         """初始化提取器。"""

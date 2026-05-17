@@ -92,7 +92,7 @@ def _iter_item_scan_texts(item: TranslationItem) -> Iterable[tuple[str, str]]:
 
 
 def _is_standard_covered(marker: str) -> bool:
-    """判断候选是否完整命中内置 RMMZ 标准控制符规则。"""
+    """判断候选是否完整命中内置 RPG Maker 标准控制符规则。"""
     return any(
         span.start_index == 0 and span.end_index == len(marker)
         for span in iter_standard_control_spans(marker)

@@ -1,13 +1,14 @@
 """
 游戏加载统一入口模块。
 
-本模块加载 RPG Maker MZ 标准数据文件与 `js/plugins.js`。未知 `data/*.json`
+本模块加载 RPG Maker MV/MZ 标准数据文件与 `js/plugins.js`。未知 `data/*.json`
 会被跳过并记录 DEBUG 日志。
 """
 
 import asyncio
 import copy
 import json
+import re
 from pathlib import Path
 from typing import cast
 
@@ -21,7 +22,9 @@ from app.rmmz.schema import (
     DATA_DIRECTORY_NAME,
     DATA_ORIGIN_DIRECTORY_NAME,
     FIXED_FILE_NAMES,
+    EngineKind,
     GameData,
+    GameLayout,
     JS_DIRECTORY_NAME,
     MAP_PATTERN,
     PLUGINS_FILE_NAME,
@@ -35,13 +38,23 @@ from app.rmmz.probe import run_dialogue_probe
 from app.observability.logging import logger
 
 PACKAGE_FILE_NAME = "package.json"
+WWW_DIRECTORY_NAME = "www"
+RMMZ_CORE_FILE_NAME = "rmmz_core.js"
+RPG_CORE_FILE_NAME = "rpg_core.js"
+ENGINE_NAME_PATTERN: re.Pattern[str] = re.compile(
+    r"RPGMAKER_NAME\s*=\s*['\"](?P<name>MV|MZ)['\"]"
+)
+ENGINE_VERSION_PATTERN: re.Pattern[str] = re.compile(
+    r"RPGMAKER_VERSION\s*=\s*['\"](?P<version>[^'\"]+)['\"]"
+)
 
 
 async def load_game_data(game_path: str | Path) -> GameData:
     """从 RPG Maker 游戏根目录加载标准数据文件并构造 `GameData`。"""
-    game_root = Path(game_path)
-    source_data_dir, source_plugins_path, _ = resolve_game_source_paths(game_root)
-    origin_data_dir = game_root / DATA_ORIGIN_DIRECTORY_NAME
+    layout = resolve_game_layout(game_path)
+    source_data_dir = layout.data_dir
+    source_plugins_path = layout.source_plugins_path
+    origin_data_dir = layout.data_origin_dir
 
     valid_files = sorted(
         (
@@ -101,6 +114,7 @@ async def load_game_data(game_path: str | Path) -> GameData:
     run_dialogue_probe(map_data=map_data, common_events=common_events, troops=troops)
 
     return GameData(
+        layout=layout,
         data=data,
         writable_data=copy.deepcopy(data),
         map_data=map_data,
@@ -124,10 +138,25 @@ def resolve_game_directory(game_path: str | Path) -> Path:
 
 
 def read_game_title(game_path: Path) -> str:
-    """从游戏目录下的 `package.json` 读取游戏标题。"""
-    package_path = game_path / PACKAGE_FILE_NAME
+    """按 package.json、System.json 顺序读取游戏标题。"""
+    layout = resolve_game_layout(game_path)
+    package_title = read_game_title_from_package(layout.package_path)
+    if package_title is not None:
+        return package_title
+
+    system_title = read_game_title_from_system(layout.data_dir / SYSTEM_FILE_NAME)
+    if system_title is not None:
+        return system_title
+
+    raise ValueError(
+        f"游戏标题为空，请确认 package.json.window.title 或 data/System.json.gameTitle 有效: {layout.game_root}"
+    )
+
+
+def read_game_title_from_package(package_path: Path) -> str | None:
+    """从 package.json 读取窗口标题，缺失或空标题时返回 None。"""
     if not package_path.exists():
-        raise FileNotFoundError(f"未找到 package.json: {package_path}")
+        return None
 
     raw_text = package_path.read_text(encoding="utf-8")
     package_data = _decode_json_value(content=raw_text, source=package_path)
@@ -135,35 +164,113 @@ def read_game_title(game_path: Path) -> str:
 
     window_config = package_object.get("window")
     if not isinstance(window_config, dict):
-        raise ValueError(f"package.json 缺少 window 对象: {package_path}")
+        return None
 
     title = window_config.get("title")
     if not isinstance(title, str) or not title.strip():
-        raise ValueError(f"package.json 缺少有效的 window.title: {package_path}")
+        return None
 
     return title.strip()
 
 
+def read_game_title_from_system(system_path: Path) -> str | None:
+    """从 System.json 读取游戏标题，缺失或空标题时返回 None。"""
+    if not system_path.exists():
+        return None
+
+    raw_text = system_path.read_text(encoding="utf-8")
+    system_data = _decode_json_value(content=raw_text, source=system_path)
+    system_object = ensure_json_object(system_data, f"{system_path} 顶层")
+    title = system_object.get("gameTitle")
+    if not isinstance(title, str) or not title.strip():
+        return None
+    return title.strip()
+
+
+def resolve_game_layout(game_path: str | Path) -> GameLayout:
+    """解析 RPG Maker MV/MZ 的真实数据目录与插件配置位置。"""
+    game_root = resolve_game_directory(game_path)
+    candidate_roots = [game_root, game_root / WWW_DIRECTORY_NAME]
+    for content_root in candidate_roots:
+        data_dir = content_root / DATA_DIRECTORY_NAME
+        plugins_path = content_root / JS_DIRECTORY_NAME / PLUGINS_FILE_NAME
+        if not data_dir.is_dir() or not plugins_path.is_file():
+            continue
+        return build_game_layout(
+            game_root=game_root,
+            content_root=content_root,
+            is_www_layout=content_root != game_root,
+        )
+
+    raise FileNotFoundError(
+        f"未找到可识别的 RPG Maker MV/MZ 游戏结构，请确认目录内存在 data/js 或 www/data/www/js: {game_root}"
+    )
+
+
+def build_game_layout(*, game_root: Path, content_root: Path, is_www_layout: bool) -> GameLayout:
+    """根据真实内容目录构造游戏布局对象。"""
+    js_dir = content_root / JS_DIRECTORY_NAME
+    engine_kind, engine_version = detect_engine_kind_and_version(
+        js_dir=js_dir,
+        is_www_layout=is_www_layout,
+    )
+    package_path = resolve_package_path(game_root=game_root, content_root=content_root)
+    return GameLayout(
+        game_root=game_root,
+        content_root=content_root,
+        data_dir=content_root / DATA_DIRECTORY_NAME,
+        data_origin_dir=content_root / DATA_ORIGIN_DIRECTORY_NAME,
+        js_dir=js_dir,
+        plugins_path=js_dir / PLUGINS_FILE_NAME,
+        plugins_origin_path=js_dir / PLUGINS_ORIGIN_FILE_NAME,
+        package_path=package_path,
+        engine_kind=engine_kind,
+        engine_version=engine_version,
+        is_www_layout=is_www_layout,
+    )
+
+
+def resolve_package_path(*, game_root: Path, content_root: Path) -> Path:
+    """解析优先用于读取标题的 package.json 路径。"""
+    root_package_path = game_root / PACKAGE_FILE_NAME
+    if root_package_path.exists():
+        return root_package_path
+    return content_root / PACKAGE_FILE_NAME
+
+
+def detect_engine_kind_and_version(*, js_dir: Path, is_www_layout: bool) -> tuple[EngineKind, str]:
+    """从核心脚本识别 RPG Maker 引擎类型与版本。"""
+    core_candidates = [js_dir / RMMZ_CORE_FILE_NAME, js_dir / RPG_CORE_FILE_NAME]
+    for core_path in core_candidates:
+        if not core_path.exists():
+            continue
+        core_text = core_path.read_text(encoding="utf-8", errors="ignore")
+        name_match = ENGINE_NAME_PATTERN.search(core_text)
+        version_match = ENGINE_VERSION_PATTERN.search(core_text)
+        version = version_match.group("version").strip() if version_match is not None else "unknown"
+        if name_match is not None:
+            engine_name = name_match.group("name")
+            if engine_name == "MV":
+                return "mv", version
+            return "mz", version
+        if core_path.name == RMMZ_CORE_FILE_NAME:
+            return "mz", version
+        if core_path.name == RPG_CORE_FILE_NAME:
+            return "mv", version
+
+    if is_www_layout:
+        return "mv", "unknown"
+    return "mz", "unknown"
+
+
 def resolve_game_source_paths(game_root: Path) -> tuple[Path, Path, bool]:
     """根据是否存在原件备份解析本次应读取的源数据路径。"""
-    active_data_dir = game_root / DATA_DIRECTORY_NAME
-    active_plugins_path = game_root / JS_DIRECTORY_NAME / PLUGINS_FILE_NAME
-    origin_data_dir = game_root / DATA_ORIGIN_DIRECTORY_NAME
-    origin_plugins_path = game_root / JS_DIRECTORY_NAME / PLUGINS_ORIGIN_FILE_NAME
-
-    has_origin_data_dir = origin_data_dir.exists()
-    has_origin_plugins_path = origin_plugins_path.exists()
-    is_translated_layout = has_origin_data_dir or has_origin_plugins_path
-    source_plugins_path = origin_plugins_path if has_origin_plugins_path else active_plugins_path
-
-    if not active_data_dir.exists():
-        raise FileNotFoundError(f"数据目录不存在: {active_data_dir}")
-    if has_origin_data_dir and not origin_data_dir.is_dir():
-        raise NotADirectoryError(f"原件数据留档不是目录: {origin_data_dir}")
-    if not source_plugins_path.exists():
-        raise FileNotFoundError(f"插件配置文件不存在: {source_plugins_path}")
-
-    return active_data_dir, source_plugins_path, is_translated_layout
+    layout = resolve_game_layout(game_root)
+    if layout.data_origin_dir.exists() and not layout.data_origin_dir.is_dir():
+        raise NotADirectoryError(f"原件数据留档不是目录: {layout.data_origin_dir}")
+    if not layout.source_plugins_path.exists():
+        raise FileNotFoundError(f"插件配置文件不存在: {layout.source_plugins_path}")
+    return layout.data_dir, layout.source_plugins_path, layout.has_origin_backup
 
 
 def resolve_data_source_file(*, active_file_path: Path, origin_data_dir: Path) -> Path:
@@ -185,9 +292,10 @@ class GameDataManager:
         """读取指定游戏目录，并以游戏标题为键写入缓存。"""
         resolved_game_path = resolve_game_directory(game_path)
         game_title = read_game_title(resolved_game_path)
-        source_data_dir, source_plugins_path, has_origin_backup = resolve_game_source_paths(
-            resolved_game_path
-        )
+        layout = resolve_game_layout(resolved_game_path)
+        source_data_dir = layout.data_dir
+        source_plugins_path = layout.source_plugins_path
+        has_origin_backup = layout.has_origin_backup
         game_data = await load_game_data(resolved_game_path)
 
         if has_origin_backup:
@@ -203,7 +311,7 @@ async def _read_text_file(file_path: Path) -> str:
 
 
 def _is_standard_rmmz_filename(file_name: str) -> bool:
-    """判断文件名是否属于标准 RMMZ 数据文件。"""
+    """判断文件名是否属于标准 RPG Maker MV/MZ 数据文件。"""
     return file_name in FIXED_FILE_NAMES or MAP_PATTERN.fullmatch(file_name) is not None
 
 
@@ -252,7 +360,10 @@ __all__: list[str] = [
     "GameDataManager",
     "load_game_data",
     "read_game_title",
+    "read_game_title_from_package",
+    "read_game_title_from_system",
     "resolve_data_source_file",
     "resolve_game_directory",
+    "resolve_game_layout",
     "resolve_game_source_paths",
 ]

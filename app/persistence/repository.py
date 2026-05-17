@@ -13,11 +13,13 @@ import aiosqlite
 
 from app.terminology.schemas import TERMINOLOGY_CATEGORIES, TerminologyCategory, TerminologyGlossary, TerminologyRegistry
 from app.rmmz.schema import (
+    EngineKind,
     EventCommandParameterFilter,
     EventCommandTextRuleRecord,
     ErrorType,
     FontReplacementRecord,
     GameData,
+    GameLayout,
     JapaneseResidualRuleRecord,
     LlmFailureCategory,
     LlmFailureRecord,
@@ -29,7 +31,7 @@ from app.rmmz.schema import (
     TranslationRunRecord,
     TranslationRunStatus,
 )
-from app.rmmz.loader import read_game_title, resolve_game_directory
+from app.rmmz.loader import read_game_title, resolve_game_directory, resolve_game_layout
 from app.observability.logging import logger
 
 from .rows import (
@@ -168,30 +170,74 @@ async def create_static_tables(connection: aiosqlite.Connection) -> None:
     await connection.commit()
 
 
-async def write_metadata(connection: aiosqlite.Connection, game_title: str, game_path: Path) -> None:
+async def write_metadata(
+    connection: aiosqlite.Connection,
+    game_title: str,
+    game_path: Path,
+    layout: GameLayout,
+) -> None:
     """把游戏标题与游戏根目录写入元数据表。"""
-    _ = await connection.execute(UPSERT_METADATA, (METADATA_KEY, game_title, str(game_path)))
+    _ = await connection.execute(
+        UPSERT_METADATA,
+        (
+            METADATA_KEY,
+            game_title,
+            str(game_path),
+            layout.engine_kind,
+            str(layout.content_root),
+            layout.engine_version,
+        ),
+    )
     await connection.commit()
 
 
-async def read_metadata(connection: aiosqlite.Connection, db_path: Path) -> tuple[str, Path]:
+@dataclass(slots=True)
+class GameMetadata:
+    """数据库中保存的游戏绑定元数据。"""
+
+    game_title: str
+    game_path: Path
+    engine_kind: EngineKind
+    content_root: Path
+    engine_version: str
+
+
+async def read_metadata(connection: aiosqlite.Connection, db_path: Path) -> GameMetadata:
     """从元数据表恢复游戏标题和游戏根目录。"""
     try:
         async with connection.execute(SELECT_METADATA, (METADATA_KEY,)) as cursor:
             row = await cursor.fetchone()
     except aiosqlite.Error as error:
-        raise RuntimeError(f"数据库 metadata 表不可读，请重新注册游戏: {db_path}") from error
+        raise RuntimeError(
+            f"数据库 metadata 缺少 MV/MZ 引擎字段或表结构不可读，请重新注册游戏: {db_path}"
+        ) from error
 
     if row is None:
         raise RuntimeError(f"数据库缺少 metadata 元数据记录: {db_path}")
 
     game_title = row_str(row, "game_title", db_path)
     game_path = row_str(row, "game_path", db_path)
+    engine_kind_text = row_str(row, "engine_kind", db_path)
+    content_root = row_str(row, "content_root", db_path)
+    engine_version = row_str(row, "engine_version", db_path)
     if not game_title.strip():
         raise RuntimeError(f"metadata.game_title 非法: {db_path}")
     if not game_path.strip():
         raise RuntimeError(f"metadata.game_path 非法: {db_path}")
-    return game_title.strip(), Path(game_path).resolve()
+    if engine_kind_text not in {"mv", "mz"}:
+        raise RuntimeError(f"metadata.engine_kind 非法，请重新注册游戏: {db_path}")
+    engine_kind: EngineKind = "mv" if engine_kind_text == "mv" else "mz"
+    if not content_root.strip():
+        raise RuntimeError(f"metadata.content_root 非法，请重新注册游戏: {db_path}")
+    if not engine_version.strip():
+        raise RuntimeError(f"metadata.engine_version 非法，请重新注册游戏: {db_path}")
+    return GameMetadata(
+        game_title=game_title.strip(),
+        game_path=Path(game_path).resolve(),
+        engine_kind=engine_kind,
+        content_root=Path(content_root).resolve(),
+        engine_version=engine_version.strip(),
+    )
 
 
 @dataclass(slots=True)
@@ -201,6 +247,9 @@ class GameRecord:
     game_title: str
     game_path: Path
     db_path: Path
+    engine_kind: EngineKind
+    content_root: Path
+    engine_version: str
 
 
 class GameRegistry:
@@ -218,12 +267,15 @@ class GameRegistry:
             connection = await open_connection(db_path)
             try:
                 await check_connection_readable(connection=connection, db_path=db_path)
-                game_title, game_path = await read_metadata(connection=connection, db_path=db_path)
+                metadata = await read_metadata(connection=connection, db_path=db_path)
                 records.append(
                     GameRecord(
-                        game_title=game_title,
-                        game_path=game_path,
+                        game_title=metadata.game_title,
+                        game_path=metadata.game_path,
                         db_path=db_path,
+                        engine_kind=metadata.engine_kind,
+                        content_root=metadata.content_root,
+                        engine_version=metadata.engine_version,
                     )
                 )
             finally:
@@ -234,6 +286,7 @@ class GameRegistry:
         """创建或更新单个游戏数据库绑定。"""
         ensure_db_directory(self.db_directory)
         resolved_game_path = resolve_game_directory(game_path)
+        layout = resolve_game_layout(resolved_game_path)
         game_title = read_game_title(resolved_game_path)
         db_path = build_db_path(game_title, self.db_directory)
         db_already_exists = db_path.exists()
@@ -242,16 +295,18 @@ class GameRegistry:
         try:
             if db_already_exists:
                 await check_connection_readable(connection=connection, db_path=db_path)
-                previous_game_title, previous_game_path = await read_metadata(
+                previous_metadata = await read_metadata(
                     connection=connection,
                     db_path=db_path,
                 )
+                previous_game_title = previous_metadata.game_title
+                previous_game_path = previous_metadata.game_path
                 if previous_game_title != game_title:
                     raise RuntimeError(
                         f"数据库元数据标题与文件名目标不一致: {db_path}"
                     )
             await create_static_tables(connection)
-            await write_metadata(connection, game_title, resolved_game_path)
+            await write_metadata(connection, game_title, resolved_game_path, layout)
         except Exception:
             await connection.close()
             if not db_already_exists and db_path.exists():
@@ -267,6 +322,9 @@ class GameRegistry:
             game_title=game_title,
             game_path=resolved_game_path,
             db_path=db_path,
+            engine_kind=layout.engine_kind,
+            content_root=layout.content_root,
+            engine_version=layout.engine_version,
         )
 
     async def open_game(self, game_title: str) -> "TargetGameSession":
@@ -280,19 +338,22 @@ class GameRegistry:
         try:
             await check_connection_readable(connection=connection, db_path=db_path)
             await create_static_tables(connection)
-            metadata_title, game_path = await read_metadata(
+            metadata = await read_metadata(
                 connection=connection,
                 db_path=db_path,
             )
-            if metadata_title != game_title:
+            if metadata.game_title != game_title:
                 raise RuntimeError(
-                    f"数据库元数据标题不匹配: 期望 {game_title}，实际 {metadata_title}"
+                    f"数据库元数据标题不匹配: 期望 {game_title}，实际 {metadata.game_title}"
                 )
             return TargetGameSession(
                 record=GameRecord(
-                    game_title=metadata_title,
-                    game_path=game_path,
+                    game_title=metadata.game_title,
+                    game_path=metadata.game_path,
                     db_path=db_path,
+                    engine_kind=metadata.engine_kind,
+                    content_root=metadata.content_root,
+                    engine_version=metadata.engine_version,
                 ),
                 connection=connection,
             )
@@ -333,6 +394,21 @@ class TargetGameSession:
     def db_path(self) -> Path:
         """返回当前会话绑定的数据库路径。"""
         return self.record.db_path
+
+    @property
+    def engine_kind(self) -> EngineKind:
+        """返回当前游戏注册时识别到的引擎类型。"""
+        return self.record.engine_kind
+
+    @property
+    def content_root(self) -> Path:
+        """返回当前游戏真实内容目录。"""
+        return self.record.content_root
+
+    @property
+    def engine_version(self) -> str:
+        """返回当前游戏注册时识别到的引擎版本。"""
+        return self.record.engine_version
 
     async def __aenter__(self) -> Self:
         """进入命令级数据库会话。"""
@@ -1032,6 +1108,7 @@ def parse_terminology_category(value: str, db_path: Path) -> TerminologyCategory
 
 __all__: list[str] = [
     "DB_DIRECTORY",
+    "GameMetadata",
     "GameRecord",
     "GameRegistry",
     "TargetGameSession",

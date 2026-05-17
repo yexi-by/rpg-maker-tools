@@ -49,7 +49,10 @@ def _write_map_display_names(*, game_data: GameData, translations: dict[str, str
 
 
 def _write_speaker_names(*, game_data: GameData, translations: dict[str, str]) -> int:
-    """按原名字框写回译名。"""
+    """按 MZ 原名字框写回译名。"""
+    if game_data.layout.engine_kind != "mz":
+        return 0
+
     clean_translations = _filled_translations(translations)
     if not clean_translations:
         return 0

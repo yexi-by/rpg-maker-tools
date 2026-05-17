@@ -135,7 +135,10 @@ class TerminologyExtraction:
         return TerminologyRegistry.from_category_map(category_map), database_contexts
 
     def _collect_speaker_dialogue_map(self) -> dict[str, list[str]]:
-        """按名字框原文聚合后续对白。"""
+        """按 MZ 名字框原文聚合后续对白。"""
+        if self.game_data.layout.engine_kind != "mz":
+            return {}
+
         dialogue_map: dict[str, list[str]] = {}
 
         for map_data in self.game_data.map_data.values():
@@ -184,7 +187,7 @@ def build_speaker_sample_file_name(name: str) -> str:
 
 
 def read_name_box_text(command: EventCommand) -> str | None:
-    """读取 `101.parameters[4]` 名字框文本。"""
+    """读取 MZ `101.parameters[4]` 名字框文本。"""
     if len(command.parameters) < 5:
         return None
     raw_name = command.parameters[4]
