@@ -204,19 +204,21 @@ class TextRules:
                 continue
 
             has_non_source_content = self._has_non_source_content(cleaned_line)
-            real_residual: list[str] = []
+            real_residual_segments: list[str] = []
             for segment in segments:
                 filtered_segment = [char for char in segment if char not in allowed_chars]
                 if not filtered_segment:
                     if not has_non_source_content:
-                        real_residual.extend(segment)
+                        real_residual_segments.append(segment)
                     continue
                 if has_non_source_content and all(char in allowed_tail_chars for char in filtered_segment):
                     continue
-                real_residual.extend(filtered_segment)
+                real_residual_segments.append(segment)
 
-            if real_residual:
-                raise ValueError(f"发现{self.setting.source_residual_label}残留(第 {index} 行): {real_residual}")
+            if real_residual_segments:
+                raise ValueError(
+                    f"发现{self.setting.source_residual_label}残留(第 {index} 行): {real_residual_segments}"
+                )
 
     def _strip_non_content_for_residual(self, text: str) -> str:
         """在残留校验前剥离控制符和占位符噪音。"""

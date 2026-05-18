@@ -44,7 +44,7 @@ TERMINOLOGY_CATEGORIES: tuple[TerminologyCategory, ...] = (
 )
 
 TERMINOLOGY_CATEGORY_LABELS: dict[TerminologyCategory, str] = {
-    "speaker_names": "名字框",
+    "speaker_names": "说话人",
     "map_display_names": "地图名",
     "actor_names": "角色名",
     "actor_nicknames": "角色称号",
@@ -191,7 +191,7 @@ def _normalize_required_mapping(entries: dict[str, str], field_name: str) -> dic
 
 
 class SpeakerDialogueContext(StrictTerminologyModel):
-    """单个名字对应的对白样本。"""
+    """单个说话人对应的对白样本。"""
 
     name: str
     dialogue_lines: list[str] = Field(default_factory=list)

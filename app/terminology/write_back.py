@@ -15,7 +15,7 @@ from .schemas import TerminologyRegistry
 
 
 def apply_terminology_translations(game_data: GameData, registry: TerminologyRegistry) -> int:
-    """把术语表译名写入名字框、地图显示名、数据库名称和系统类型。"""
+    """把术语表译名写入可稳定定位的游戏字段。"""
     written_count = 0
     written_count += _write_map_display_names(game_data=game_data, translations=registry.map_display_names)
     written_count += _write_speaker_names(game_data=game_data, translations=registry.speaker_names)
@@ -49,7 +49,7 @@ def _write_map_display_names(*, game_data: GameData, translations: dict[str, str
 
 
 def _write_speaker_names(*, game_data: GameData, translations: dict[str, str]) -> int:
-    """按 MZ 原名字框写回译名。"""
+    """只按 MZ 原生名字框写回译名，MV 说话人术语不写回。"""
     if game_data.layout.engine_kind != "mz":
         return 0
 

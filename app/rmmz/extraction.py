@@ -14,6 +14,7 @@ from app.rmmz.schema import (
     TranslationData,
     TranslationItem,
 )
+from app.rmmz.speaker import parse_mv_speaker_from_first_text
 from app.rmmz.text_rules import TextRules
 from app.rmmz.commands import iter_all_commands
 
@@ -214,7 +215,7 @@ class DataTextExtraction:
     ) -> None:
         """处理 NAME 指令，并创建后续长文本容器。"""
         role = NARRATION_ROLE
-        if len(command.parameters) >= 5:
+        if self.game_data.layout.engine_kind == "mz" and len(command.parameters) >= 5:
             role_value = command.parameters[4]
             if isinstance(role_value, str) and role_value.strip():
                 role = role_value.strip()
@@ -244,6 +245,17 @@ class DataTextExtraction:
 
         text = self._extract_text_value(command)
         if text is not None:
+            if (
+                self.game_data.layout.engine_kind == "mv"
+                and current_item.role == NARRATION_ROLE
+                and not current_item.original_lines
+            ):
+                speaker_result = parse_mv_speaker_from_first_text(
+                    text=text,
+                    game_data=self.game_data,
+                )
+                if speaker_result is not None:
+                    current_item.role = speaker_result.speaker
             current_item.original_lines.append(text)
             current_item.source_line_paths.append(location_path)
 

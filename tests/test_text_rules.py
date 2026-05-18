@@ -189,8 +189,11 @@ def test_english_source_residual_allows_default_ui_abbreviations() -> None:
     with pytest.raises(ValueError, match="英文残留"):
         rules.check_source_residual(["Are you really going in there?"])
 
-    with pytest.raises(ValueError, match="英文残留"):
+    with pytest.raises(ValueError, match="英文残留") as residual_error:
         rules.check_source_residual(["你好 Alice"])
+    residual_message = str(residual_error.value)
+    assert "Alice" in residual_message
+    assert "'A', 'l'" not in residual_message
 
     rules.check_source_residual(["HP 恢复 10 点"])
     rules.check_source_residual(["OK"])

@@ -2728,7 +2728,7 @@ def _validate_terminology_registry(registry: TerminologyRegistry) -> list[AgentI
         warnings.append(issue("terminology_duplicate_translation", f"术语表存在 {duplicate_count} 组重复译名，需要确认是否合理"))
     variant_mismatch_count = _count_name_variant_mismatches(registry.speaker_names)
     if variant_mismatch_count:
-        warnings.append(issue("terminology_variant_mismatch", f"名字框变体存在 {variant_mismatch_count} 处译名不一致风险"))
+        warnings.append(issue("terminology_variant_mismatch", f"说话人变体存在 {variant_mismatch_count} 处译名不一致风险"))
     return warnings
 
 

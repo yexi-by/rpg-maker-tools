@@ -62,6 +62,87 @@ async def test_mv_outer_layout_loads_www_data_and_system_title(minimal_mv_game_d
     assert game_data.plugins_js[0]["name"] == "MvPlugin"
 
 
+@pytest.mark.asyncio
+async def test_mv_data_extraction_reads_role_from_first_401(
+    minimal_mv_game_dir: Path,
+) -> None:
+    """MV 对话会从首条正文协议提取内部说话人。"""
+    common_events_path = minimal_mv_game_dir / "www" / "data" / "CommonEvents.json"
+    common_events = ensure_json_array(_read_test_json(common_events_path), "CommonEvents.json")
+    common_events.extend(
+        [
+            {
+                "id": 2,
+                "list": [
+                    {"code": 101, "parameters": [0, 0, 0, 2]},
+                    {"code": 401, "parameters": ["案内人「こんにちは」"]},
+                    {"code": 0, "parameters": []},
+                ],
+            },
+            {
+                "id": 3,
+                "list": [
+                    {"code": 101, "parameters": [0, 0, 0, 2]},
+                    {"code": 401, "parameters": ["案内人："]},
+                    {"code": 401, "parameters": ["次の本文です"]},
+                    {"code": 0, "parameters": []},
+                ],
+            },
+            {
+                "id": 4,
+                "list": [
+                    {"code": 101, "parameters": [0, 0, 0, 2]},
+                    {"code": 401, "parameters": ["\\N[1]:"]},
+                    {"code": 401, "parameters": ["役者の本文です"]},
+                    {"code": 0, "parameters": []},
+                ],
+            },
+            {
+                "id": 5,
+                "list": [
+                    {"code": 101, "parameters": [0, 0, 0, 2]},
+                    {"code": 401, "parameters": ["\\n<店員>いらっしゃいませ"]},
+                    {"code": 0, "parameters": []},
+                ],
+            },
+            {
+                "id": 6,
+                "list": [
+                    {"code": 101, "parameters": [0, 0, 0, 2]},
+                    {"code": 401, "parameters": ["\\n[1]:普通の本文です"]},
+                    {"code": 0, "parameters": []},
+                ],
+            },
+            {
+                "id": 7,
+                "list": [
+                    {"code": 101, "parameters": [0, 0, 0, 2, "誤った名前"]},
+                    {"code": 401, "parameters": ["案内人「第五参数を無視します」"]},
+                    {"code": 0, "parameters": []},
+                ],
+            },
+        ]
+    )
+    _rewrite_json(common_events_path, common_events)
+
+    game_data = await load_game_data(minimal_mv_game_dir)
+    extracted = DataTextExtraction(game_data, get_default_text_rules()).extract_all_text()
+    items_by_path = {
+        item.location_path: item
+        for data in extracted.values()
+        for item in data.translation_items
+    }
+
+    assert items_by_path["CommonEvents.json/1/0"].role == "旁白"
+    assert items_by_path["CommonEvents.json/2/0"].role == "案内人"
+    assert items_by_path["CommonEvents.json/3/0"].role == "案内人"
+    assert items_by_path["CommonEvents.json/3/0"].original_lines == ["案内人：", "次の本文です"]
+    assert items_by_path["CommonEvents.json/4/0"].role == "MV勇者"
+    assert items_by_path["CommonEvents.json/5/0"].role == "店員"
+    assert items_by_path["CommonEvents.json/6/0"].role == "旁白"
+    assert items_by_path["CommonEvents.json/7/0"].role == "案内人"
+
+
 def test_empty_metadata_title_falls_back_to_game_directory_name(minimal_mv_game_dir: Path) -> None:
     """窗口标题和系统标题都为空时，注册标题使用游戏目录名。"""
     package_path = minimal_mv_game_dir / "package.json"

@@ -122,7 +122,7 @@ uv run python main.py --agent-mode prepare-agent-workspace --game <游戏标题>
 uv run python main.py --agent-mode import-terminology --game <游戏标题> --input <工作区>/terminology/field-terms.json --glossary-input <工作区>/terminology/glossary.json --json
 ```
 
-字段译名表会覆盖地图显示名、数据库名称、系统类型，以及 MZ 标准 `101.parameters[4]` 名字框等游戏字段；MV 的说话人通常来自插件、文本控制符或自定义文本协议，需要通过插件规则、事件指令规则、占位符规则和正文术语表处理。正文术语表只服务正文翻译提示词命中，不要把字段包装形式、定位信息或说明字段写进正文术语表。
+字段译名表会覆盖地图显示名、数据库名称、系统类型，以及 MZ 标准 `101.parameters[4]` 名字框等游戏字段。MV 的 `speaker_names` 来自每个对话块首条非空 `401` 正文识别出的说话人，只服务译名统一和正文翻译提示词命中，不会写回 `101.parameters[4]`。正文术语表只服务正文翻译提示词命中，不要把字段包装形式、定位信息或说明字段写进正文术语表。
 
 ### 外部规则
 

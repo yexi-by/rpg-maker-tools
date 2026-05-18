@@ -164,7 +164,7 @@ pub(crate) fn check_source_residual(lines: &[String], rules: &CompiledRules) -> 
         }
 
         let has_non_source_content = has_non_source_content(&cleaned_line, rules);
-        let mut real_residual = Vec::new();
+        let mut real_residual_segments = Vec::new();
         for segment in segments {
             let filtered: Vec<char> = segment
                 .chars()
@@ -172,7 +172,7 @@ pub(crate) fn check_source_residual(lines: &[String], rules: &CompiledRules) -> 
                 .collect();
             if filtered.is_empty() {
                 if !has_non_source_content {
-                    real_residual.extend(segment.chars());
+                    real_residual_segments.push(segment);
                 }
                 continue;
             }
@@ -185,15 +185,15 @@ pub(crate) fn check_source_residual(lines: &[String], rules: &CompiledRules) -> 
             {
                 continue;
             }
-            real_residual.extend(filtered);
+            real_residual_segments.push(segment);
         }
 
-        if !real_residual.is_empty() {
+        if !real_residual_segments.is_empty() {
             return Err(format!(
                 "发现{}残留(第 {} 行): {:?}",
                 rules.source_residual_label,
                 index + 1,
-                real_residual
+                real_residual_segments
             ));
         }
     }

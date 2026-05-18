@@ -2,15 +2,16 @@
 
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
 
 from app.application.handler import validate_terminology_registry_shape
 from app.application.file_writer import reset_writable_copies
-from app.rmmz import load_game_data
+from app.rmmz import DataTextExtraction, load_game_data
 from app.rmmz.schema import TranslationData, TranslationItem
-from app.rmmz.text_rules import ensure_json_array, ensure_json_object, get_default_text_rules
+from app.rmmz.text_rules import coerce_json_value, ensure_json_array, ensure_json_object, get_default_text_rules
 from app.terminology import (
     SpeakerDialogueContext,
     TerminologyGlossary,
@@ -132,6 +133,108 @@ async def test_mv_terminology_skips_mz_name_box_parameter(
     commands = ensure_json_array(event["list"], "CommonEvents[1].list")
     name_command = ensure_json_object(commands[0], "CommonEvents[1].list[0]")
     parameters = ensure_json_array(name_command["parameters"], "CommonEvents[1].list[0].parameters")
+    assert len(parameters) == 4
+
+
+@pytest.mark.asyncio
+async def test_mv_terminology_collects_401_speakers_without_write_back(
+    minimal_mv_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """MV 从正文首行收集说话人术语，但不会写回 101 第五参数。"""
+    common_events_path = minimal_mv_game_dir / "www" / "data" / "CommonEvents.json"
+    common_events = ensure_json_array(
+        coerce_json_value(cast(object, json.loads(common_events_path.read_text(encoding="utf-8")))),
+        "CommonEvents.json",
+    )
+    common_events.extend(
+        [
+            {
+                "id": 2,
+                "list": [
+                    {"code": 101, "parameters": [0, 0, 0, 2]},
+                    {"code": 401, "parameters": ["案内人「こんにちは」"]},
+                    {"code": 0, "parameters": []},
+                ],
+            },
+            {
+                "id": 3,
+                "list": [
+                    {"code": 101, "parameters": [0, 0, 0, 2]},
+                    {"code": 401, "parameters": ["\\N[1]:"]},
+                    {"code": 401, "parameters": ["役者の本文です"]},
+                    {"code": 0, "parameters": []},
+                ],
+            },
+            {
+                "id": 4,
+                "list": [
+                    {"code": 101, "parameters": [0, 0, 0, 2]},
+                    {"code": 401, "parameters": ["\\n[1]:普通の本文です"]},
+                    {"code": 0, "parameters": []},
+                ],
+            },
+        ]
+    )
+    _ = common_events_path.write_text(
+        json.dumps(common_events, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    game_data = await load_game_data(minimal_mv_game_dir)
+    summary = await export_terminology_artifacts(
+        game_data=game_data,
+        output_dir=tmp_path / "mv-speaker-terminology",
+    )
+    registry = TerminologyRegistry.model_validate_json(
+        summary.field_terms_path.read_text(encoding="utf-8")
+    )
+
+    assert registry.speaker_names == {
+        "MV勇者": "",
+        "案内人": "",
+    }
+    assert "\\n[1]" not in registry.speaker_names
+    assert summary.sample_file_count == 2
+
+    contexts = [
+        SpeakerDialogueContext.model_validate_json(path.read_text(encoding="utf-8"))
+        for path in summary.speaker_context_dir.glob("*.json")
+    ]
+    contexts_by_name = {context.name: context.dialogue_lines for context in contexts}
+    assert contexts_by_name["案内人"] == ["案内人「こんにちは」"]
+    assert contexts_by_name["MV勇者"] == ["\\N[1]:", "役者の本文です"]
+
+    extracted = DataTextExtraction(game_data, get_default_text_rules()).extract_all_text()
+    prompt_batches = list(
+        iter_translation_context_batches(
+            translation_data=extracted["CommonEvents.json"],
+            token_size=1000,
+            factor=1.0,
+            max_command_items=3,
+            system_prompt="系统提示",
+            text_rules=get_default_text_rules(),
+            terminology_prompt_index=TerminologyPromptIndex.from_glossary(
+                TerminologyGlossary(terms={"MV勇者": "勇者"})
+            ),
+        )
+    )
+    prompt_text = "\n".join(batch.messages[1].text for batch in prompt_batches)
+    assert "role: MV勇者" in prompt_text
+    assert "MV勇者 => 勇者" in prompt_text
+
+    reset_writable_copies(game_data)
+    written_count = apply_terminology_translations(
+        game_data,
+        TerminologyRegistry(speaker_names={"案内人": "向导", "MV勇者": "勇者"}),
+    )
+
+    assert written_count == 0
+    current_events = ensure_json_array(game_data.writable_data["CommonEvents.json"], "CommonEvents")
+    current_event = ensure_json_object(current_events[2], "CommonEvents[2]")
+    current_commands = ensure_json_array(current_event["list"], "CommonEvents[2].list")
+    name_command = ensure_json_object(current_commands[0], "CommonEvents[2].list[0]")
+    parameters = ensure_json_array(name_command["parameters"], "CommonEvents[2].list[0].parameters")
     assert len(parameters) == 4
 
 
