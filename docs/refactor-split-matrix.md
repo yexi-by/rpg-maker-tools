@@ -17,10 +17,13 @@
 | 数据库记录模型 | `app.persistence.repository` | `app.persistence.records`，`repository` 与 `persistence` 继续导出 | `tests/test_persistence.py` | 记录字段和读取失败策略保持一致 |
 | data 文本写回入口 | `app.rmmz.write_back.py` | `app.rmmz.write_back.service`，包入口导出 `write_data_text` | `tests/test_rmmz_loader_extraction_writeback.py` | 调用路径保持 `app.rmmz.write_back import write_data_text` |
 | 字体替换入口 | `app.application.font_replacement.py` | `app.application.font_replacement.service`，包入口导出公共函数 | `tests/test_rmmz_loader_extraction_writeback.py`、`tests/test_runtime_paths.py` | 调用路径保持 `app.application.font_replacement import ...` |
+| data 文本写回内部能力 | `app.rmmz.write_back.service` | `app.rmmz.write_back.commands`、`locators`、`note_tags`、`preparation`、`standard` | `tests/test_rmmz_loader_extraction_writeback.py` | 入口分发、事件指令写入、Note 标签写入、标准 data 字段和写入前文本整理分离，写入结果保持一致 |
+| 字体替换内部能力 | `app.application.font_replacement.service` | `constants`、`models`、`files`、`css`、`native_changes`、`references`、`restore` | `tests/test_rmmz_loader_extraction_writeback.py`、`tests/test_runtime_paths.py` | 字体复制、CSS 替换、Rust 扫描结果应用、引用替换算法和原件留档还原分离，公共包入口保持一致 |
+| 数据库会话方法 | `TargetGameSession` 内部方法 | `app.persistence.translation_records`、`rule_records`、`terminology_records`、`font_records`、`run_records` | `tests/test_persistence.py`、`tests/test_runtime_paths.py` | `TargetGameSession` 继续作为对外入口，表域读写方法按记录类型拆成 mixin，数据库语义保持一致 |
+| Agent 工具箱命令族 | `AgentToolkitService` 大类方法 | `app.agent_toolkit.services.doctor`、`placeholder_rules`、`coverage`、`quality`、`manual_translation`、`workspace`、`rule_validation`、`feedback`、`core` | `tests/test_agent_toolkit.py`、`tests/test_cli_json_output.py` | `AgentToolkitService` 保留薄门面，命令族按职责拆分；原测试 monkeypatch 的服务级原生质检替换点继续可用 |
+| Rust 质量检查子域 | `rust_app/native_core/quality.rs` | `rust_app/native_core/quality/mod.rs`、`residual.rs`、`structure.rs`、`placeholder.rs`、`line_width.rs` | `cargo test`、`cargo clippy --all-targets -- -D warnings` | PyO3 暴露入口不变，源文残留、文本结构、占位符和行宽检查拆成独立 Rust 子模块 |
 
 ## 后续待拆
 
-- `app.agent_toolkit.service` 仍需按 doctor、placeholder_rules、coverage、quality、manual_translation、workspace、rule_validation、feedback 继续拆成可组合服务。
-- `app.persistence.repository` 仍需继续按翻译记录、规则记录、术语记录、运行记录、字体记录拆分会话方法。
-- `app.rmmz.write_back.service` 和 `app.application.font_replacement.service` 已完成包入口迁移，后续可继续拆出内部子模块。
-- `rust_app/native_core/quality.rs` 尚未拆成 residual、structure、placeholder、line_width 子模块。
+- 当前矩阵列出的剩余拆分项已处理完成。
+- `app.agent_toolkit.services.common` 仍集中承载跨命令族共享的纯辅助函数，后续若继续压低单文件行数，可在不改变服务边界的前提下按质量报告、工作区、反馈反查和规则草稿再做二级拆分。

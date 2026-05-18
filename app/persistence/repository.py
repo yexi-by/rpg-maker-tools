@@ -1,49 +1,27 @@
 """多游戏数据库管理模块。"""
 
-import hashlib
-import json
-from collections.abc import Sequence
-from datetime import datetime
 from pathlib import Path
 from types import TracebackType
-from typing import Self
+from typing import Self, override
 
 import aiosqlite
 
 from app.language import DEFAULT_TARGET_LANGUAGE, SourceLanguage, TargetLanguage, parse_source_language
-from app.terminology.schemas import TERMINOLOGY_CATEGORIES, TerminologyCategory, TerminologyGlossary, TerminologyRegistry
 from app.rmmz.schema import (
     EngineKind,
-    EventCommandParameterFilter,
-    EventCommandTextRuleRecord,
-    ErrorType,
-    FontReplacementRecord,
     GameData,
     GameLayout,
-    LlmFailureCategory,
-    LlmFailureRecord,
-    NoteTagTextRuleRecord,
-    PlaceholderRuleRecord,
-    PluginTextRuleRecord,
-    SourceResidualRuleRecord,
-    SourceResidualRuleType,
-    TranslationErrorItem,
-    TranslationItem,
-    TranslationRunRecord,
-    TranslationRunStatus,
 )
 from app.rmmz.loader import read_game_title, resolve_game_directory, resolve_game_layout
 from app.observability.logging import logger
 
-from .rows import (
-    decode_string_list,
-    row_int,
-    row_item_type,
-    row_optional_str,
-    row_str,
-)
+from .font_records import FontRecordSessionMixin
+from .rows import row_str
 from .paths import DB_DIRECTORY, build_db_path, ensure_db_directory, resolve_default_db_directory
 from .records import GameMetadata, GameRecord, LanguageSettings
+from .rule_records import RuleRecordSessionMixin
+from .run_records import RunRecordSessionMixin
+from .session_utils import build_event_command_group_key, current_timestamp_text
 from .sql import (
     CHECK_CONNECTION_READABLE,
     CREATE_EVENT_COMMAND_TEXT_RULE_FILTERS_TABLE,
@@ -63,60 +41,15 @@ from .sql import (
     CREATE_TERMINOLOGY_IMPORT_STATE_TABLE,
     CREATE_TERMINOLOGY_GLOSSARY_TERMS_TABLE,
     CREATE_TERMINOLOGY_TERMS_TABLE,
-    DELETE_ALL_EVENT_COMMAND_TEXT_RULE_FILTERS,
-    DELETE_ALL_EVENT_COMMAND_TEXT_RULE_GROUPS,
-    DELETE_ALL_EVENT_COMMAND_TEXT_RULE_PATHS,
-    DELETE_ALL_FONT_REPLACEMENT_RECORDS,
-    DELETE_ALL_NOTE_TAG_TEXT_RULES,
-    DELETE_ALL_PLACEHOLDER_RULES,
-    DELETE_ALL_PLUGIN_TEXT_RULES,
-    DELETE_ALL_SOURCE_RESIDUAL_RULES,
-    DELETE_ALL_TRANSLATION_QUALITY_ERRORS,
-    DELETE_ALL_TERMINOLOGY_TERMS,
-    DELETE_ALL_TERMINOLOGY_GLOSSARY_TERMS,
-    DELETE_TRANSLATION_ITEM_BY_PATH,
-    DELETE_TRANSLATION_ITEMS_BY_PREFIX,
-    INSERT_EVENT_COMMAND_TEXT_RULE_FILTER,
-    INSERT_EVENT_COMMAND_TEXT_RULE_GROUP,
-    INSERT_EVENT_COMMAND_TEXT_RULE_PATH,
-    INSERT_FONT_REPLACEMENT_RECORD,
     LANGUAGE_SETTINGS_KEY,
-    INSERT_LLM_FAILURE,
-    INSERT_NOTE_TAG_TEXT_RULE,
-    INSERT_PLACEHOLDER_RULE,
-    INSERT_PLUGIN_TEXT_RULE,
-    INSERT_SOURCE_RESIDUAL_RULE,
-    INSERT_TRANSLATION_QUALITY_ERROR,
-    INSERT_TRANSLATION,
     METADATA_KEY,
-    INSERT_TERMINOLOGY_TERM,
-    INSERT_TERMINOLOGY_GLOSSARY_TERM,
-    SELECT_TERMINOLOGY_IMPORT_STATE,
-    SELECT_TERMINOLOGY_GLOSSARY_TERMS,
-    SELECT_LATEST_TRANSLATION_RUN,
-    SELECT_FONT_REPLACEMENT_RECORDS,
     SELECT_LANGUAGE_SETTINGS,
-    SELECT_LLM_FAILURES_BY_RUN,
-    SELECT_EVENT_COMMAND_TEXT_RULE_FILTERS,
-    SELECT_EVENT_COMMAND_TEXT_RULE_GROUPS,
-    SELECT_EVENT_COMMAND_TEXT_RULE_PATHS,
     SELECT_METADATA,
-    SELECT_NOTE_TAG_TEXT_RULES,
-    SELECT_PLACEHOLDER_RULES,
-    SELECT_PLUGIN_TEXT_RULES,
-    SELECT_SOURCE_RESIDUAL_RULES,
-    SELECT_TRANSLATION_QUALITY_ERRORS_BY_RUN,
-    SELECT_TRANSLATION_RUN,
-    SELECT_TRANSLATED_ITEMS,
-    SELECT_TRANSLATION_PATHS,
-    SELECT_TERMINOLOGY_TERMS,
-    TERMINOLOGY_IMPORT_STATE_KEY,
-    TRANSLATION_QUALITY_ERRORS_TABLE_NAME,
     UPSERT_LANGUAGE_SETTINGS,
     UPSERT_METADATA,
-    UPSERT_TERMINOLOGY_IMPORT_STATE,
-    UPSERT_TRANSLATION_RUN,
 )
+from .terminology_records import TerminologyRecordSessionMixin
+from .translation_records import TranslationRecordSessionMixin
 
 async def open_connection(db_path: Path) -> aiosqlite.Connection:
     """打开 SQLite 连接并设置统一行工厂。"""
@@ -387,7 +320,13 @@ class GameRegistry:
         raise ValueError(f"游戏目录尚未注册，请先执行 add-game: {title}")
 
 
-class TargetGameSession:
+class TargetGameSession(
+    TranslationRecordSessionMixin,
+    RuleRecordSessionMixin,
+    TerminologyRecordSessionMixin,
+    FontRecordSessionMixin,
+    RunRecordSessionMixin,
+):
     """单个目标游戏的数据库会话。"""
 
     def __init__(self, record: GameRecord, connection: aiosqlite.Connection) -> None:
@@ -407,6 +346,7 @@ class TargetGameSession:
         return self.record.game_path
 
     @property
+    @override
     def db_path(self) -> Path:
         """返回当前会话绑定的数据库路径。"""
         return self.record.db_path
@@ -459,692 +399,10 @@ class TargetGameSession:
             raise RuntimeError("当前命令尚未加载游戏数据")
         return self.game_data
 
-    async def write_translation_items(
-        self,
-        items: Sequence[TranslationItem],
-    ) -> None:
-        """批量写入已完成译文到主翻译表。"""
-        if items:
-            serialized_items = [
-                (
-                    translation_item.location_path,
-                    translation_item.item_type,
-                    translation_item.role,
-                    json.dumps(translation_item.original_lines, ensure_ascii=False),
-                    json.dumps(translation_item.source_line_paths, ensure_ascii=False),
-                    json.dumps(translation_item.translation_lines, ensure_ascii=False),
-                )
-                for translation_item in items
-            ]
-            _ = await self.connection.executemany(INSERT_TRANSLATION, serialized_items)
-        await self.connection.commit()
-
-    async def read_translation_location_paths(self) -> set[str]:
-        """读取主翻译表中的全部已完成路径。"""
-        async with self.connection.execute(SELECT_TRANSLATION_PATHS) as cursor:
-            rows = await cursor.fetchall()
-        return {row_str(row, "location_path", self.db_path) for row in rows}
-
-    async def read_translated_items(self) -> list[TranslationItem]:
-        """读取主翻译表中的全部正文译文。"""
-        async with self.connection.execute(SELECT_TRANSLATED_ITEMS) as cursor:
-            rows = await cursor.fetchall()
-
-        translated_items: list[TranslationItem] = []
-        for row in rows:
-            original_lines = decode_string_list(row_str(row, "original_lines", self.db_path), "original_lines")
-            source_line_paths = decode_string_list(
-                row_str(row, "source_line_paths", self.db_path),
-                "source_line_paths",
-            )
-            translation_lines = decode_string_list(
-                row_str(row, "translation_lines", self.db_path),
-                "translation_lines",
-            )
-            translated_items.append(
-                TranslationItem(
-                    location_path=row_str(row, "location_path", self.db_path),
-                    item_type=row_item_type(row, "item_type", self.db_path),
-                    role=row_optional_str(row, "role", self.db_path),
-                    original_lines=original_lines,
-                    source_line_paths=source_line_paths,
-                    translation_lines=translation_lines,
-                )
-            )
-        return translated_items
-
-    async def read_plugin_text_rules(self) -> list[PluginTextRuleRecord]:
-        """读取当前游戏保存的全部插件文本规则。"""
-        async with self.connection.execute(SELECT_PLUGIN_TEXT_RULES) as cursor:
-            rows = await cursor.fetchall()
-
-        grouped_records: dict[int, PluginTextRuleRecord] = {}
-        for row in rows:
-            plugin_index = row_int(row, "plugin_index", self.db_path)
-            record = grouped_records.get(plugin_index)
-            if record is None:
-                record = PluginTextRuleRecord(
-                    plugin_index=plugin_index,
-                    plugin_name=row_str(row, "plugin_name", self.db_path),
-                    plugin_hash=row_str(row, "plugin_hash", self.db_path),
-                    path_templates=[],
-                )
-                grouped_records[plugin_index] = record
-            record.path_templates.append(row_str(row, "path_template", self.db_path))
-        return list(grouped_records.values())
-
-    async def replace_plugin_text_rules(
-        self,
-        rule_records: list[PluginTextRuleRecord],
-    ) -> None:
-        """用一次外部导入结果替换当前游戏的全部插件文本规则。"""
-        _ = await self.connection.execute(DELETE_ALL_PLUGIN_TEXT_RULES)
-        for rule_record in rule_records:
-            for path_template in rule_record.path_templates:
-                _ = await self.connection.execute(
-                    INSERT_PLUGIN_TEXT_RULE,
-                    (
-                        rule_record.plugin_index,
-                        rule_record.plugin_name,
-                        rule_record.plugin_hash,
-                        path_template,
-                    ),
-                )
-        await self.connection.commit()
-
-    async def read_note_tag_text_rules(self) -> list[NoteTagTextRuleRecord]:
-        """读取当前游戏保存的 Note 标签文本规则。"""
-        async with self.connection.execute(SELECT_NOTE_TAG_TEXT_RULES) as cursor:
-            rows = await cursor.fetchall()
-
-        grouped_records: dict[str, NoteTagTextRuleRecord] = {}
-        for row in rows:
-            file_name = row_str(row, "file_name", self.db_path)
-            record = grouped_records.get(file_name)
-            if record is None:
-                record = NoteTagTextRuleRecord(file_name=file_name, tag_names=[])
-                grouped_records[file_name] = record
-            record.tag_names.append(row_str(row, "tag_name", self.db_path))
-        return list(grouped_records.values())
-
-    async def replace_note_tag_text_rules(
-        self,
-        rule_records: list[NoteTagTextRuleRecord],
-    ) -> None:
-        """用一次外部导入结果替换当前游戏的 Note 标签文本规则。"""
-        _ = await self.connection.execute(DELETE_ALL_NOTE_TAG_TEXT_RULES)
-        for rule_record in rule_records:
-            for tag_name in rule_record.tag_names:
-                _ = await self.connection.execute(
-                    INSERT_NOTE_TAG_TEXT_RULE,
-                    (
-                        rule_record.file_name,
-                        tag_name,
-                    ),
-                )
-        await self.connection.commit()
-
-    async def read_event_command_text_rules(self) -> list[EventCommandTextRuleRecord]:
-        """读取当前游戏保存的事件指令文本规则。"""
-        async with self.connection.execute(SELECT_EVENT_COMMAND_TEXT_RULE_GROUPS) as cursor:
-            group_rows = await cursor.fetchall()
-        async with self.connection.execute(SELECT_EVENT_COMMAND_TEXT_RULE_FILTERS) as cursor:
-            filter_rows = await cursor.fetchall()
-        async with self.connection.execute(SELECT_EVENT_COMMAND_TEXT_RULE_PATHS) as cursor:
-            path_rows = await cursor.fetchall()
-
-        filters_by_group: dict[str, list[EventCommandParameterFilter]] = {}
-        for row in filter_rows:
-            group_key = row_str(row, "group_key", self.db_path)
-            filters_by_group.setdefault(group_key, []).append(
-                EventCommandParameterFilter(
-                    index=row_int(row, "parameter_index", self.db_path),
-                    value=row_str(row, "parameter_value", self.db_path),
-                )
-            )
-
-        paths_by_group: dict[str, list[str]] = {}
-        for row in path_rows:
-            group_key = row_str(row, "group_key", self.db_path)
-            paths_by_group.setdefault(group_key, []).append(row_str(row, "path_template", self.db_path))
-
-        records: list[EventCommandTextRuleRecord] = []
-        for row in group_rows:
-            group_key = row_str(row, "group_key", self.db_path)
-            records.append(
-                EventCommandTextRuleRecord(
-                    command_code=row_int(row, "command_code", self.db_path),
-                    parameter_filters=filters_by_group.get(group_key, []),
-                    path_templates=paths_by_group.get(group_key, []),
-                )
-            )
-        return records
-
-    async def replace_event_command_text_rules(
-        self,
-        rule_records: list[EventCommandTextRuleRecord],
-    ) -> None:
-        """用一次外部导入结果替换当前游戏的事件指令文本规则。"""
-        _ = await self.connection.execute(DELETE_ALL_EVENT_COMMAND_TEXT_RULE_PATHS)
-        _ = await self.connection.execute(DELETE_ALL_EVENT_COMMAND_TEXT_RULE_FILTERS)
-        _ = await self.connection.execute(DELETE_ALL_EVENT_COMMAND_TEXT_RULE_GROUPS)
-        for rule_record in rule_records:
-            group_key = build_event_command_group_key(rule_record)
-            _ = await self.connection.execute(
-                INSERT_EVENT_COMMAND_TEXT_RULE_GROUP,
-                (group_key, rule_record.command_code),
-            )
-            for parameter_filter in rule_record.parameter_filters:
-                _ = await self.connection.execute(
-                    INSERT_EVENT_COMMAND_TEXT_RULE_FILTER,
-                    (group_key, parameter_filter.index, parameter_filter.value),
-                )
-            for path_template in rule_record.path_templates:
-                _ = await self.connection.execute(
-                    INSERT_EVENT_COMMAND_TEXT_RULE_PATH,
-                    (group_key, path_template),
-                )
-        await self.connection.commit()
-
-    async def replace_terminology_registry(
-        self,
-        registry: TerminologyRegistry,
-    ) -> None:
-        """用一次外部导入结果替换当前游戏的全部术语表条目。"""
-        _ = await self.connection.execute(DELETE_ALL_TERMINOLOGY_TERMS)
-        _ = await self.connection.execute(
-            UPSERT_TERMINOLOGY_IMPORT_STATE,
-            (TERMINOLOGY_IMPORT_STATE_KEY, 1),
-        )
-        for category, entries in registry.as_category_map().items():
-            for source_text, translated_text in entries.items():
-                _ = await self.connection.execute(
-                    INSERT_TERMINOLOGY_TERM,
-                    (category, source_text, translated_text),
-                )
-        await self.connection.commit()
-
-    async def read_terminology_registry(self) -> TerminologyRegistry | None:
-        """从数据库读取当前游戏已导入的字段译名表。"""
-        async with self.connection.execute(SELECT_TERMINOLOGY_TERMS) as cursor:
-            rows = await cursor.fetchall()
-        if not rows:
-            async with self.connection.execute(
-                SELECT_TERMINOLOGY_IMPORT_STATE,
-                (TERMINOLOGY_IMPORT_STATE_KEY,),
-            ) as cursor:
-                state_row = await cursor.fetchone()
-            if state_row is None:
-                return None
-            return TerminologyRegistry()
-
-        category_map: dict[TerminologyCategory, dict[str, str]] = {
-            category: {}
-            for category in TERMINOLOGY_CATEGORIES
-        }
-        for row in rows:
-            category = parse_terminology_category(row_str(row, "category", self.db_path), self.db_path)
-            source_text = row_str(row, "source_text", self.db_path)
-            translated_text = row_str(row, "translated_text", self.db_path)
-            category_map[category][source_text] = translated_text
-        return TerminologyRegistry.from_category_map(category_map)
-
-    async def replace_terminology_glossary(
-        self,
-        glossary: TerminologyGlossary,
-    ) -> None:
-        """用一次外部导入结果替换当前游戏的正文术语表。"""
-        _ = await self.connection.execute(DELETE_ALL_TERMINOLOGY_GLOSSARY_TERMS)
-        _ = await self.connection.execute(
-            UPSERT_TERMINOLOGY_IMPORT_STATE,
-            (TERMINOLOGY_IMPORT_STATE_KEY, 1),
-        )
-        for source_text, translated_text in glossary.terms.items():
-            _ = await self.connection.execute(
-                INSERT_TERMINOLOGY_GLOSSARY_TERM,
-                (source_text, translated_text),
-            )
-        await self.connection.commit()
-
-    async def read_terminology_glossary(self) -> TerminologyGlossary | None:
-        """从数据库读取当前游戏已导入的正文术语表。"""
-        async with self.connection.execute(SELECT_TERMINOLOGY_GLOSSARY_TERMS) as cursor:
-            term_rows = await cursor.fetchall()
-        if not term_rows:
-            async with self.connection.execute(
-                SELECT_TERMINOLOGY_IMPORT_STATE,
-                (TERMINOLOGY_IMPORT_STATE_KEY,),
-            ) as cursor:
-                state_row = await cursor.fetchone()
-            if state_row is None:
-                return None
-            return TerminologyGlossary()
-
-        return TerminologyGlossary(
-            terms={
-                row_str(row, "source_text", self.db_path): row_str(row, "translated_text", self.db_path)
-                for row in term_rows
-            },
-        )
-
-    async def replace_placeholder_rules(
-        self,
-        rules: list[PlaceholderRuleRecord],
-    ) -> None:
-        """用当前游戏专用规则替换数据库中的自定义占位符规则。"""
-        _ = await self.connection.execute(DELETE_ALL_PLACEHOLDER_RULES)
-        for rule in rules:
-            _ = await self.connection.execute(
-                INSERT_PLACEHOLDER_RULE,
-                (rule.pattern_text, rule.placeholder_template),
-            )
-        await self.connection.commit()
-
-    async def read_placeholder_rules(self) -> list[PlaceholderRuleRecord]:
-        """读取当前游戏专用自定义占位符规则。"""
-        async with self.connection.execute(SELECT_PLACEHOLDER_RULES) as cursor:
-            rows = await cursor.fetchall()
-        return [
-            PlaceholderRuleRecord(
-                pattern_text=row_str(row, "pattern_text", self.db_path),
-                placeholder_template=row_str(row, "placeholder_template", self.db_path),
-            )
-            for row in rows
-        ]
-
-    async def replace_source_residual_rules(
-        self,
-        rules: list[SourceResidualRuleRecord],
-    ) -> None:
-        """用当前游戏专用规则替换源文残留例外规则。"""
-        _ = await self.connection.execute(DELETE_ALL_SOURCE_RESIDUAL_RULES)
-        for rule in rules:
-            _ = await self.connection.execute(
-                INSERT_SOURCE_RESIDUAL_RULE,
-                (
-                    rule.rule_id,
-                    rule.rule_type,
-                    rule.location_path,
-                    rule.pattern_text,
-                    json.dumps(rule.allowed_terms, ensure_ascii=False),
-                    rule.check_group,
-                    rule.reason,
-                ),
-            )
-        await self.connection.commit()
-
-    async def read_source_residual_rules(self) -> list[SourceResidualRuleRecord]:
-        """读取当前游戏专用源文残留例外规则。"""
-        async with self.connection.execute(SELECT_SOURCE_RESIDUAL_RULES) as cursor:
-            rows = await cursor.fetchall()
-        return [
-            SourceResidualRuleRecord(
-                rule_id=row_str(row, "rule_id", self.db_path),
-                rule_type=parse_source_residual_rule_type(row_str(row, "rule_type", self.db_path), self.db_path),
-                location_path=row_str(row, "location_path", self.db_path),
-                pattern_text=row_str(row, "pattern_text", self.db_path),
-                allowed_terms=decode_string_list(
-                    row_str(row, "allowed_terms", self.db_path),
-                    "allowed_terms",
-                ),
-                check_group=row_str(row, "check_group", self.db_path),
-                reason=row_str(row, "reason", self.db_path),
-            )
-            for row in rows
-        ]
-
-    async def replace_font_replacement_records(
-        self,
-        records: Sequence[FontReplacementRecord],
-    ) -> None:
-        """用本次字体覆盖记录替换当前游戏的候选覆盖字体记录。"""
-        _ = await self.connection.execute(DELETE_ALL_FONT_REPLACEMENT_RECORDS)
-        if records:
-            serialized_records = [
-                (
-                    record.file_name,
-                    record.value_path,
-                    record.original_text,
-                    record.replaced_text,
-                    record.replacement_font_name,
-                )
-                for record in records
-            ]
-            _ = await self.connection.executemany(
-                INSERT_FONT_REPLACEMENT_RECORD,
-                serialized_records,
-            )
-        await self.connection.commit()
-
-    async def read_font_replacement_records(self) -> list[FontReplacementRecord]:
-        """读取当前游戏最近一次字体覆盖产生的候选覆盖字体记录。"""
-        async with self.connection.execute(SELECT_FONT_REPLACEMENT_RECORDS) as cursor:
-            rows = await cursor.fetchall()
-        return [
-            FontReplacementRecord(
-                file_name=row_str(row, "file_name", self.db_path),
-                value_path=row_str(row, "value_path", self.db_path),
-                original_text=row_str(row, "original_text", self.db_path),
-                replaced_text=row_str(row, "replaced_text", self.db_path),
-                replacement_font_name=row_str(row, "replacement_font_name", self.db_path),
-            )
-            for row in rows
-        ]
-
-    async def clear_font_replacement_records(self) -> int:
-        """清空当前游戏已经完成处理的字体覆盖记录。"""
-        cursor = await self.connection.execute(DELETE_ALL_FONT_REPLACEMENT_RECORDS)
-        await self.connection.commit()
-        return max(cursor.rowcount, 0)
-
-    async def start_translation_run(
-        self,
-        *,
-        total_extracted: int,
-        pending_count: int,
-        deduplicated_count: int,
-        batch_count: int,
-    ) -> TranslationRunRecord:
-        """创建新的正文翻译运行状态。"""
-        _ = await self.connection.execute(DELETE_ALL_TRANSLATION_QUALITY_ERRORS)
-        now = current_timestamp_text()
-        run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S_%f")
-        record = TranslationRunRecord(
-            run_id=run_id,
-            status="running",
-            total_extracted=total_extracted,
-            pending_count=pending_count,
-            deduplicated_count=deduplicated_count,
-            batch_count=batch_count,
-            success_count=0,
-            quality_error_count=0,
-            llm_failure_count=0,
-            started_at=now,
-            updated_at=now,
-            finished_at=None,
-            stop_reason="",
-            last_error="",
-        )
-        await self.write_translation_run(record)
-        return record
-
-    async def write_translation_run(self, record: TranslationRunRecord) -> None:
-        """写入正文翻译运行状态快照。"""
-        _ = await self.connection.execute(
-            UPSERT_TRANSLATION_RUN,
-            (
-                record.run_id,
-                record.status,
-                record.total_extracted,
-                record.pending_count,
-                record.deduplicated_count,
-                record.batch_count,
-                record.success_count,
-                record.quality_error_count,
-                record.llm_failure_count,
-                record.started_at,
-                current_timestamp_text(),
-                record.finished_at,
-                record.stop_reason,
-                record.last_error,
-            ),
-        )
-        await self.connection.commit()
-
-    async def read_latest_translation_run(self) -> TranslationRunRecord | None:
-        """读取最新正文翻译运行状态。"""
-        async with self.connection.execute(SELECT_LATEST_TRANSLATION_RUN) as cursor:
-            row = await cursor.fetchone()
-        if row is None:
-            return None
-        return self._decode_translation_run(row)
-
-    async def read_translation_run(self, run_id: str) -> TranslationRunRecord | None:
-        """按运行 ID 读取正文翻译状态。"""
-        async with self.connection.execute(SELECT_TRANSLATION_RUN, (run_id,)) as cursor:
-            row = await cursor.fetchone()
-        if row is None:
-            return None
-        return self._decode_translation_run(row)
-
-    async def write_llm_failure(self, failure: LlmFailureRecord) -> None:
-        """写入运行级模型故障。"""
-        _ = await self.connection.execute(
-            INSERT_LLM_FAILURE,
-            (
-                failure.run_id,
-                failure.category,
-                failure.error_type,
-                failure.error_message,
-                1 if failure.retryable else 0,
-                failure.attempt_count,
-                failure.created_at,
-            ),
-        )
-        await self.connection.commit()
-
-    async def read_llm_failures(self, run_id: str) -> list[LlmFailureRecord]:
-        """读取指定运行的模型故障记录。"""
-        async with self.connection.execute(SELECT_LLM_FAILURES_BY_RUN, (run_id,)) as cursor:
-            rows = await cursor.fetchall()
-        return [
-            LlmFailureRecord(
-                run_id=row_str(row, "run_id", self.db_path),
-                category=parse_llm_failure_category(row_str(row, "category", self.db_path), self.db_path),
-                error_type=row_str(row, "error_type", self.db_path),
-                error_message=row_str(row, "error_message", self.db_path),
-                retryable=row_int(row, "retryable", self.db_path) == 1,
-                attempt_count=row_int(row, "attempt_count", self.db_path),
-                created_at=row_str(row, "created_at", self.db_path),
-            )
-            for row in rows
-        ]
-
-    async def write_translation_quality_errors(
-        self,
-        run_id: str,
-        items: list[TranslationErrorItem],
-    ) -> None:
-        """写入没通过项目检查的最终译文。"""
-        if items:
-            serialized_items = [
-                (
-                    run_id,
-                    error_item.location_path,
-                    error_item.item_type,
-                    error_item.role,
-                    json.dumps(error_item.original_lines, ensure_ascii=False),
-                    json.dumps(error_item.translation_lines, ensure_ascii=False),
-                    error_item.error_type,
-                    json.dumps(error_item.error_detail, ensure_ascii=False),
-                    error_item.model_response,
-                )
-                for error_item in items
-            ]
-            _ = await self.connection.executemany(
-                INSERT_TRANSLATION_QUALITY_ERROR,
-                serialized_items,
-            )
-        await self.connection.commit()
-
-    async def read_translation_quality_errors(self, run_id: str) -> list[TranslationErrorItem]:
-        """读取指定运行中没通过项目检查的最终译文。"""
-        async with self.connection.execute(SELECT_TRANSLATION_QUALITY_ERRORS_BY_RUN, (run_id,)) as cursor:
-            rows = await cursor.fetchall()
-        return [
-            TranslationErrorItem(
-                location_path=row_str(row, "location_path", self.db_path),
-                item_type=row_item_type(row, "item_type", self.db_path),
-                role=row_optional_str(row, "role", self.db_path),
-                original_lines=decode_string_list(row_str(row, "original_lines", self.db_path), "original_lines"),
-                translation_lines=decode_string_list(
-                    row_str(row, "translation_lines", self.db_path),
-                    "translation_lines",
-                ),
-                error_type=parse_error_type(row_str(row, "error_type", self.db_path), self.db_path),
-                error_detail=decode_string_list(row_str(row, "error_detail", self.db_path), "error_detail"),
-                model_response=row_str(row, "model_response", self.db_path),
-            )
-            for row in rows
-        ]
-
-    async def delete_translation_quality_errors_by_paths(self, location_paths: set[str]) -> int:
-        """按文本内部位置清理已经修好的译文检查失败明细。"""
-        if not location_paths:
-            return 0
-        sorted_paths = sorted(location_paths)
-        placeholders = ", ".join("?" for _ in sorted_paths)
-        cursor = await self.connection.execute(
-            f"""
---sql
-                DELETE FROM [{TRANSLATION_QUALITY_ERRORS_TABLE_NAME}]
-                WHERE location_path IN ({placeholders})
-            """,
-            tuple(sorted_paths),
-        )
-        await self.connection.commit()
-        return max(cursor.rowcount, 0)
-
-    def _decode_translation_run(self, row: aiosqlite.Row) -> TranslationRunRecord:
-        """把 SQLite 行转换成正文翻译运行状态。"""
-        return TranslationRunRecord(
-            run_id=row_str(row, "run_id", self.db_path),
-            status=parse_translation_run_status(row_str(row, "status", self.db_path), self.db_path),
-            total_extracted=row_int(row, "total_extracted", self.db_path),
-            pending_count=row_int(row, "pending_count", self.db_path),
-            deduplicated_count=row_int(row, "deduplicated_count", self.db_path),
-            batch_count=row_int(row, "batch_count", self.db_path),
-            success_count=row_int(row, "success_count", self.db_path),
-            quality_error_count=row_int(row, "quality_error_count", self.db_path),
-            llm_failure_count=row_int(row, "llm_failure_count", self.db_path),
-            started_at=row_str(row, "started_at", self.db_path),
-            updated_at=row_str(row, "updated_at", self.db_path),
-            finished_at=row_optional_str(row, "finished_at", self.db_path),
-            stop_reason=row_str(row, "stop_reason", self.db_path),
-            last_error=row_str(row, "last_error", self.db_path),
-        )
-
-    async def delete_translation_items_by_prefixes(self, prefixes: list[str]) -> int:
-        """按路径前缀批量删除主翻译表中的记录。"""
-        deleted_rows = 0
-        for prefix in prefixes:
-            cursor = await self.connection.execute(
-                DELETE_TRANSLATION_ITEMS_BY_PREFIX,
-                (f"{prefix}%",),
-            )
-            if cursor.rowcount > 0:
-                deleted_rows += cursor.rowcount
-        await self.connection.commit()
-        return deleted_rows
-
-    async def delete_translation_items_except_paths(
-        self,
-        allowed_paths: set[str],
-    ) -> int:
-        """删除当前提取规则之外的主翻译表记录。"""
-        async with self.connection.execute(SELECT_TRANSLATION_PATHS) as cursor:
-            rows = await cursor.fetchall()
-
-        stored_paths = {row_str(row, "location_path", self.db_path) for row in rows}
-        stale_paths = sorted(stored_paths - allowed_paths)
-        if not stale_paths:
-            return 0
-
-        _ = await self.connection.executemany(
-            DELETE_TRANSLATION_ITEM_BY_PATH,
-            [(path,) for path in stale_paths],
-        )
-        await self.connection.commit()
-        return len(stale_paths)
-
-    async def delete_translation_items_by_paths(
-        self,
-        location_paths: Sequence[str],
-    ) -> int:
-        """按精确定位路径批量删除主翻译表记录。"""
-        deleted_rows = 0
-        for location_path in location_paths:
-            cursor = await self.connection.execute(
-                DELETE_TRANSLATION_ITEM_BY_PATH,
-                (location_path,),
-            )
-            if cursor.rowcount > 0:
-                deleted_rows += cursor.rowcount
-        await self.connection.commit()
-        return deleted_rows
 
     async def close(self) -> None:
         """关闭当前游戏数据库连接。"""
         await self.connection.close()
-
-
-def build_event_command_group_key(rule_record: EventCommandTextRuleRecord) -> str:
-    """生成事件指令规则组主键。"""
-    filter_text = "|".join(
-        f"{parameter_filter.index}={parameter_filter.value}"
-        for parameter_filter in rule_record.parameter_filters
-    )
-    payload = f"{rule_record.command_code}:{filter_text}"
-    digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
-    return f"event_{rule_record.command_code}_{digest}"
-
-
-def current_timestamp_text() -> str:
-    """生成数据库状态记录使用的本地时间文本。"""
-    return datetime.now().isoformat(timespec="seconds")
-
-
-def parse_translation_run_status(value: str, db_path: Path) -> TranslationRunStatus:
-    """校验并收窄数据库中的翻译运行状态。"""
-    allowed: set[TranslationRunStatus] = {"running", "completed", "blocked", "cancelled", "failed", "stopped"}
-    if value in allowed:
-        return value
-    raise RuntimeError(f"数据库字段 status 不是有效翻译运行状态: {db_path}")
-
-
-def parse_llm_failure_category(value: str, db_path: Path) -> LlmFailureCategory:
-    """校验并收窄数据库中的模型故障分类。"""
-    allowed: set[LlmFailureCategory] = {
-        "rate_limit",
-        "timeout",
-        "connection",
-        "server",
-        "conflict",
-        "fatal",
-        "unknown",
-    }
-    if value in allowed:
-        return value
-    raise RuntimeError(f"数据库字段 category 不是有效模型故障分类: {db_path}")
-
-
-def parse_error_type(value: str, db_path: Path) -> ErrorType:
-    """校验并收窄数据库中的译文检查错误类型。"""
-    allowed: set[ErrorType] = {
-        "模型返回不可解析",
-        "AI漏翻",
-        "文本结构不匹配",
-        "控制符不匹配",
-        "源文残留",
-        "选项行数不匹配",
-    }
-    if value in allowed:
-        return value
-    raise RuntimeError(f"数据库字段 error_type 不是有效译文检查错误类型: {db_path}")
-
-
-def parse_source_residual_rule_type(value: str, db_path: Path) -> SourceResidualRuleType:
-    """校验并收窄数据库中的源文残留例外规则类型。"""
-    if value == "position" or value == "structural":
-        return value
-    raise RuntimeError(f"数据库字段 rule_type 不是有效源文残留例外规则类型: {db_path}")
-
-
-def parse_terminology_category(value: str, db_path: Path) -> TerminologyCategory:
-    """校验并收窄数据库中的术语类别。"""
-    if value in TERMINOLOGY_CATEGORIES:
-        return value
-    raise RuntimeError(f"数据库字段 category 不是有效术语类别: {db_path}")
 
 
 __all__: list[str] = [
@@ -1154,7 +412,9 @@ __all__: list[str] = [
     "GameRegistry",
     "LanguageSettings",
     "TargetGameSession",
+    "build_event_command_group_key",
     "build_db_path",
+    "current_timestamp_text",
     "ensure_db_directory",
     "resolve_default_db_directory",
 ]
