@@ -36,6 +36,7 @@ from app.config import (
     load_custom_placeholder_rules_text,
 )
 from app.config.schemas import Setting
+from app.language import DEFAULT_SOURCE_LANGUAGE, SourceLanguage
 from app.event_command_text import (
     EventCommandTextExtraction,
     build_event_command_rule_records_from_import,
@@ -61,7 +62,6 @@ from app.note_tag_text import (
     export_note_tag_candidates_file,
     load_note_tag_rule_import_file,
 )
-from app.japanese_residual import JapaneseResidualRuleSet
 from app.persistence import GameRegistry, TargetGameSession
 from app.persistence.repository import current_timestamp_text
 from app.plugin_text import (
@@ -95,6 +95,7 @@ from app.observability.logging import logger
 from app.rmmz.write_back import write_data_text
 from app.plugin_text.write_back import write_plugin_text
 from app.utils.config_loader_utils import load_setting
+from app.source_residual import SourceResidualRuleSet
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,13 +160,25 @@ class TranslationHandler:
         """释放编排器持有的运行时资源。"""
         self.llm_handler.clean()
 
-    def _load_runtime_setting(self, setting_overrides: SettingOverrides | None = None) -> Setting:
+    def _load_runtime_setting(
+        self,
+        setting_overrides: SettingOverrides | None = None,
+        source_language: SourceLanguage = DEFAULT_SOURCE_LANGUAGE,
+    ) -> Setting:
         """加载配置并按本轮命令重置模型服务。"""
-        return load_runtime_setting(self.llm_handler, overrides=setting_overrides)
+        return load_runtime_setting(
+            self.llm_handler,
+            overrides=setting_overrides,
+            source_language=source_language,
+        )
 
-    def _load_setting(self, setting_overrides: SettingOverrides | None = None) -> Setting:
+    def _load_setting(
+        self,
+        setting_overrides: SettingOverrides | None = None,
+        source_language: SourceLanguage = DEFAULT_SOURCE_LANGUAGE,
+    ) -> Setting:
         """加载当前配置，不改动模型服务连接状态。"""
-        return load_setting(overrides=setting_overrides)
+        return load_setting(overrides=setting_overrides, source_language=source_language)
 
     def _load_text_rules(
         self,
@@ -209,14 +222,21 @@ class TranslationHandler:
         """根据已注册游戏目录解析可用于 CLI 的游戏标题。"""
         return await self.game_registry.resolve_registered_title_by_path(game_path)
 
-    async def add_game(self, game_path: str | Path) -> str:
+    async def add_game(
+        self,
+        game_path: str | Path,
+        source_language: SourceLanguage,
+    ) -> str:
         """注册一个新的游戏。"""
         resolved_game_path = resolve_game_directory(game_path)
         layout = resolve_game_layout(resolved_game_path)
         game_title = read_game_title(resolved_game_path)
         _ = await load_game_data(resolved_game_path)
-        record = await self.game_registry.register_game(resolved_game_path)
-        logger.success(f"[tag.success]游戏已加入核心 CLI[/tag.success] 标题 [tag.count]{game_title}[/tag.count] 引擎 [tag.count]{layout.engine_label}[/tag.count] 数据目录 [tag.path]{layout.data_dir}[/tag.path] 路径 [tag.path]{record.game_path}[/tag.path]")
+        record = await self.game_registry.register_game(
+            resolved_game_path,
+            source_language=source_language,
+        )
+        logger.success(f"[tag.success]游戏已加入核心 CLI[/tag.success] 标题 [tag.count]{game_title}[/tag.count] 引擎 [tag.count]{layout.engine_label}[/tag.count] 源语言 [tag.count]{source_language}[/tag.count] 数据目录 [tag.path]{layout.data_dir}[/tag.path] 路径 [tag.path]{record.game_path}[/tag.path]")
         return game_title
 
     async def import_plugin_rules(
@@ -280,7 +300,7 @@ class TranslationHandler:
             resolved_output_path = output_path.resolve()
             default_command_codes: list[int] | None = None
             if command_codes is None:
-                setting = self._load_setting()
+                setting = self._load_setting(source_language=session.source_language)
                 default_command_codes = setting.event_command_text.default_codes_for_engine(
                     game_data.layout.engine_kind
                 )
@@ -306,8 +326,8 @@ class TranslationHandler:
         output_path: Path,
     ) -> NoteTagJsonExportSummary:
         """把当前游戏 data Note 标签候选导出为 JSON。"""
-        setting = self._load_setting()
         async with await self.game_registry.open_game(game_title) as session:
+            setting = self._load_setting(source_language=session.source_language)
             game_data = await self._load_session_game_data(session)
             text_rules = self._load_text_rules(
                 setting=setting,
@@ -365,8 +385,8 @@ class TranslationHandler:
         input_path: Path,
     ) -> NoteTagRuleImportSummary:
         """把外部 Note 标签规则 JSON 导入当前游戏数据库。"""
-        setting = self._load_setting()
         async with await self.game_registry.open_game(game_title) as session:
+            setting = self._load_setting(source_language=session.source_language)
             game_data = await self._load_session_game_data(session)
             text_rules = self._load_text_rules(
                 setting=setting,
@@ -447,9 +467,12 @@ class TranslationHandler:
         ],
     ) -> TextTranslationSummary:
         """翻译指定游戏的正文。"""
-        setting = self._load_runtime_setting(setting_overrides)
         translation_cache = TranslationCache()
         async with await self.game_registry.open_game(game_title) as session:
+            setting = self._load_runtime_setting(
+                setting_overrides,
+                source_language=session.source_language,
+            )
             placeholder_rule_records: list[PlaceholderRuleRecord] | None = None
             if custom_placeholder_rules_text is None:
                 placeholder_rule_records = await session.read_placeholder_rules()
@@ -595,13 +618,13 @@ class TranslationHandler:
         )
         set_status(f"还没成功保存译文 {pending_count} 条，相同原文合并后 {deduplicated_count} 条，批次 {len(batches)} 个")
         logger.info(f"[tag.phase]正文翻译开始[/tag.phase] 游戏 [tag.count]{game_title}[/tag.count] 提取 [tag.count]{total_extracted_items}[/tag.count] 条，还没成功保存译文 [tag.count]{pending_count}[/tag.count] 条，相同原文合并后 [tag.count]{deduplicated_count}[/tag.count] 条，批次 [tag.count]{len(batches)}[/tag.count] 个")
-        japanese_residual_rule_set = JapaneseResidualRuleSet.from_records(
-            await session.read_japanese_residual_rules()
+        source_residual_rule_set = SourceResidualRuleSet.from_records(
+            await session.read_source_residual_rules()
         )
         text_translation = TextTranslation(
             setting=setting,
             text_rules=text_rules,
-            japanese_residual_rule_set=japanese_residual_rule_set,
+            source_residual_rule_set=source_residual_rule_set,
         )
         try:
             success_count, error_count = await self._run_text_translation_batches(
@@ -679,7 +702,10 @@ class TranslationHandler:
         async with await self.game_registry.open_game(game_title) as session:
             set_progress, advance_progress = callbacks
             game_data = await self._load_session_game_data(session)
-            setting = self._load_setting(setting_overrides=setting_overrides)
+            setting = self._load_setting(
+                setting_overrides=setting_overrides,
+                source_language=session.source_language,
+            )
             text_rules = self._load_text_rules(
                 setting=setting,
                 placeholder_rule_records=await session.read_placeholder_rules(),
@@ -803,7 +829,10 @@ class TranslationHandler:
         async with await self.game_registry.open_game(game_title) as session:
             set_progress, advance_progress = callbacks
             game_data = await self._load_session_game_data(session)
-            setting = self._load_setting(setting_overrides=setting_overrides)
+            setting = self._load_setting(
+                setting_overrides=setting_overrides,
+                source_language=session.source_language,
+            )
             text_rules = self._load_text_rules(
                 setting=setting,
                 placeholder_rule_records=await session.read_placeholder_rules(),
@@ -850,8 +879,11 @@ class TranslationHandler:
         setting_overrides: SettingOverrides | None = None,
     ) -> FontRestoreSummary:
         """按原件留档对比还原游戏数据中的字体引用。"""
-        setting = self._load_setting(setting_overrides=setting_overrides)
         async with await self.game_registry.open_game(game_title) as session:
+            setting = self._load_setting(
+                setting_overrides=setting_overrides,
+                source_language=session.source_language,
+            )
             game_data = await self._load_session_game_data(session)
             records = await session.read_font_replacement_records()
             target_font_names = collect_replacement_font_names(

@@ -11,6 +11,7 @@ from .extraction import PluginTextExtraction
 from .exporter import export_plugins_json_file
 from .importer import (
     PluginRuleImportFile,
+    PluginRuleSpec,
     build_plugin_rule_records_from_import,
     load_plugin_rule_import_file,
     parse_plugin_rule_import_text,
@@ -18,6 +19,7 @@ from .importer import (
 
 __all__: list[str] = [
     "PluginRuleImportFile",
+    "PluginRuleSpec",
     "PluginTextExtraction",
     "build_plugin_hash",
     "build_plugin_rule_records_from_import",

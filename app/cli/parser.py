@@ -35,6 +35,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_game_parser = subparsers.add_parser("add-game", help="注册新的 RPG Maker 游戏目录")
     _ = add_game_parser.add_argument("--path", required=True, help="RPG Maker 游戏根目录")
+    _ = add_game_parser.add_argument(
+        "--source-language",
+        choices=["ja", "en"],
+        required=True,
+        help="游戏原文语言，必须显式指定；ja 表示日文，en 表示英文",
+    )
     _ = add_game_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
     export_plugins_parser = subparsers.add_parser(
@@ -196,25 +202,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _ = reset_translations_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
-    validate_japanese_residual_parser = subparsers.add_parser(
-        "validate-japanese-residual-rules",
-        help="校验允许保留日文片段的例外规则 JSON",
+    validate_source_residual_parser = subparsers.add_parser(
+        "validate-source-residual-rules",
+        help="校验允许保留源文片段的例外规则 JSON",
     )
-    add_optional_target_arguments(validate_japanese_residual_parser)
-    validate_japanese_residual_source_group = validate_japanese_residual_parser.add_mutually_exclusive_group(required=True)
-    _ = validate_japanese_residual_source_group.add_argument("--rules", help="日文残留例外规则 JSON 字符串")
-    _ = validate_japanese_residual_source_group.add_argument("--input", help="日文残留例外规则 JSON 文件")
-    _ = validate_japanese_residual_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+    add_optional_target_arguments(validate_source_residual_parser)
+    validate_source_residual_source_group = validate_source_residual_parser.add_mutually_exclusive_group(required=True)
+    _ = validate_source_residual_source_group.add_argument("--rules", help="源文残留例外规则 JSON 字符串")
+    _ = validate_source_residual_source_group.add_argument("--input", help="源文残留例外规则 JSON 文件")
+    _ = validate_source_residual_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
-    import_japanese_residual_parser = subparsers.add_parser(
-        "import-japanese-residual-rules",
-        help="导入允许保留日文片段的例外规则 JSON",
+    import_source_residual_parser = subparsers.add_parser(
+        "import-source-residual-rules",
+        help="导入允许保留源文片段的例外规则 JSON",
     )
-    add_optional_target_arguments(import_japanese_residual_parser)
-    import_japanese_residual_source_group = import_japanese_residual_parser.add_mutually_exclusive_group(required=True)
-    _ = import_japanese_residual_source_group.add_argument("--rules", help="日文残留例外规则 JSON 字符串")
-    _ = import_japanese_residual_source_group.add_argument("--input", help="日文残留例外规则 JSON 文件")
-    _ = import_japanese_residual_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
+    add_optional_target_arguments(import_source_residual_parser)
+    import_source_residual_source_group = import_source_residual_parser.add_mutually_exclusive_group(required=True)
+    _ = import_source_residual_source_group.add_argument("--rules", help="源文残留例外规则 JSON 字符串")
+    _ = import_source_residual_source_group.add_argument("--input", help="源文残留例外规则 JSON 文件")
+    _ = import_source_residual_parser.add_argument("--json", action="store_true", dest="json_output", help="输出机器可读 JSON")
 
     translate_parser = subparsers.add_parser("translate", help="翻译指定游戏的正文")
     add_optional_target_arguments(translate_parser)
@@ -423,20 +429,20 @@ def add_setting_override_arguments(parser: argparse.ArgumentParser) -> None:
         help="译文必须按源文保留的成对包裹标点，可重复传入",
     )
     _ = group.add_argument(
-        "--allowed-japanese-char",
+        "--source-residual-allowed-char",
         action="extend",
         nargs="+",
-        dest="allowed_japanese_chars",
+        dest="source_residual_allowed_chars",
         metavar="CHAR",
-        help="日文残留检查允许保留的字符数组",
+        help="源文残留检查允许保留的字符数组",
     )
     _ = group.add_argument(
-        "--allowed-japanese-tail-char",
+        "--source-residual-allowed-tail-char",
         action="extend",
         nargs="+",
-        dest="allowed_japanese_tail_chars",
+        dest="source_residual_allowed_tail_chars",
         metavar="CHAR",
-        help="日文残留检查允许作为语气尾音的字符数组",
+        help="源文残留检查允许作为语气尾音的字符数组",
     )
     _ = group.add_argument(
         "--line-split-punctuation",
@@ -449,7 +455,7 @@ def add_setting_override_arguments(parser: argparse.ArgumentParser) -> None:
     _ = group.add_argument("--long-text-line-width-limit", type=int, help="长文本单行宽度上限")
     _ = group.add_argument("--line-width-count-pattern", help="长文本宽度计数字符正则")
     _ = group.add_argument("--source-text-required-pattern", help="进入正文翻译的源语言字符正则")
-    _ = group.add_argument("--japanese-segment-pattern", help="日文残留片段识别正则")
+    _ = group.add_argument("--source-residual-segment-pattern", help="源文残留片段识别正则")
     _ = group.add_argument("--residual-escape-sequence-pattern", help="残留检查前剥离的转义序列正则")
 
 

@@ -1,8 +1,9 @@
 //! 翻译质量检查。
 //!
-//! 本模块负责并行收集日文残留、文本结构、占位符风险和行宽问题。
+//! 本模块负责并行收集源文残留、文本结构、占位符风险和行宽问题。
 
 use rayon::prelude::*;
+use regex::Regex;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,7 +11,7 @@ use std::sync::Arc;
 use super::controls::{iter_control_sequence_spans, replace_control_sequences};
 use super::details::{base_detail, collect_sorted_details};
 use super::models::{
-    CompiledRules, NativeJapaneseResidualRule, NativeTranslationItem, QualityPayload,
+    CompiledRules, NativeSourceResidualRule, NativeTranslationItem, QualityPayload,
     QualityScanOutput,
 };
 use super::placeholders::{
@@ -24,11 +25,11 @@ pub fn scan_quality_impl(payload_json: &str) -> Result<String, String> {
     let payload: QualityPayload = serde_json::from_str(payload_json)
         .map_err(|error| format!("Rust 质检输入 JSON 解析失败: {error}"))?;
     let rules = Arc::new(compile_rules(payload.text_rules)?);
-    let residual_rules = Arc::new(index_residual_rules(payload.japanese_residual_rules));
+    let residual_rules = Arc::new(index_residual_rules(payload.source_residual_rules));
     let items = Arc::new(payload.items);
 
     let output = run_with_optional_pool(|| {
-        let japanese_residual_items = collect_sorted_details(
+        let source_residual_items = collect_sorted_details(
             items
                 .par_iter()
                 .filter_map(|item| collect_residual_detail(item, &rules, &residual_rules))
@@ -54,7 +55,7 @@ pub fn scan_quality_impl(payload_json: &str) -> Result<String, String> {
         );
 
         QualityScanOutput {
-            japanese_residual_items,
+            source_residual_items,
             text_structure_items,
             placeholder_risk_items,
             overwide_line_items,
@@ -66,8 +67,8 @@ pub fn scan_quality_impl(payload_json: &str) -> Result<String, String> {
 }
 
 pub(crate) fn index_residual_rules(
-    records: Vec<NativeJapaneseResidualRule>,
-) -> HashMap<String, NativeJapaneseResidualRule> {
+    records: Vec<NativeSourceResidualRule>,
+) -> HashMap<String, NativeSourceResidualRule> {
     records
         .into_iter()
         .map(|record| (record.location_path.clone(), record))
@@ -77,14 +78,23 @@ pub(crate) fn index_residual_rules(
 pub(crate) fn collect_residual_detail(
     item: &NativeTranslationItem,
     rules: &CompiledRules,
-    residual_rules: &HashMap<String, NativeJapaneseResidualRule>,
+    residual_rules: &HashMap<String, NativeSourceResidualRule>,
 ) -> Option<Value> {
     let allowed_terms = residual_rules
         .get(&item.location_path)
         .map(|rule| rule.allowed_terms.as_slice())
         .unwrap_or(&[]);
-    let checked_lines = mask_allowed_terms(&item.translation_lines, allowed_terms);
-    match check_japanese_residual(&checked_lines, rules) {
+    let checked_lines = mask_allowed_terms(
+        &item.translation_lines,
+        allowed_terms,
+        rules.source_residual_terms_ignore_case,
+    );
+    let checked_lines = mask_allowed_terms(
+        &checked_lines,
+        &rules.allowed_source_residual_terms,
+        rules.source_residual_terms_ignore_case,
+    );
+    match check_source_residual(&checked_lines, rules) {
         Ok(()) => None,
         Err(reason) => {
             let mut detail = base_detail(item);
@@ -100,7 +110,11 @@ pub(crate) fn collect_residual_detail(
     }
 }
 
-pub(crate) fn mask_allowed_terms(lines: &[String], allowed_terms: &[String]) -> Vec<String> {
+pub(crate) fn mask_allowed_terms(
+    lines: &[String],
+    allowed_terms: &[String],
+    ignore_case: bool,
+) -> Vec<String> {
     if allowed_terms.is_empty() {
         return lines.to_vec();
     }
@@ -111,21 +125,37 @@ pub(crate) fn mask_allowed_terms(lines: &[String], allowed_terms: &[String]) -> 
         .map(|line| {
             let mut masked = line.clone();
             for term in &sorted_terms {
-                masked = masked.replace(term, " ");
+                if ignore_case {
+                    masked = mask_case_insensitive_term(&masked, term);
+                } else {
+                    masked = masked.replace(term, " ");
+                }
             }
             masked
         })
         .collect()
 }
 
-pub(crate) fn check_japanese_residual(
-    lines: &[String],
-    rules: &CompiledRules,
-) -> Result<(), String> {
+fn mask_case_insensitive_term(text: &str, term: &str) -> String {
+    let escaped_term = regex::escape(term);
+    let pattern_text = format!(r"(?i)(^|[^A-Za-z0-9_]){escaped_term}($|[^A-Za-z0-9_])");
+    let Ok(pattern) = Regex::new(&pattern_text) else {
+        return text.to_string();
+    };
+    pattern
+        .replace_all(text, |captures: &regex::Captures<'_>| {
+            let left = captures.get(1).map_or("", |matched| matched.as_str());
+            let right = captures.get(2).map_or("", |matched| matched.as_str());
+            format!("{left} {right}")
+        })
+        .to_string()
+}
+
+pub(crate) fn check_source_residual(lines: &[String], rules: &CompiledRules) -> Result<(), String> {
     for (index, line) in lines.iter().enumerate() {
         let cleaned_line = strip_non_content_for_residual(line, rules);
         let segments: Vec<String> = rules
-            .japanese_segment_re
+            .source_residual_segment_re
             .find_iter(&cleaned_line)
             .map(|matched| matched.as_str().to_string())
             .collect();
@@ -133,23 +163,25 @@ pub(crate) fn check_japanese_residual(
             continue;
         }
 
-        let has_non_japanese_content = has_non_japanese_content(&cleaned_line, rules);
+        let has_non_source_content = has_non_source_content(&cleaned_line, rules);
         let mut real_residual = Vec::new();
         for segment in segments {
             let filtered: Vec<char> = segment
                 .chars()
-                .filter(|char_value| !rules.allowed_japanese_chars.contains(char_value))
+                .filter(|char_value| !rules.source_residual_allowed_chars.contains(char_value))
                 .collect();
             if filtered.is_empty() {
-                if !has_non_japanese_content {
+                if !has_non_source_content {
                     real_residual.extend(segment.chars());
                 }
                 continue;
             }
-            if has_non_japanese_content
-                && filtered
-                    .iter()
-                    .all(|char_value| rules.allowed_japanese_tail_chars.contains(char_value))
+            if has_non_source_content
+                && filtered.iter().all(|char_value| {
+                    rules
+                        .source_residual_allowed_tail_chars
+                        .contains(char_value)
+                })
             {
                 continue;
             }
@@ -158,7 +190,8 @@ pub(crate) fn check_japanese_residual(
 
         if !real_residual.is_empty() {
             return Err(format!(
-                "发现日文残留(第 {} 行): {:?}",
+                "发现{}残留(第 {} 行): {:?}",
+                rules.source_residual_label,
                 index + 1,
                 real_residual
             ));
@@ -176,9 +209,9 @@ pub(crate) fn strip_non_content_for_residual(text: &str, rules: &CompiledRules) 
         .to_string()
 }
 
-pub(crate) fn has_non_japanese_content(text: &str, rules: &CompiledRules) -> bool {
-    let text_without_japanese = rules.japanese_segment_re.replace_all(text, "");
-    text_without_japanese.chars().any(char::is_alphanumeric)
+pub(crate) fn has_non_source_content(text: &str, rules: &CompiledRules) -> bool {
+    let text_without_source = rules.source_residual_segment_re.replace_all(text, "");
+    text_without_source.chars().any(char::is_alphanumeric)
 }
 
 pub(crate) fn collect_text_structure_detail(

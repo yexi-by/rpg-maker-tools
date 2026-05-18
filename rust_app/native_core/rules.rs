@@ -81,10 +81,13 @@ pub(crate) fn compile_rules(rules: NativeTextRules) -> Result<CompiledRules, Str
 
     Ok(CompiledRules {
         custom_placeholder_rules,
-        allowed_japanese_chars: collect_chars(rules.allowed_japanese_chars),
-        allowed_japanese_tail_chars: collect_chars(rules.allowed_japanese_tail_chars),
-        japanese_segment_re: Regex::new(&rules.japanese_segment_pattern)
-            .map_err(|error| format!("Rust 日文残留正则无效: {error}"))?,
+        source_residual_allowed_chars: collect_chars(rules.source_residual_allowed_chars),
+        source_residual_allowed_tail_chars: collect_chars(rules.source_residual_allowed_tail_chars),
+        allowed_source_residual_terms: rules.allowed_source_residual_terms,
+        source_residual_terms_ignore_case: rules.source_residual_terms_ignore_case,
+        source_residual_label: rules.source_residual_label,
+        source_residual_segment_re: Regex::new(&rules.source_residual_segment_pattern)
+            .map_err(|error| format!("Rust 源文残留正则无效: {error}"))?,
         line_width_count_re: Regex::new(&rules.line_width_count_pattern)
             .map_err(|error| format!("Rust 行宽正则无效: {error}"))?,
         residual_escape_sequence_re: Regex::new(&rules.residual_escape_sequence_pattern)

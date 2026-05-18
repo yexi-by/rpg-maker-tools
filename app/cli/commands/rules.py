@@ -1,6 +1,6 @@
 """规则导入导出与校验命令。
 
-本模块负责插件、事件指令、Note 标签、自定义占位符和日文残留规则的 CLI 适配。
+本模块负责插件、事件指令、Note 标签、自定义占位符和源文残留规则的 CLI 适配。
 """
 
 from __future__ import annotations
@@ -235,21 +235,21 @@ async def run_validate_event_command_rules_command(args: argparse.Namespace) -> 
     return 1 if report.status == "error" else 0
 
 
-async def run_validate_japanese_residual_rules_command(args: argparse.Namespace) -> int:
-    """执行 `validate-japanese-residual-rules` 命令。"""
+async def run_validate_source_residual_rules_command(args: argparse.Namespace) -> int:
+    """执行 `validate-source-residual-rules` 命令。"""
     game_title = await resolve_target_game_title(args)
     rules_text = await read_required_text_source_arg(args, "rules", "input")
     service = AgentToolkitService()
-    report = await service.validate_japanese_residual_rules(game_title=game_title, rules_text=rules_text)
-    write_report_outputs(report=report, args=args, title="日文残留例外规则校验报告")
+    report = await service.validate_source_residual_rules(game_title=game_title, rules_text=rules_text)
+    write_report_outputs(report=report, args=args, title="源文残留例外规则校验报告")
     return 1 if report.status == "error" else 0
 
 
-async def run_import_japanese_residual_rules_command(args: argparse.Namespace) -> int:
-    """执行 `import-japanese-residual-rules` 命令。"""
+async def run_import_source_residual_rules_command(args: argparse.Namespace) -> int:
+    """执行 `import-source-residual-rules` 命令。"""
     game_title = await resolve_target_game_title(args)
     rules_text = await read_required_text_source_arg(args, "rules", "input")
     service = AgentToolkitService()
-    report = await service.import_japanese_residual_rules(game_title=game_title, rules_text=rules_text)
-    write_report_outputs(report=report, args=args, title="日文残留例外规则导入报告")
+    report = await service.import_source_residual_rules(game_title=game_title, rules_text=rules_text)
+    write_report_outputs(report=report, args=args, title="源文残留例外规则导入报告")
     return 1 if report.status == "error" else 0

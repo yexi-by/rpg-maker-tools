@@ -20,7 +20,9 @@ from app.cli import ensure_text_translation_not_blocked
 from app.cli import parser_command_names
 from app.cli import registered_command_names
 from app.cli import write_report_outputs
+from app.cli.errors import CliArgumentError
 from app.cli.commands.registry import run_list_command
+from app.cli.runtime import build_setting_overrides
 from app.application.summaries import TextTranslationSummary
 from app.rmmz.json_types import coerce_json_value, ensure_json_object
 
@@ -35,6 +37,8 @@ class FakeRegisteredGame:
     db_path: Path
     engine_kind: str
     engine_version: str
+    source_language: str
+    target_language: str
 
 
 def namespace_optional_str(args: object, name: str) -> str | None:
@@ -44,6 +48,18 @@ def namespace_optional_str(args: object, name: str) -> str | None:
         return None
     assert isinstance(raw_value, str)
     return raw_value
+
+
+def test_add_game_requires_explicit_source_language() -> None:
+    """注册游戏必须显式声明源语言，避免 CLI 默默按日文处理。"""
+    parser = build_parser()
+
+    with pytest.raises(CliArgumentError, match="--source-language"):
+        _ = parser.parse_args(["add-game", "--path", "demo", "--json"])
+
+    args = parser.parse_args(["add-game", "--path", "demo", "--source-language", "ja", "--json"])
+
+    assert namespace_optional_str(args, "source_language") == "ja"
 
 
 @pytest.mark.asyncio
@@ -67,6 +83,8 @@ async def test_list_json_includes_engine_layout_metadata(
                     db_path=tmp_path / "db" / "示例游戏.db",
                     engine_kind="mv",
                     engine_version="1.6.1",
+                    source_language="en",
+                    target_language="zh-Hans",
                 )
             ]
 
@@ -85,6 +103,8 @@ async def test_list_json_includes_engine_layout_metadata(
     assert exit_code == 0
     assert first_game["engine_kind"] == "mv"
     assert first_game["engine_version"] == "1.6.1"
+    assert first_game["source_language"] == "en"
+    assert first_game["target_language"] == "zh-Hans"
     assert first_game["content_root"] == str(tmp_path / "game" / "www")
     assert first_game["game_path"] == str(tmp_path / "game")
 
@@ -276,21 +296,21 @@ def test_rule_commands_accept_input_files_and_json_output() -> None:
     )
     residual_args = parser.parse_args(
         [
-            "validate-japanese-residual-rules",
+            "validate-source-residual-rules",
             "--game",
             "demo",
             "--input",
-            "japanese-residual-rules.json",
+            "source-residual-rules.json",
             "--json",
         ]
     )
     residual_import_args = parser.parse_args(
         [
-            "import-japanese-residual-rules",
+            "import-source-residual-rules",
             "--game",
             "demo",
             "--input",
-            "japanese-residual-rules.json",
+            "source-residual-rules.json",
             "--json",
         ]
     )
@@ -322,9 +342,9 @@ def test_rule_commands_accept_input_files_and_json_output() -> None:
     assert getattr(note_validate_args, "json_output") is True
     assert namespace_optional_str(note_import_args, "input") == "note-tag-rules.json"
     assert getattr(note_import_args, "json_output") is True
-    assert namespace_optional_str(residual_args, "input") == "japanese-residual-rules.json"
+    assert namespace_optional_str(residual_args, "input") == "source-residual-rules.json"
     assert namespace_optional_str(residual_args, "rules") is None
-    assert namespace_optional_str(residual_import_args, "input") == "japanese-residual-rules.json"
+    assert namespace_optional_str(residual_import_args, "input") == "source-residual-rules.json"
     assert getattr(residual_import_args, "json_output") is True
     assert namespace_optional_str(terminology_import_args, "input") == "terminology/field-terms.json"
     assert namespace_optional_str(terminology_import_args, "glossary_input") == "terminology/glossary.json"
@@ -354,7 +374,7 @@ def test_partial_write_back_gate_only_blocks_saved_translation_risks() -> None:
     report = AgentReport.from_parts(
         errors=[
             issue("pending_translations", "存在还没成功保存译文的文本"),
-            issue("japanese_residual", "发现译文存在日文残留风险"),
+            issue("source_residual", "发现译文存在源文残留风险"),
             issue("text_structure", "发现译文改动了游戏文本结构"),
             issue("llm_failures", "模型运行存在故障"),
         ],
@@ -378,8 +398,8 @@ def test_partial_write_back_gate_only_blocks_saved_translation_risks() -> None:
         )
     }
 
-    assert full_gate_codes == {"pending_translations", "japanese_residual", "text_structure", "llm_failures"}
-    assert partial_gate_codes == {"japanese_residual", "text_structure"}
+    assert full_gate_codes == {"pending_translations", "source_residual", "text_structure", "llm_failures"}
+    assert partial_gate_codes == {"source_residual", "text_structure"}
 
 
 def test_translate_command_accepts_json_summary_flag() -> None:
@@ -390,6 +410,30 @@ def test_translate_command_accepts_json_summary_flag() -> None:
 
     assert namespace_optional_str(args, "game") == "demo"
     assert getattr(args, "json_output") is True
+
+
+def test_translate_command_accepts_source_residual_override_names() -> None:
+    """源文残留 CLI 覆盖参数会进入配置覆盖对象。"""
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "translate",
+            "--game",
+            "demo",
+            "--source-residual-allowed-char",
+            "ー",
+            "--source-residual-allowed-tail-char",
+            "よ",
+            "--source-residual-segment-pattern",
+            "[ぁ-ん]+",
+        ]
+    )
+    overrides = build_setting_overrides(args)
+
+    assert overrides.source_residual_allowed_chars == ["ー"]
+    assert overrides.source_residual_allowed_tail_chars == ["よ"]
+    assert overrides.source_residual_segment_pattern == "[ぁ-ん]+"
 
 
 def test_json_progress_reports_to_stderr_without_polluting_stdout(
@@ -415,7 +459,7 @@ def test_json_progress_reports_to_stderr_without_polluting_stdout(
 
 
 def test_manual_translation_export_commands_are_black_box_friendly() -> None:
-    """人工补译导出命令同时支持全量别名和分批限制。"""
+    """人工补译导出命令同时支持全量入口和分批限制。"""
     parser = build_parser()
 
     all_args = parser.parse_args(

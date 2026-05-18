@@ -15,6 +15,7 @@
 | 表名 | 职责 | 主要写入入口 |
 |------|------|--------------|
 | `metadata` | 保存当前数据库绑定的游戏目录、真实内容目录、引擎类型和版本 | `add-game` |
+| `language_settings` | 保存当前游戏的源语言和目标语言 | `add-game` |
 | `translation_items` | 保存已经通过项目检查的正文译文记录 | `translate`、`import-manual-translations` |
 | `plugin_text_rules` | 保存插件配置中可翻译字符串的 JSONPath 规则 | `import-plugin-rules` |
 | `note_tag_text_rules` | 保存 data 文件 Note 标签中可翻译标签名 | `import-note-tag-rules` |
@@ -25,7 +26,7 @@
 | `terminology_glossary_terms` | 保存正文翻译提示词使用的正文术语表 | `import-terminology` |
 | `terminology_import_state` | 标记术语表已经导入，用来区分“空术语表”和“从未导入” | `import-terminology` |
 | `placeholder_rules` | 保存当前游戏专用的自定义控制符保护规则 | `import-placeholder-rules` |
-| `japanese_residual_rules` | 保存允许保留日文片段的例外规则 | `import-japanese-residual-rules` |
+| `source_residual_rules` | 保存允许保留源语言片段的例外规则 | `import-source-residual-rules` |
 | `font_replacement_records` | 保存最近一次字体覆盖产生的可还原字体引用记录 | `write-back --confirm-font-overwrite`、`write-terminology --confirm-font-overwrite` |
 | `translation_runs` | 保存正文翻译运行状态和统计快照 | `translate` |
 | `llm_failures` | 保存正文翻译运行中的模型故障记录 | `translate` |
@@ -42,9 +43,9 @@
 
 ## CLI 与 Skill 对齐
 
-- `add-game` 负责解析游戏布局，并把 `metadata` 的游戏目录、真实内容目录、引擎类型和版本写入数据库。
-- `list --json` 会展示 `game_title`、`game_path`、`content_root`、`engine_kind`、`engine_version` 和 `db_path`，用于快速确认已注册游戏是否绑定到正确内容目录。
-- `prepare-agent-workspace --json` 会在摘要和详情里展示引擎类型、引擎版本、真实内容目录和实际数据目录；外部 Agent 应以这个工作区输出为准。
+- `add-game` 负责解析游戏布局，并把 `metadata` 的游戏目录、真实内容目录、引擎类型和版本写入数据库，同时把当前游戏源语言写入 `language_settings`。
+- `list --json` 会展示 `game_title`、`game_path`、`content_root`、`engine_kind`、`engine_version`、`source_language`、`target_language` 和 `db_path`，用于快速确认已注册游戏是否绑定到正确内容目录和语言档案。
+- `prepare-agent-workspace --json` 会在摘要和详情里展示引擎类型、引擎版本、真实内容目录、实际数据目录和当前源语言；外部 Agent 应以这个工作区输出为准。
 - `export-event-commands-json` 未显式传入 `--code` 时，会按当前游戏引擎选择默认事件指令编码：MV 使用 `356`，MZ 使用 `357`。
 - Skill 只要求 Agent 读取 CLI 输出和工作区文件，不要求也不允许 Agent 直接读取或修改数据库表。
 
@@ -68,6 +69,22 @@
 - `add-game` 会重新解析游戏布局并覆盖当前记录。
 - 数据库文件名对应的游戏标题必须和 `metadata.game_title` 一致。
 - 旧库若缺少 `engine_kind`、`content_root` 或 `engine_version`，当前代码会拒绝打开。
+
+### `language_settings`
+
+保存当前游戏使用的语言档案。每个数据库只应有一行。
+
+| 字段 | 类型 | 约束 | 说明 |
+|------|------|------|------|
+| `settings_key` | `TEXT` | 主键 | 固定为 `current` |
+| `source_language` | `TEXT` | 非空 | 源语言，当前支持 `ja` 或 `en` |
+| `target_language` | `TEXT` | 非空 | 目标语言，当前固定为 `zh-Hans` |
+
+维护规则：
+
+- `add-game --source-language ja|en` 会覆盖当前语言档案；源语言参数必须显式传入。
+- 项目不做自动语言检测，注册前必须确认当前游戏是日文还是英文。
+- 缺少语言档案时当前代码会拒绝打开数据库；旧库需要通过独立迁移脚本先写入语言设置。
 
 ### `translation_items`
 
@@ -101,7 +118,7 @@
 
 维护规则：
 
-- `import-plugin-rules` 先校验插件名称、哈希和路径命中，再整体替换此表内容。
+- `import-plugin-rules` 先按插件下标定位，再校验插件名称、计算插件哈希并检查路径命中，最后整体替换此表内容。
 - 主翻译流程只按数据库中已导入的规则提取插件文本。
 
 ### `note_tag_text_rules`
@@ -223,19 +240,20 @@
 - `import-placeholder-rules` 会整体替换此表内容。
 - 自定义规则必须先通过 `validate-placeholder-rules` 和覆盖扫描，避免把普通换行、正文或其他合法内容误判为游戏控制符。
 
-### `japanese_residual_rules`
+### `source_residual_rules`
 
-保存允许保留日文片段的例外规则。
+保存允许保留源语言片段的例外规则。对外 CLI 使用 `source-residual` 命令。
 
 | 字段 | 类型 | 约束 | 说明 |
 |------|------|------|------|
 | `location_path` | `TEXT` | 主键 | 文本在游戏里的内部位置 |
-| `allowed_terms` | `TEXT` | 非空 | JSON 字符串数组，允许保留的日文片段 |
+| `allowed_terms` | `TEXT` | 非空 | JSON 字符串数组，允许保留的源语言片段 |
 | `reason` | `TEXT` | 非空 | 保留原因 |
 
 维护规则：
 
-- `import-japanese-residual-rules` 会整体替换此表内容。
+- `import-source-residual-rules` 会整体替换此表内容。
+- `import-source-residual-rules` 是唯一的源文保留例外导入入口，日文和英文游戏共用同一套流程。
 - 例外规则只用于确需保留的片段，不能用来掩盖整句漏翻。
 
 ### `font_replacement_records`
@@ -328,7 +346,7 @@
 
 当前错误类型：
 
-`模型返回不可解析`、`AI漏翻`、`文本结构不匹配`、`控制符不匹配`、`日文残留`、`选项行数不匹配`。
+`模型返回不可解析`、`AI漏翻`、`文本结构不匹配`、`控制符不匹配`、`源文残留`、`选项行数不匹配`。
 
 维护规则：
 
@@ -346,7 +364,7 @@ erDiagram
     event_command_text_rule_groups ||--o{ event_command_text_rule_paths : "group_key"
 ```
 
-其他表通过业务流程关联，不依赖数据库外键。例如 `translation_items.location_path`、`japanese_residual_rules.location_path` 和 `translation_quality_errors.location_path` 都使用同一种文本内部位置字符串，但数据库层不强制建立外键。
+其他表通过业务流程关联，不依赖数据库外键。例如 `translation_items.location_path`、`source_residual_rules.location_path` 和 `translation_quality_errors.location_path` 都使用同一种文本内部位置字符串，但数据库层不强制建立外键。
 
 ## 维护规则
 

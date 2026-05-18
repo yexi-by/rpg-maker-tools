@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 pub(crate) struct QualityPayload {
     pub(crate) items: Vec<NativeTranslationItem>,
     pub(crate) text_rules: NativeTextRules,
-    pub(crate) japanese_residual_rules: Vec<NativeJapaneseResidualRule>,
+    pub(crate) source_residual_rules: Vec<NativeSourceResidualRule>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,9 +80,12 @@ pub(crate) struct NativeTranslationItem {
 #[derive(Debug, Deserialize)]
 pub(crate) struct NativeTextRules {
     pub(crate) custom_placeholder_rules: Vec<NativeCustomPlaceholderRule>,
-    pub(crate) allowed_japanese_chars: Vec<String>,
-    pub(crate) allowed_japanese_tail_chars: Vec<String>,
-    pub(crate) japanese_segment_pattern: String,
+    pub(crate) source_residual_allowed_chars: Vec<String>,
+    pub(crate) source_residual_allowed_tail_chars: Vec<String>,
+    pub(crate) source_residual_segment_pattern: String,
+    pub(crate) source_residual_label: String,
+    pub(crate) allowed_source_residual_terms: Vec<String>,
+    pub(crate) source_residual_terms_ignore_case: bool,
     pub(crate) line_width_count_pattern: String,
     pub(crate) residual_escape_sequence_pattern: String,
     pub(crate) long_text_line_width_limit: usize,
@@ -95,7 +98,7 @@ pub(crate) struct NativeCustomPlaceholderRule {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct NativeJapaneseResidualRule {
+pub(crate) struct NativeSourceResidualRule {
     pub(crate) location_path: String,
     pub(crate) allowed_terms: Vec<String>,
     pub(crate) reason: String,
@@ -103,7 +106,7 @@ pub(crate) struct NativeJapaneseResidualRule {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct QualityScanOutput {
-    pub(crate) japanese_residual_items: Vec<Value>,
+    pub(crate) source_residual_items: Vec<Value>,
     pub(crate) text_structure_items: Vec<Value>,
     pub(crate) placeholder_risk_items: Vec<Value>,
     pub(crate) overwide_line_items: Vec<Value>,
@@ -112,9 +115,12 @@ pub(crate) struct QualityScanOutput {
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledRules {
     pub(crate) custom_placeholder_rules: Vec<CompiledCustomRule>,
-    pub(crate) allowed_japanese_chars: HashSet<char>,
-    pub(crate) allowed_japanese_tail_chars: HashSet<char>,
-    pub(crate) japanese_segment_re: Regex,
+    pub(crate) source_residual_allowed_chars: HashSet<char>,
+    pub(crate) source_residual_allowed_tail_chars: HashSet<char>,
+    pub(crate) allowed_source_residual_terms: Vec<String>,
+    pub(crate) source_residual_terms_ignore_case: bool,
+    pub(crate) source_residual_label: String,
+    pub(crate) source_residual_segment_re: Regex,
     pub(crate) line_width_count_re: Regex,
     pub(crate) residual_escape_sequence_re: Regex,
     pub(crate) long_text_line_width_limit: usize,

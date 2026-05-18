@@ -35,6 +35,13 @@ def load_json_object(path: Path) -> dict[str, object]:
     return {key: value for key, value in json_object.items()}
 
 
+def load_json_array(path: Path) -> list[object]:
+    """读取测试产物 JSON 数组，并在边界处收窄动态解析结果。"""
+    raw_value = cast(object, json.loads(path.read_text(encoding="utf-8")))
+    json_array = ensure_json_array(coerce_json_value(raw_value), str(path))
+    return [item for item in json_array]
+
+
 def _contains_japanese_test_char(text: str) -> bool:
     """判断测试样本文本是否含有日文假名。"""
     return any("\u3040" <= char <= "\u30ff" for char in text)
@@ -81,13 +88,76 @@ async def test_doctor_creates_missing_db_directory(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_english_profile_exports_visible_pending_text_without_protocol_noise(
+    minimal_english_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """英文档案能提取玩家可见英文，并跳过资源路径、公式和布尔值。"""
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_english_game_dir, source_language="en")
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    pending_path = tmp_path / "pending-english.json"
+    workspace_path = tmp_path / "workspace"
+
+    async with await registry.open_game("English Fixture Game") as session:
+        game_data = await load_game_data(session.game_path)
+        await session.replace_plugin_text_rules(
+            [
+                PluginTextRuleRecord(
+                    plugin_index=0,
+                    plugin_name="VisiblePlugin",
+                    plugin_hash=build_plugin_hash(game_data.plugins_js[0]),
+                    path_templates=[
+                        "$['parameters']['Message']",
+                        "$['parameters']['Title']",
+                        "$['parameters']['Image']",
+                        "$['parameters']['Formula']",
+                        "$['parameters']['Enabled']",
+                    ],
+                )
+            ]
+        )
+
+    workspace_report = await service.prepare_agent_workspace(
+        game_title="English Fixture Game",
+        output_dir=workspace_path,
+        command_codes=None,
+    )
+    export_report = await service.export_pending_translations(
+        game_title="English Fixture Game",
+        output_path=pending_path,
+        limit=None,
+    )
+    payload = load_json_object(pending_path)
+    exported_lines: list[str] = []
+    for location_path, raw_entry in payload.items():
+        entry = ensure_json_object(coerce_json_value(raw_entry), location_path)
+        exported_lines.extend(
+            line
+            for line in ensure_json_array(entry["original_lines"], f"{location_path}.original_lines")
+            if isinstance(line, str)
+        )
+
+    assert workspace_report.status in {"ok", "warning"}
+    assert workspace_report.summary["source_language"] == "en"
+    assert export_report.status == "ok"
+    assert "Are you really going in there?" in exported_lines
+    assert "Open the door" in exported_lines
+    assert "Welcome to the old gate." in exported_lines
+    assert "Gate Menu" in exported_lines
+    assert "img/pictures/Gate.png" not in exported_lines
+    assert "a.hpRate() >= 0.5" not in exported_lines
+    assert "true" not in exported_lines
+
+
+@pytest.mark.asyncio
 async def test_scan_placeholder_candidates_marks_custom_rule_coverage(
     minimal_game_dir: Path,
     tmp_path: Path,
 ) -> None:
     """扫描命令能区分内置控制符、未覆盖自定义控制符和 CLI 覆盖规则。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
 
     uncovered_report = await service.scan_placeholder_candidates(
@@ -113,7 +183,7 @@ async def test_build_placeholder_rules_groups_similar_candidates(
 ) -> None:
     """规则草稿会把同类自定义控制符合并成少量通用正则。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     output_path = tmp_path / "placeholder-rules.json"
 
@@ -142,7 +212,7 @@ async def test_build_placeholder_rules_keeps_bare_uppercase_marker_case_sensitiv
     _ = common_events_path.write_text(json.dumps(raw_value, ensure_ascii=False, indent=2), encoding="utf-8")
 
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     output_path = tmp_path / "placeholder-rules.json"
 
@@ -152,6 +222,54 @@ async def test_build_placeholder_rules_keeps_bare_uppercase_marker_case_sensitiv
     rules = load_json_object(output_path)
     assert rules[r"\\N\d*(?![A-Za-z\[])"] == "[CUSTOM_PLUGIN_N_MARKER_{index}]"
     assert r"(?i)\\N\d*(?![A-Za-z\[])" not in rules
+
+
+@pytest.mark.asyncio
+async def test_build_placeholder_rules_requires_manual_boundary_for_joined_control_text(
+    minimal_english_game_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """英文正文紧贴无参数控制符时，草稿不自动猜测短前缀。"""
+    common_events_path = minimal_english_game_dir / "data" / "CommonEvents.json"
+    raw_value = coerce_json_value(cast(object, json.loads(common_events_path.read_text(encoding="utf-8"))))
+    common_events = ensure_json_array(raw_value, "CommonEvents.json")
+    event = ensure_json_object(common_events[1], "CommonEvents.json[1]")
+    commands = ensure_json_array(event["list"], "CommonEvents.json[1].list")
+    commands[1:1] = [
+        {"code": 401, "parameters": [r"\ShakeStop this!!!"]},
+        {"code": 401, "parameters": [r"\ShakeNo, NO!!!"]},
+        {"code": 401, "parameters": [r"\ShakeAhhh..."]},
+        {"code": 401, "parameters": [r"\FXStop this!!!"]},
+        {"code": 401, "parameters": [r"\ScreenShake"]},
+        {"code": 401, "parameters": [r"\ScreenFlash"]},
+    ]
+    _ = common_events_path.write_text(json.dumps(raw_value, ensure_ascii=False, indent=2), encoding="utf-8")
+    registry = GameRegistry(tmp_path / "db")
+    _ = await registry.register_game(minimal_english_game_dir, source_language="en")
+    service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
+    output_path = tmp_path / "placeholder-rules.json"
+
+    report = await service.build_placeholder_rules(game_title="English Fixture Game", output_path=output_path)
+    rules = load_json_object(output_path)
+    warning_codes = {warning.code for warning in report.warnings}
+    manual_coverage_report = await service.scan_placeholder_candidates(
+        game_title="English Fixture Game",
+        custom_placeholder_rules_text=json.dumps(
+            {r"\\Shake": "[CUSTOM_PLUGIN_SHAKE_MARKER_{index}]"},
+            ensure_ascii=False,
+        ),
+    )
+    manual_coverage_json = manual_coverage_report.to_json_text()
+
+    assert report.status == "warning"
+    assert rules == {}
+    assert report.summary["manual_boundary_candidate_count"] == 6
+    assert "placeholder_boundary_needs_review" in warning_codes
+    assert r"\Screen" not in json.dumps(rules, ensure_ascii=False)
+    assert r"\FXStop" not in json.dumps(rules, ensure_ascii=False)
+    assert manual_coverage_report.summary["uncovered_count"] == 3
+    assert r"\ShakeStop" not in manual_coverage_json
+    assert r"\Shake" in manual_coverage_json
 
 
 @pytest.mark.asyncio
@@ -185,7 +303,7 @@ async def test_placeholder_rule_draft_uses_active_translation_sources(
     _ = items_path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
 
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     before_rules_path = tmp_path / "before-placeholder-rules.json"
     after_rules_path = tmp_path / "after-placeholder-rules.json"
@@ -242,7 +360,7 @@ async def test_prepare_agent_workspace_includes_placeholder_rule_draft(
 ) -> None:
     """Agent 工作区会携带占位符和 Note 标签规则草稿，避免重复手写解析脚本。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     workspace = tmp_path / "workspace"
 
@@ -316,7 +434,7 @@ async def test_prepare_agent_workspace_uses_mv_event_command_default(
 ) -> None:
     """MV 工作区摘要和事件指令样本按 356 插件命令生成。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_mv_game_dir)
+    _ = await registry.register_game(minimal_mv_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     workspace = tmp_path / "mv-workspace"
 
@@ -351,7 +469,7 @@ async def test_prepare_agent_workspace_prefills_imported_database_rules(
     first_item["note"] = "<拡張説明:薬草の詳細説明>"
     _ = items_path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     seed_workspace = tmp_path / "seed-workspace"
     workspace = tmp_path / "workspace"
@@ -423,7 +541,7 @@ async def test_prepare_agent_workspace_prefills_imported_database_rules(
     prepared_glossary = TerminologyGlossary.model_validate(
         load_json_object(workspace / "terminology" / "glossary.json")
     )
-    plugin_rules = load_json_object(workspace / "plugin-rules.json")
+    plugin_rules = load_json_array(workspace / "plugin-rules.json")
     event_rules = load_json_object(workspace / "event-command-rules.json")
     note_rules = load_json_object(workspace / "note-tag-rules.json")
     placeholder_rules = load_json_object(workspace / "placeholder-rules.json")
@@ -436,7 +554,13 @@ async def test_prepare_agent_workspace_prefills_imported_database_rules(
     assert report.summary["glossary_term_count"] == 1
     assert prepared_registry == filled_registry
     assert prepared_glossary == TerminologyGlossary(terms={"火の術": "火术"})
-    assert plugin_rules == {"TestPlugin": ["$['parameters']['Message']"]}
+    assert plugin_rules == [
+        {
+            "plugin_index": 0,
+            "plugin_name": "TestPlugin",
+            "paths": ["$['parameters']['Message']"],
+        }
+    ]
     assert event_rules == {
         "357": [
             {
@@ -460,7 +584,7 @@ async def test_validate_agent_workspace_blocks_missing_note_tag_rules(
 ) -> None:
     """Note 标签规则是第二轮三类规则产物之一，缺失时工作区校验阻断。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     workspace = tmp_path / "workspace"
 
@@ -483,7 +607,7 @@ async def test_validate_agent_workspace_reports_invalid_terminology_file(
 ) -> None:
     """工作区验收会把坏术语表报告成结构化错误。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     workspace = tmp_path / "workspace"
 
@@ -507,7 +631,7 @@ async def test_validate_agent_workspace_reports_invalid_glossary_file(
 ) -> None:
     """工作区验收会把坏正文术语表报告成结构化错误。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     workspace = tmp_path / "workspace"
 
@@ -534,7 +658,7 @@ async def test_validate_agent_workspace_blocks_uncovered_placeholder_rules(
 ) -> None:
     """工作区验收会阻断未覆盖当前正文控制符的占位符规则。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     workspace = tmp_path / "workspace"
 
@@ -561,7 +685,7 @@ async def test_validate_agent_workspace_reports_invalid_placeholder_rules(
 ) -> None:
     """工作区验收会把坏占位符规则报告成结构化错误。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     workspace = tmp_path / "workspace"
 
@@ -594,7 +718,7 @@ async def test_note_tag_rule_validation_import_and_pending_export(
     items.append({"id": 2, "name": "空タグ項目", "note": "<拡張説明:>", "description": ""})
     _ = items_path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     candidates_path = tmp_path / "note-tag-candidates.json"
     pending_path = tmp_path / "pending-translations.json"
@@ -647,7 +771,7 @@ async def test_manual_pending_translation_export_and_import(
 ) -> None:
     """Agent 可以导出少量待翻译条目，人工补齐后再由工具校验入库。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     pending_path = tmp_path / "pending-translations.json"
 
@@ -733,7 +857,7 @@ async def test_manual_translation_rejects_changed_unprotected_control_sequence(
         encoding="utf-8",
     )
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     pending_path = tmp_path / "pending-translations.json"
 
@@ -773,13 +897,13 @@ async def test_manual_translation_rejects_changed_unprotected_control_sequence(
 
 
 @pytest.mark.asyncio
-async def test_manual_translation_uses_japanese_residual_exception_rules(
+async def test_manual_translation_uses_source_residual_exception_rules(
     minimal_game_dir: Path,
     tmp_path: Path,
 ) -> None:
-    """确需保留的日文片段必须先导入显式例外规则才能通过人工补译。"""
+    """确需保留的源文片段必须先导入显式例外规则才能通过人工补译。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     pending_path = tmp_path / "pending-translations.json"
 
@@ -819,11 +943,11 @@ async def test_manual_translation_uses_japanese_residual_exception_rules(
         },
         ensure_ascii=False,
     )
-    validate_report = await service.validate_japanese_residual_rules(
+    validate_report = await service.validate_source_residual_rules(
         game_title="テストゲーム",
         rules_text=rules_text,
     )
-    import_rules_report = await service.import_japanese_residual_rules(
+    import_rules_report = await service.import_source_residual_rules(
         game_title="テストゲーム",
         rules_text=rules_text,
     )
@@ -838,12 +962,12 @@ async def test_manual_translation_uses_japanese_residual_exception_rules(
     assert validate_report.status == "ok"
     assert import_rules_report.status == "ok"
     assert accepted_report.status == "ok"
-    assert quality_report.summary["japanese_residual_rule_count"] == 1
-    assert quality_report.summary["japanese_residual_count"] == 0
-    assert quality_report.details["japanese_residual_items"] == []
+    assert quality_report.summary["source_residual_rule_count"] == 1
+    assert quality_report.summary["source_residual_count"] == 0
+    assert quality_report.details["source_residual_items"] == []
     async with await registry.open_game("テストゲーム") as session:
         translated_items = await session.read_translated_items()
-        residual_rules = await session.read_japanese_residual_rules()
+        residual_rules = await session.read_source_residual_rules()
     translated_by_path = {item.location_path: item for item in translated_items}
     assert translated_by_path[target_path].translation_lines == ["こんにちは"]
     assert residual_rules[0].allowed_terms == ["こんにちは"]
@@ -851,13 +975,13 @@ async def test_manual_translation_uses_japanese_residual_exception_rules(
 
 
 @pytest.mark.asyncio
-async def test_quality_report_treats_japanese_residual_as_error(
+async def test_quality_report_treats_source_residual_as_error(
     minimal_game_dir: Path,
     tmp_path: Path,
 ) -> None:
-    """质量报告把未放行的日文残留风险作为禁止写进游戏文件的问题。"""
+    """质量报告把未放行的源文残留风险作为禁止写进游戏文件的问题。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     pending_path = tmp_path / "pending-translations.json"
 
@@ -901,9 +1025,9 @@ async def test_quality_report_treats_japanese_residual_as_error(
     error_codes = {error.code for error in report.errors}
     warning_codes = {warning.code for warning in report.warnings}
     assert report.status == "error"
-    assert "japanese_residual" in error_codes
-    assert "japanese_residual" not in warning_codes
-    assert report.summary["japanese_residual_count"] == 1
+    assert "source_residual" in error_codes
+    assert "source_residual" not in warning_codes
+    assert report.summary["source_residual_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -913,7 +1037,7 @@ async def test_quality_report_ignores_stale_saved_translation_quality_errors(
 ) -> None:
     """质量报告不把当前不会写入的旧译文算成写入前错误。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
 
     async with await registry.open_game("テストゲーム") as session:
@@ -934,11 +1058,11 @@ async def test_quality_report_ignores_stale_saved_translation_quality_errors(
 
     error_codes = {error.code for error in report.errors}
     warning_codes = {warning.code for warning in report.warnings}
-    assert "japanese_residual" not in error_codes
+    assert "source_residual" not in error_codes
     assert "stale_cache" in warning_codes
     assert report.summary["stale_cache_count"] == 1
-    assert report.summary["japanese_residual_count"] == 0
-    assert report.details["japanese_residual_items"] == []
+    assert report.summary["source_residual_count"] == 0
+    assert report.details["source_residual_items"] == []
 
 
 @pytest.mark.asyncio
@@ -948,7 +1072,7 @@ async def test_quality_report_uses_command_setting_overrides(
 ) -> None:
     """写入前质量报告使用本次命令传入的文本规则覆盖。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     pending_path = tmp_path / "pending-translations.json"
 
@@ -990,15 +1114,15 @@ async def test_quality_report_uses_command_setting_overrides(
     default_report = await service.quality_report(game_title="テストゲーム")
     override_report = await service.quality_report(
         game_title="テストゲーム",
-        setting_overrides=SettingOverrides(allowed_japanese_chars=["カ"]),
+        setting_overrides=SettingOverrides(source_residual_allowed_chars=["カ"]),
     )
 
     default_error_codes = {error.code for error in default_report.errors}
     override_error_codes = {error.code for error in override_report.errors}
-    assert "japanese_residual" in default_error_codes
-    assert "japanese_residual" not in override_error_codes
-    assert default_report.summary["japanese_residual_count"] == 1
-    assert override_report.summary["japanese_residual_count"] == 0
+    assert "source_residual" in default_error_codes
+    assert "source_residual" not in override_error_codes
+    assert default_report.summary["source_residual_count"] == 1
+    assert override_report.summary["source_residual_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -1008,7 +1132,7 @@ async def test_agent_reports_ignore_stale_plugin_rules(
 ) -> None:
     """Agent 工具包与主翻译流程一样跳过过期插件规则，避免生成假 pending。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     async with await registry.open_game("テストゲーム") as session:
         await session.replace_plugin_text_rules(
             [
@@ -1046,7 +1170,7 @@ async def test_manual_long_text_import_splits_overwide_lines(
 ) -> None:
     """人工补译 long_text 入库前会按当前行宽配置自动拆短。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     setting_path = tmp_path / "setting.toml"
     setting_text = EXAMPLE_SETTING_PATH.read_text(encoding="utf-8")
     setting_text = setting_text.replace("long_text_line_width_limit = 26", "long_text_line_width_limit = 3")
@@ -1108,7 +1232,7 @@ async def test_manual_translation_import_rejects_text_structure_errors(
 ) -> None:
     """人工补译同样拒绝改动单字段结构或混入模型协议文本的译文。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     pending_path = tmp_path / "pending-translations.json"
 
@@ -1153,7 +1277,7 @@ async def test_export_quality_fix_template_collects_repairable_items(
 ) -> None:
     """质量修复模板会从报告问题导出标准修复表并预填当前译文。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     pending_path = tmp_path / "pending-translations.json"
     template_path = tmp_path / "quality-fix-template.json"
@@ -1242,7 +1366,7 @@ async def test_export_quality_fix_template_collects_repairable_items(
     template = load_json_object(template_path)
     assert report.status == "ok"
     assert report.summary["quality_error_count"] == 1
-    assert report.summary["japanese_residual_count"] == 1
+    assert report.summary["source_residual_count"] == 1
     assert report.summary["placeholder_risk_count"] == 1
     assert report.summary["overwide_line_count"] == 1
     assert set(template) == {quality_error_path, residual_path, placeholder_path}
@@ -1261,7 +1385,7 @@ async def test_quality_fix_template_restores_prefilled_model_placeholders(
 ) -> None:
     """修复表会把模型临时译文里的程序占位符还原为游戏原始控制符。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     pending_path = tmp_path / "pending-translations.json"
     template_path = tmp_path / "quality-fix-template.json"
@@ -1334,7 +1458,7 @@ async def test_reset_translations_validates_paths_before_deleting(
 ) -> None:
     """重置译文命令遇到非法定位路径时不做部分删除。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     pending_path = tmp_path / "pending-translations.json"
     reset_path = tmp_path / "reset-translations.json"
@@ -1402,7 +1526,7 @@ async def test_reset_translations_all_deletes_current_active_translation_cache(
 ) -> None:
     """完整重译入口可以清除当前提取范围内全部已入库译文。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     pending_path = tmp_path / "pending-translations.json"
 
@@ -1468,6 +1592,29 @@ async def test_validate_placeholder_rules_previews_roundtrip() -> None:
 
 
 @pytest.mark.asyncio
+async def test_validate_placeholder_rules_keeps_dialogue_after_joined_prefix_control() -> None:
+    """校验预览能证明无分隔符控制符不会吞掉后面的英文正文。"""
+    service = AgentToolkitService(setting_path=EXAMPLE_SETTING_PATH)
+
+    report = await service.validate_placeholder_rules(
+        game_title=None,
+        custom_placeholder_rules_text=json.dumps(
+            {r"\\Shake": "[CUSTOM_PLUGIN_SHAKE_MARKER_{index}]"},
+            ensure_ascii=False,
+        ),
+        sample_texts=[r"\ShakeStop this!!!"],
+    )
+
+    assert report.status == "ok"
+    samples = report.details["samples"]
+    assert isinstance(samples, list)
+    first_sample = samples[0]
+    assert isinstance(first_sample, dict)
+    assert first_sample["text_for_model"] == "[CUSTOM_PLUGIN_SHAKE_MARKER_1]Stop this!!!"
+    assert first_sample["restored_text"] == r"\ShakeStop this!!!"
+
+
+@pytest.mark.asyncio
 async def test_validate_placeholder_rules_blocks_bare_escape_match() -> None:
     """占位符规则不得误匹配裸 \\n、\\r、\\t 这类常见文本转义。"""
     service = AgentToolkitService(setting_path=EXAMPLE_SETTING_PATH)
@@ -1526,7 +1673,7 @@ async def test_validate_event_command_rules_previews_direct_parameter_write_back
     parameters[2] = "トップパラメータ"
     _ = common_events_path.write_text(json.dumps(common_events, ensure_ascii=False, indent=2), encoding="utf-8")
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
 
     report = await service.validate_event_command_rules(
@@ -1562,7 +1709,7 @@ async def test_validate_event_command_rules_reports_hits_per_rule(
 ) -> None:
     """事件指令规则报告按规则组统计命中数量，避免把总命中数写到每条规则。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     service = AgentToolkitService(game_registry=registry, setting_path=EXAMPLE_SETTING_PATH)
     rules_text = json.dumps(
         {
@@ -1604,7 +1751,7 @@ async def test_quality_report_counts_errors_and_model_response(
 ) -> None:
     """质量报告读取译文、质量错误和规则状态，输出阻断级错误摘要。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     async with await registry.open_game("テストゲーム") as session:
         await session.write_translation_items(
             [
@@ -1669,7 +1816,7 @@ async def test_quality_report_flags_internal_placeholder_leak(
 ) -> None:
     """质量报告必须拦截译文里的项目内部占位符。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     async with await registry.open_game("テストゲーム") as session:
         await session.write_translation_items(
             [
@@ -1702,7 +1849,7 @@ async def test_quality_report_accepts_saved_short_text_real_line_breaks(
 ) -> None:
     """质量报告复查已保存译文时允许游戏文件需要的真实换行。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     async with await registry.open_game("テストゲーム") as session:
         await session.write_translation_items(
             [
@@ -1736,7 +1883,7 @@ async def test_quality_report_flags_multiline_short_text_overwide_line(
     item["note"] = "<拡張説明:説明\n原文>"
     _ = items_path.write_text(json.dumps(raw_value, ensure_ascii=False, indent=2), encoding="utf-8")
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     async with await registry.open_game("テストゲーム") as session:
         await session.replace_note_tag_text_rules(
             [
@@ -1782,7 +1929,7 @@ async def test_quality_report_flags_literal_line_break_short_text_overwide_line(
     item["note"] = r"<拡張説明:説明\n原文>"
     _ = items_path.write_text(json.dumps(raw_value, ensure_ascii=False, indent=2), encoding="utf-8")
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     async with await registry.open_game("テストゲーム") as session:
         await session.replace_note_tag_text_rules(
             [
@@ -1828,7 +1975,7 @@ async def test_quality_report_allows_original_overwide_short_text_line(
     item["note"] = "<拡張説明:説明\n原原原原原原原原原原原原原原原原原原原原原原原原原原原原原原>"
     _ = items_path.write_text(json.dumps(raw_value, ensure_ascii=False, indent=2), encoding="utf-8")
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     async with await registry.open_game("テストゲーム") as session:
         await session.replace_note_tag_text_rules(
             [
@@ -1862,7 +2009,7 @@ async def test_quality_report_flags_saved_short_text_structure_errors(
 ) -> None:
     """质量报告会拦截已保存译文中改动单字段结构的问题。"""
     registry = GameRegistry(tmp_path / "db")
-    _ = await registry.register_game(minimal_game_dir)
+    _ = await registry.register_game(minimal_game_dir, source_language="ja")
     async with await registry.open_game("テストゲーム") as session:
         await session.write_translation_items(
             [

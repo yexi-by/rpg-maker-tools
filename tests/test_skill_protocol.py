@@ -5,6 +5,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_agents_requires_external_judgment_for_game_private_semantics() -> None:
+    """项目规范必须禁止程序把启发式候选当成游戏私有语义结论。"""
+    text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+
+    required_phrases = [
+        "程序只能内置引擎公开协议和结构性校验",
+        "不能把启发式猜测当作游戏私有语义的最终判断",
+        "必须来自用户明确输入、当前游戏文件的人工或外部代理分析、已导入规则、术语表或源文残留例外规则",
+        "候选只能用于提示和校验，不能自动升级为已确认规则",
+        "必须输出可理解的告警或错误",
+        "禁止靠程序自身猜测继续翻译、导入规则或消耗模型额度",
+    ]
+    for phrase in required_phrases:
+        assert phrase in text
+
+
 def test_att_mz_skill_defines_two_round_subagent_protocol() -> None:
     """Skill 必须约束两轮子代理流程和主代理术语表审核责任。"""
     text = (ROOT / "skills" / "att-mz" / "SKILL.md").read_text(encoding="utf-8")
@@ -39,7 +55,7 @@ def test_att_mz_skill_defines_two_round_subagent_protocol() -> None:
         "### 用户返回答案验收",
         "先检查 JSON 结构和唯一写入边界",
         "防止编造路径、误选资源、脚本、公式或内部字段",
-        "术语候选必须由主代理统一风格、去空值、查假名残留和译名冲突",
+        "术语候选必须由主代理统一风格、去空值、查源文残留和译名冲突",
         "规则类结果必须运行对应 `validate-* --json`",
         "通过后才运行对应 `import-* --json`",
         "大面积错误时要求重做或改由主代理完成，不能直接导入",
@@ -48,7 +64,7 @@ def test_att_mz_skill_defines_two_round_subagent_protocol() -> None:
         "`terminology/subtasks/sources/speaker_and_actor_terms.json`",
         "`terminology/subtasks/candidates/item_terms.json`",
         "主代理必须等待全部术语候选子代理完成",
-        "主代理必须严审信达雅、日文句意、中文自然度、专名统一、跨类别一致性和游戏 UI 语感",
+        "主代理必须严审信达雅、源文语义、中文自然度、专名统一、跨类别一致性和游戏 UI 语感",
         "主代理必须亲自修改候选译名并合并到 `terminology/field-terms.json`，同时维护 `terminology/glossary.json`",
         "`terminology/field-terms.json` 的 value 是最终写进游戏字段的完整文本",
         "不能指望正文术语表补回来",
@@ -78,6 +94,9 @@ def test_att_mz_skill_defines_two_round_subagent_protocol() -> None:
         "每个阶段开始前，必须先明确“输入是什么、处理逻辑是什么、输出什么”",
         "### 命令 I/O 合约",
         "`doctor --no-check-llm --json`",
+        "`add-game --path <游戏目录> --source-language ja --json`",
+        "`add-game --path <游戏目录> --source-language en --json`",
+        "注册游戏时必须显式传 `--source-language ja` 或 `--source-language en`",
         "`doctor --game <游戏标题> --no-check-llm --json`",
         "`prepare-agent-workspace --game <游戏标题> --output-dir <工作区> --json`",
         "`scan-placeholder-candidates --game <游戏标题> --input <规则文件> --json`",
@@ -94,9 +113,10 @@ def test_att_mz_skill_defines_two_round_subagent_protocol() -> None:
         "`export-untranslated-translations --game <游戏标题> --output <文件> --json`",
         "一次导出全部还没成功保存译文的原文，生成可填写的译文表",
         "不传 `--limit` 时导出全部",
-        "`validate-japanese-residual-rules --game <游戏标题> --input <规则文件> --json`",
-        "`import-japanese-residual-rules --game <游戏标题> --input <规则文件> --json`",
-        "禁止全局关闭日文残留检测",
+        "`validate-source-residual-rules --game <游戏标题> --input <规则文件> --json`",
+        "`import-source-residual-rules --game <游戏标题> --input <规则文件> --json`",
+        "日文和英文游戏都使用通用源文残留命令",
+        "禁止全局关闭源文残留检测",
         "`write-back --game <游戏标题> --json`",
         "用户是否允许覆盖字体必须单独确认",
         "禁止使用 `--confirm-font-overwrite`",
@@ -122,8 +142,9 @@ def test_att_mz_skill_defines_two_round_subagent_protocol() -> None:
         "字段包装形式不得写入正文术语表",
         "字段译名表负责写回地图显示名、数据库名称、系统类型，以及 MZ 标准 `101.parameters[4]` 名字框等游戏字段",
         "正文术语表负责正文翻译提示词命中",
-        "`plugin-rules.json`：顶层必须是对象，格式为 `{插件名: [JSONPath, ...]}`",
-        "JSONPath 必须使用括号路径语法并从 `$['parameters']` 开始",
+        "`plugin-rules.json`：顶层必须是数组，格式为 `[{plugin_index, plugin_name, paths}]`",
+        "插件规则允许空数组 `[]` 表示确认无可导入插件文本",
+        "必须使用括号路径语法并从 `$['parameters']` 开始",
         "禁止使用 `$.xxx` 点号路径",
         "`event-command-rules.json`：顶层必须是对象，格式为 `{指令编码字符串: [{match, paths}]}`",
         "`note-tag-rules.json`：顶层必须是对象，格式为 `{data文件名或文件模式: [note标签名, ...]}`",
@@ -140,8 +161,9 @@ def test_att_mz_skill_defines_two_round_subagent_protocol() -> None:
         "完整重译不要手工导出全集路径",
         "已导入规则回填文件",
         "禁止用空 `translation_lines` 当重置信号",
-        "`japanese-residual-rules.json`：这是“允许保留日文的例外表”。顶层是 `{location_path: {allowed_terms, reason}}`",
-        "`allowed_terms` 是允许原样保留的日文片段字符串数组",
+        "`source-residual-rules.json`：这是“允许保留源文的例外表”。顶层是 `{location_path: {allowed_terms, reason}}`",
+        "`allowed_terms` 是允许原样保留的源语言片段字符串数组",
+        "英文游戏默认允许少量 UI 缩写",
         "禁止在 `pending-translations.json` 内新增例外字段",
         "### 控制符字符级保留",
         "都必须当成不可翻译标记",
@@ -155,7 +177,7 @@ def test_att_mz_skill_defines_two_round_subagent_protocol() -> None:
         "正确示例：输入候选",
         "第二轮子代理任务契约",
         "格式为 `{正则表达式: 占位符模板}`",
-        "格式为 `{插件名: [JSONPath, ...]}`",
+        "格式为 `[{plugin_index, plugin_name, paths}]`",
         "主代理必须等待三类规则子代理全部完成",
         "三类外部规则全部导入后，主代理才能重新运行 `build-placeholder-rules`",
         "亲自审查、校验、覆盖扫描并导入占位符规则",
@@ -203,8 +225,8 @@ def test_att_mz_skill_defines_two_round_subagent_protocol() -> None:
         "先把错误映射回对应工作区 JSON",
         "误用了 `$.xxx` 点号路径",
         "`note_tag_rules_invalid`",
-        "`japanese_residual_rules_invalid`",
-        "`quality-report --json` 返回 `japanese_residual_items`",
+        "`source_residual_rules_invalid`",
+        "`quality-report --json` 返回 `source_residual_items`",
         "推荐先用 `export-quality-fix-template --json` 生成可填写的修复表",
         "必须用 `reset-translations` 的 `location_paths` 显式文件",
         "write-back --game <游戏标题> --json",
@@ -231,6 +253,8 @@ def test_att_mz_skill_defines_two_round_subagent_protocol() -> None:
         "只写 `terminology/" + "terms" + ".json`",
         "aliases",
         "别名",
+        "格式为 `{插件名: [JSONPath, ...]}`",
+        "对象格式，key 是插件名",
         "### 四类子代理任务契约",
         "主代理必须等待四类子代理全部完成",
         "四类子代理全部导入后",
@@ -245,6 +269,10 @@ def test_att_mz_skill_defines_two_round_subagent_protocol() -> None:
         "你必须",
         "人工处理者",
         "人工填写",
+        "validate-japanese-residual-rules",
+        "import-japanese-residual-rules",
+        "默认 `ja`",
+        "默认日文",
     ]
     for phrase in forbidden_sample_phrases:
         assert phrase not in text
@@ -259,9 +287,10 @@ def test_rule_agent_prompt_documents_exist_and_define_cli_contracts() -> None:
         "不读取项目源码、数据库或程序内部对象",
         "`<工作区>/plugins.json`",
         "唯一可写文件：`<工作区>/plugin-rules.json`",
-        "格式为 `{插件名: [JSONPath, ...]}`",
+        "格式为 `[{plugin_index, plugin_name, paths}]`",
+        "`plugin_index` 必须是插件在 `plugins.json` 数组中的下标",
+        "合法空结果是 `[]`",
         "JSONPath 必须使用括号路径语法",
-        "合法空结果是 `{}`",
         "validate-plugin-rules",
         "改动文件",
         "未解决风险",
@@ -398,7 +427,7 @@ def test_release_skill_uses_packaged_cli_contract() -> None:
         "### 用户返回答案验收",
         "先检查 JSON 结构和唯一写入边界",
         "防止编造路径、误选资源、脚本、公式或内部字段",
-        "术语候选必须由主代理统一风格、去空值、查假名残留和译名冲突",
+        "术语候选必须由主代理统一风格、去空值、查源文残留和译名冲突",
         "规则类结果必须运行对应 `validate-* --json`",
         "通过后才运行对应 `import-* --json`",
         "大面积错误时要求重做或改由主代理完成，不能直接导入",

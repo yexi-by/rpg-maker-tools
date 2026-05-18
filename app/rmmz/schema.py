@@ -24,7 +24,7 @@ from app.rmmz.text_rules import ControlSequenceSpan, JsonValue, TextRules, get_d
 
 
 type ItemType = Literal["long_text", "array", "short_text"]
-type ErrorType = Literal["模型返回不可解析", "AI漏翻", "文本结构不匹配", "控制符不匹配", "日文残留", "选项行数不匹配"]
+type ErrorType = Literal["模型返回不可解析", "AI漏翻", "文本结构不匹配", "控制符不匹配", "源文残留", "选项行数不匹配"]
 type TranslationRunStatus = Literal["running", "completed", "blocked", "cancelled", "failed", "stopped"]
 type LlmFailureCategory = Literal[
     "rate_limit",
@@ -237,8 +237,8 @@ class PlaceholderRuleRecord(BaseModel):
     placeholder_template: str
 
 
-class JapaneseResidualRuleRecord(BaseModel):
-    """当前游戏导入的日文残留例外规则。"""
+class SourceResidualRuleRecord(BaseModel):
+    """当前游戏导入的源文残留例外规则。"""
 
     location_path: str
     allowed_terms: list[str] = Field(default_factory=list)
@@ -443,6 +443,7 @@ __all__: list[str] = [
     "TROOPS_FILE_NAME",
     "LlmFailureCategory",
     "LlmFailureRecord",
+    "SourceResidualRuleRecord",
     "TranslationData",
     "TranslationErrorItem",
     "TranslationItem",

@@ -39,3 +39,5 @@ tmp/
 setting.toml
 
 outputs/
+
+.codex/

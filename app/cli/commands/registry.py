@@ -14,6 +14,7 @@ from app.agent_toolkit import AgentReport, AgentToolkitService
 from app.cli.arguments import read_bool_arg, read_str_arg
 from app.cli.runtime import HandlerSession, resolve_optional_target_game_title
 from app.cli.reports import write_report_outputs
+from app.language import parse_source_language
 from app.observability import console, logger
 from app.persistence import GameRegistry
 
@@ -33,6 +34,8 @@ async def run_list_command(args: argparse.Namespace) -> int:
                         "game_title": item.game_title,
                         "engine_kind": item.engine_kind,
                         "engine_version": item.engine_version,
+                        "source_language": item.source_language,
+                        "target_language": item.target_language,
                         "game_path": str(item.game_path),
                         "content_root": str(item.content_root),
                         "db_path": str(item.db_path),
@@ -51,6 +54,7 @@ async def run_list_command(args: argparse.Namespace) -> int:
     table.add_column("游戏标题", style="cyan")
     table.add_column("引擎", style="green")
     table.add_column("版本", style="green")
+    table.add_column("源语言", style="green")
     table.add_column("游戏目录", style="blue")
     table.add_column("内容目录", style="blue")
     table.add_column("数据库", style="magenta")
@@ -59,6 +63,7 @@ async def run_list_command(args: argparse.Namespace) -> int:
             item.game_title,
             item.engine_kind.upper(),
             item.engine_version,
+            item.source_language,
             str(item.game_path),
             str(item.content_root),
             str(item.db_path),
@@ -70,13 +75,18 @@ async def run_list_command(args: argparse.Namespace) -> int:
 async def run_add_game_command(args: argparse.Namespace) -> int:
     """执行 `add-game` 命令。"""
     game_path = Path(read_str_arg(args, "path"))
+    source_language = parse_source_language(read_str_arg(args, "source_language"))
     async with HandlerSession() as handler:
-        game_title = await handler.add_game(game_path)
+        game_title = await handler.add_game(game_path, source_language=source_language)
         if read_bool_arg(args, "json_output"):
             report = AgentReport.from_parts(
                 errors=[],
                 warnings=[],
-                summary={"game_title": game_title},
+                summary={
+                    "game_title": game_title,
+                    "source_language": source_language,
+                    "target_language": "zh-Hans",
+                },
                 details={"next_game_argument": game_title},
             )
             print(report.to_json_text())

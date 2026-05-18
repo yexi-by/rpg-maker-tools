@@ -9,6 +9,8 @@ from app.config import LLM_API_KEY_ENV_NAME, LLM_BASE_URL_ENV_NAME
 from app.config import SettingOverrides
 from app.utils.config_loader_utils import load_setting
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 def test_load_setting_applies_cli_overrides_without_reading_prompt_file(
     tmp_path: Path,
@@ -43,13 +45,13 @@ default_command_codes = [357]
 
 [text_rules]
 strip_wrapping_punctuation_pairs = [["「", "」"]]
-allowed_japanese_chars = ["っ"]
-allowed_japanese_tail_chars = ["ね"]
+source_residual_allowed_chars = ["っ"]
+source_residual_allowed_tail_chars = ["ね"]
 line_split_punctuations = ["。"]
 long_text_line_width_limit = 30
 line_width_count_pattern = "[\\u4E00-\\u9FFF]"
 source_text_required_pattern = "[\\u3040-\\u30FF]+"
-japanese_segment_pattern = "[\\u3040-\\u30FF]+"
+source_residual_segment_pattern = "[\\u3040-\\u30FF]+"
 residual_escape_sequence_pattern = "\\\\[nrt]"
 """,
         encoding="utf-8",
@@ -69,13 +71,13 @@ residual_escape_sequence_pattern = "\\\\[nrt]"
         event_command_default_codes=[357, 355],
         strip_wrapping_punctuation_pairs=[("《", "》")],
         preserve_wrapping_punctuation_pairs=[("『", "』")],
-        allowed_japanese_chars=["ー"],
-        allowed_japanese_tail_chars=["よ"],
+        source_residual_allowed_chars=["ー"],
+        source_residual_allowed_tail_chars=["よ"],
         line_split_punctuations=["，", "。"],
         long_text_line_width_limit=42,
         line_width_count_pattern="[a-z]",
         source_text_required_pattern="[ぁ-ん一-龠]+",
-        japanese_segment_pattern="[ぁ-ん]+",
+        source_residual_segment_pattern="[ぁ-ん]+",
         residual_escape_sequence_pattern="\\\\[abc]",
         write_back_replacement_font_path="fonts/Override.ttf",
     )
@@ -98,15 +100,31 @@ residual_escape_sequence_pattern = "\\\\[nrt]"
     assert setting.event_command_text.default_command_codes == [357, 355]
     assert setting.text_rules.strip_wrapping_punctuation_pairs == [("《", "》")]
     assert setting.text_rules.preserve_wrapping_punctuation_pairs == [("『", "』")]
-    assert setting.text_rules.allowed_japanese_chars == ["ー"]
-    assert setting.text_rules.allowed_japanese_tail_chars == ["よ"]
+    assert setting.text_rules.source_residual_allowed_chars == ["ー"]
+    assert setting.text_rules.source_residual_allowed_tail_chars == ["よ"]
     assert setting.text_rules.line_split_punctuations == ["，", "。"]
     assert setting.text_rules.long_text_line_width_limit == 42
     assert setting.text_rules.line_width_count_pattern == "[a-z]"
     assert setting.text_rules.source_text_required_pattern == "[ぁ-ん一-龠]+"
-    assert setting.text_rules.japanese_segment_pattern == "[ぁ-ん]+"
+    assert setting.text_rules.source_residual_segment_pattern == "[ぁ-ん]+"
     assert setting.text_rules.residual_escape_sequence_pattern == "\\\\[abc]"
     assert setting.write_back.replacement_font_path == "fonts/Override.ttf"
+
+
+def test_english_language_profile_selects_public_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """英文语言档案会切换正文提示词，且不把内部定位字段暴露给模型。"""
+    monkeypatch.delenv(LLM_BASE_URL_ENV_NAME, raising=False)
+    monkeypatch.delenv(LLM_API_KEY_ENV_NAME, raising=False)
+
+    setting = load_setting(setting_path=ROOT / "setting.example.toml", source_language="en")
+    system_prompt = setting.text_translation.system_prompt
+
+    assert setting.text_translation.system_prompt_file == "prompts/text_translation_en_to_zh_system.md"
+    assert "RPG Maker 英文游戏" in system_prompt
+    assert "location_path" not in system_prompt
+    assert "translated_text" not in system_prompt
+    assert "位置:" not in system_prompt
+    assert "文件名" not in system_prompt
 
 
 def test_load_setting_applies_environment_llm_connection_overrides(

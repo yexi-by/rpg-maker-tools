@@ -10,6 +10,7 @@ from typing import Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.language import DEFAULT_SOURCE_LANGUAGE, SourceLanguage, SourceTextExclusionProfile
 from app.llm_request_body_extra import LLMRequestBodyExtra, normalize_request_body_extra
 from app.rmmz.engine import EngineKind
 
@@ -130,6 +131,8 @@ class WriteBackSetting(StrictBaseModel):
 class TextRulesSetting(StrictBaseModel):
     """可配置的文本判断规则。"""
 
+    source_language: SourceLanguage = Field(default=DEFAULT_SOURCE_LANGUAGE, title="源语言")
+    source_residual_label: str = Field(default="日文", title="源文残留展示名称")
     strip_wrapping_punctuation_pairs: list[tuple[str, str]] = Field(
         default_factory=lambda: [("「", "」")],
         title="提取时剥离的成对标点",
@@ -138,10 +141,10 @@ class TextRulesSetting(StrictBaseModel):
         default_factory=lambda: [("「", "」"), ("『", "』")],
         title="译文必须按源文保留的成对包裹标点",
     )
-    allowed_japanese_chars: list[str] = Field(
+    source_residual_allowed_chars: list[str] = Field(
         default_factory=lambda: ["っ", "ッ", "ー", "・", "。", "～", "…"]
     )
-    allowed_japanese_tail_chars: list[str] = Field(
+    source_residual_allowed_tail_chars: list[str] = Field(
         default_factory=lambda: [
             "あ",
             "い",
@@ -189,7 +192,10 @@ class TextRulesSetting(StrictBaseModel):
     source_text_required_pattern: str = Field(
         default=r"[\u3040-\u309F\u30A0-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]+"
     )
-    japanese_segment_pattern: str = Field(default=r"[\u3040-\u309F\u30A0-\u30FF]+")
+    source_text_exclusion_profile: SourceTextExclusionProfile = Field(default="none")
+    source_residual_segment_pattern: str = Field(default=r"[\u3040-\u309F\u30A0-\u30FF]+")
+    allowed_source_residual_terms: list[str] = Field(default_factory=list)
+    source_residual_terms_ignore_case: bool = Field(default=False)
     residual_escape_sequence_pattern: str = Field(default=r"\\[nrt]")
 
 

@@ -62,6 +62,21 @@ async def test_mv_outer_layout_loads_www_data_and_system_title(minimal_mv_game_d
     assert game_data.plugins_js[0]["name"] == "MvPlugin"
 
 
+def test_empty_metadata_title_falls_back_to_game_directory_name(minimal_mv_game_dir: Path) -> None:
+    """窗口标题和系统标题都为空时，注册标题使用游戏目录名。"""
+    package_path = minimal_mv_game_dir / "package.json"
+    package_object = ensure_json_object(_read_test_json(package_path), "package.json")
+    window_object = ensure_json_object(package_object["window"], "package.window")
+    window_object["title"] = ""
+    _rewrite_json(package_path, package_object)
+    system_path = minimal_mv_game_dir / "www" / "data" / "System.json"
+    system_object = ensure_json_object(_read_test_json(system_path), "System.json")
+    system_object["gameTitle"] = ""
+    _rewrite_json(system_path, system_object)
+
+    assert read_game_title(minimal_mv_game_dir) == minimal_mv_game_dir.name
+
+
 @pytest.mark.asyncio
 async def test_mv_write_back_uses_www_active_and_origin_paths(minimal_mv_game_dir: Path) -> None:
     """MV 外层目录写回只触碰 www 内的 data 和 plugins.js。"""

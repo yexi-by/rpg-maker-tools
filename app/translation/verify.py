@@ -2,7 +2,7 @@
 正文翻译校验模块。
 
 负责解析模型返回的 JSON，按 `location_path` 映射回翻译条目，并执行漏翻、
-占位符和日文残留校验。
+占位符和源文残留校验。
 """
 
 import asyncio
@@ -10,9 +10,9 @@ import asyncio
 from json_repair import repair_json
 from pydantic import BaseModel, RootModel
 
-from app.japanese_residual import JapaneseResidualRuleSet, check_japanese_residual_for_item
 from app.rmmz.schema import ErrorType, TranslationErrorItem, TranslationItem
 from app.rmmz.text_rules import ControlSequenceSpan, TextRules
+from app.source_residual import SourceResidualRuleSet, check_source_residual_for_item
 from app.translation.line_wrap import (
     align_long_text_lines,
     normalize_translated_wrapping_punctuation,
@@ -23,7 +23,7 @@ ERR_PARSE_FAILED: ErrorType = "模型返回不可解析"
 ERR_MISSING_KEY: ErrorType = "AI漏翻"
 ERR_TEXT_STRUCTURE: ErrorType = "文本结构不匹配"
 ERR_PLACEHOLDER_MISMATCH: ErrorType = "控制符不匹配"
-ERR_JAPANESE_RESIDUAL: ErrorType = "日文残留"
+ERR_SOURCE_RESIDUAL: ErrorType = "源文残留"
 ERR_ARRAY_LINE_COUNT: ErrorType = "选项行数不匹配"
 ERR_EMPTY_TRANSLATION: ErrorType = "AI漏翻"
 
@@ -46,7 +46,7 @@ async def verify_translation_batch(
     right_queue: asyncio.Queue[list[TranslationItem] | None],
     error_queue: asyncio.Queue[list[TranslationErrorItem] | None],
     text_rules: TextRules,
-    japanese_residual_rule_set: JapaneseResidualRuleSet | None = None,
+    source_residual_rule_set: SourceResidualRuleSet | None = None,
 ) -> None:
     """解析模型返回并把通过校验/失败条目分别推入队列。"""
     right_items: list[TranslationItem] = []
@@ -191,10 +191,10 @@ async def verify_translation_batch(
             continue
 
         try:
-            check_japanese_residual_for_item(
+            check_source_residual_for_item(
                 item=item,
                 text_rules=text_rules,
-                rule_set=japanese_residual_rule_set,
+                rule_set=source_residual_rule_set,
             )
         except ValueError as error:
             error_items.append(
@@ -204,7 +204,7 @@ async def verify_translation_batch(
                     role=item.role,
                     original_lines=list(item.original_lines),
                     translation_lines=list(item.translation_lines),
-                    error_type=ERR_JAPANESE_RESIDUAL,
+                    error_type=ERR_SOURCE_RESIDUAL,
                     error_detail=[str(error)],
                     model_response=ai_result,
                 )

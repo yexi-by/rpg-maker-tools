@@ -38,7 +38,7 @@ from app.persistence import GameRegistry
 PARTIAL_WRITE_BACK_BLOCKING_ERROR_CODES: frozenset[str] = frozenset(
     {
         "placeholder_risk",
-        "japanese_residual",
+        "source_residual",
         "text_structure",
         "overwide_line",
         "write_back_protocol",
@@ -262,10 +262,13 @@ def build_setting_overrides(args: argparse.Namespace) -> SettingOverrides:
             args,
             "preserve_wrapping_punctuation_pair",
         ),
-        allowed_japanese_chars=read_optional_str_list_arg(args, "allowed_japanese_chars"),
-        allowed_japanese_tail_chars=read_optional_str_list_arg(
+        source_residual_allowed_chars=read_optional_str_list_arg(
             args,
-            "allowed_japanese_tail_chars",
+            "source_residual_allowed_chars",
+        ),
+        source_residual_allowed_tail_chars=read_optional_str_list_arg(
+            args,
+            "source_residual_allowed_tail_chars",
         ),
         line_split_punctuations=read_optional_str_list_arg(
             args,
@@ -277,7 +280,10 @@ def build_setting_overrides(args: argparse.Namespace) -> SettingOverrides:
         ),
         line_width_count_pattern=read_optional_str_arg(args, "line_width_count_pattern"),
         source_text_required_pattern=read_optional_str_arg(args, "source_text_required_pattern"),
-        japanese_segment_pattern=read_optional_str_arg(args, "japanese_segment_pattern"),
+        source_residual_segment_pattern=read_optional_str_arg(
+            args,
+            "source_residual_segment_pattern",
+        ),
         residual_escape_sequence_pattern=read_optional_str_arg(
             args,
             "residual_escape_sequence_pattern",

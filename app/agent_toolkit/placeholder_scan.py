@@ -4,7 +4,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-from app.rmmz.control_codes import iter_standard_control_spans
+from app.rmmz.control_codes import ControlSequenceSpan
 from app.rmmz.schema import TranslationData, TranslationItem
 from app.rmmz.text_rules import JsonValue, TextRules
 
@@ -31,18 +31,29 @@ def scan_placeholder_candidates(
     """扫描当前会进入正文翻译的文本中的反斜杠控制符候选。"""
     candidates: dict[str, PlaceholderCandidate] = {}
     for source_name, text in _iter_scan_texts(translation_data_map):
+        covered_spans = text_rules.iter_control_sequence_spans(text)
         for match in CONTROL_CANDIDATE_PATTERN.finditer(text):
-            marker = match.group(0)
+            covered_span = _find_prefix_covering_span(
+                start_index=match.start(),
+                end_index=match.end(),
+                covered_spans=covered_spans,
+            )
+            if covered_span is None:
+                marker = match.group(0)
+                standard_covered = False
+                custom_covered = False
+            else:
+                marker = covered_span.original
+                standard_covered = covered_span.source == "standard"
+                custom_covered = covered_span.source == "custom"
             candidate = candidates.get(marker)
             if candidate is None:
                 candidate = PlaceholderCandidate(marker=marker)
                 candidates[marker] = candidate
             candidate.count += 1
             candidate.sources.add(source_name)
-
-    for candidate in candidates.values():
-        candidate.standard_covered = _is_standard_covered(candidate.marker)
-        candidate.custom_covered = _is_custom_covered(candidate.marker, text_rules)
+            candidate.standard_covered = candidate.standard_covered or standard_covered
+            candidate.custom_covered = candidate.custom_covered or custom_covered
 
     return sorted(
         candidates.values(),
@@ -91,17 +102,20 @@ def _iter_item_scan_texts(item: TranslationItem) -> Iterable[tuple[str, str]]:
         yield f"{item.location_path}#{line_index}", text
 
 
-def _is_standard_covered(marker: str) -> bool:
-    """判断候选是否完整命中内置 RPG Maker 标准控制符规则。"""
-    return any(
-        span.start_index == 0 and span.end_index == len(marker)
-        for span in iter_standard_control_spans(marker)
-    )
-
-
-def _is_custom_covered(marker: str, text_rules: TextRules) -> bool:
-    """判断候选是否完整命中自定义占位符规则。"""
-    return any(rule.pattern.fullmatch(marker) is not None for rule in text_rules.custom_placeholder_rules)
+def _find_prefix_covering_span(
+    *,
+    start_index: int,
+    end_index: int,
+    covered_spans: list[ControlSequenceSpan],
+) -> ControlSequenceSpan | None:
+    """判断候选开头是否已被实际占位符规则保护。"""
+    for span in covered_spans:
+        if span.start_index != start_index:
+            continue
+        if span.end_index > end_index:
+            continue
+        return span
+    return None
 
 
 __all__: list[str] = [

@@ -8,11 +8,11 @@ import asyncio
 from collections.abc import AsyncIterator
 
 from app.config import Setting
-from app.japanese_residual import JapaneseResidualRuleSet
 from app.rmmz.schema import TranslationErrorItem, TranslationItem
 from app.llm import LLMRequestFailure
 from app.llm.handler import LLMHandler
 from app.rmmz.text_rules import TextRules
+from app.source_residual import SourceResidualRuleSet
 
 from .batch import TranslationBatch
 from .retry import request_with_recoverable_retry
@@ -26,12 +26,12 @@ class TextTranslation:
         self,
         setting: Setting,
         text_rules: TextRules,
-        japanese_residual_rule_set: JapaneseResidualRuleSet | None = None,
+        source_residual_rule_set: SourceResidualRuleSet | None = None,
     ) -> None:
         """初始化正文翻译调度服务。"""
         self.setting: Setting = setting
         self.text_rules: TextRules = text_rules
-        self.japanese_residual_rule_set: JapaneseResidualRuleSet | None = japanese_residual_rule_set
+        self.source_residual_rule_set: SourceResidualRuleSet | None = source_residual_rule_set
         self.right_queue: asyncio.Queue[list[TranslationItem] | None] | None = None
         self.error_queue: asyncio.Queue[list[TranslationErrorItem] | None] | None = None
         self._runner_task: asyncio.Task[None] | None = None
@@ -191,7 +191,7 @@ class TextTranslation:
                     right_queue=right_queue,
                     error_queue=error_queue,
                     text_rules=self.text_rules,
-                    japanese_residual_rule_set=self.japanese_residual_rule_set,
+                    source_residual_rule_set=self.source_residual_rule_set,
                 )
             finally:
                 task_queue.task_done()

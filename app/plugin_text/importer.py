@@ -2,17 +2,50 @@
 
 import json
 from pathlib import Path
-from typing import cast
+from typing import ClassVar, cast
 
 import aiofiles
-from pydantic import TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 from app.rmmz.schema import GameData, PluginTextRuleRecord
 from app.rmmz.text_rules import JsonValue, coerce_json_value
 
 from .common import build_plugin_hash, expand_rule_to_leaf_paths, extract_plugin_name, resolve_plugin_leaves
 
-type PluginRuleImportFile = dict[str, list[str]]
+
+class StrictPluginRuleModel(BaseModel):
+    """插件规则导入文件的严格模型基类。"""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="forbid", strict=True)
+
+
+class PluginRuleSpec(StrictPluginRuleModel):
+    """单个插件参数文本规则。"""
+
+    plugin_index: int = Field(ge=0)
+    plugin_name: str
+    paths: list[str] = Field(default_factory=list)
+
+    @field_validator("plugin_name")
+    @classmethod
+    def _validate_plugin_name(cls, value: str) -> str:
+        """插件名必须是非空字符串。"""
+        normalized_name = value.strip()
+        if not normalized_name:
+            raise ValueError("plugin_name 不能为空")
+        return normalized_name
+
+    @field_validator("paths")
+    @classmethod
+    def _validate_paths(cls, value: list[str]) -> list[str]:
+        """路径数组必须至少包含一条有效 JSONPath。"""
+        normalized_paths = normalize_path_templates(value)
+        if not normalized_paths:
+            raise ValueError("paths 不能为空")
+        return normalized_paths
+
+
+type PluginRuleImportFile = list[PluginRuleSpec]
 _PLUGIN_RULE_IMPORT_ADAPTER: TypeAdapter[PluginRuleImportFile] = TypeAdapter(PluginRuleImportFile)
 
 
@@ -30,6 +63,8 @@ def parse_plugin_rule_import_text(raw_text: str) -> PluginRuleImportFile:
     """解析外部插件规则 JSON 文本。"""
     decoded_raw = cast(object, json.loads(raw_text))
     decoded = coerce_json_value(decoded_raw)
+    if not isinstance(decoded, list):
+        raise TypeError("插件规则顶层必须是数组，每项包含 plugin_index、plugin_name 和 paths")
     return _PLUGIN_RULE_IMPORT_ADAPTER.validate_python(decoded)
 
 
@@ -38,39 +73,34 @@ def build_plugin_rule_records_from_import(
     game_data: GameData,
     import_file: PluginRuleImportFile,
 ) -> list[PluginTextRuleRecord]:
-    """把外部插件路径映射转换成数据库规则记录。"""
-    plugin_index = build_plugin_name_index(game_data)
+    """把索引优先的外部插件规则转换成数据库规则记录。"""
     records: list[PluginTextRuleRecord] = []
-    for plugin_name, path_templates in import_file.items():
-        normalized_plugin_name = plugin_name.strip()
-        if not normalized_plugin_name:
-            raise ValueError("插件规则不能包含空插件名")
-        if normalized_plugin_name not in plugin_index:
-            raise ValueError(f"插件规则没有命中当前 plugins.js: {normalized_plugin_name}")
-        index, plugin = plugin_index[normalized_plugin_name]
-        normalized_paths = normalize_path_templates(path_templates)
-        if not normalized_paths:
-            raise ValueError(f"插件规则路径不能为空: {normalized_plugin_name}")
+    seen_plugin_indices: set[int] = set()
+    for spec in import_file:
+        if spec.plugin_index in seen_plugin_indices:
+            raise ValueError(f"插件规则不能重复声明 plugin_index: {spec.plugin_index}")
+        seen_plugin_indices.add(spec.plugin_index)
+        if spec.plugin_index >= len(game_data.plugins_js):
+            raise ValueError(f"插件规则索引超出当前 plugins.js 范围: {spec.plugin_index}")
+        plugin = game_data.plugins_js[spec.plugin_index]
+        actual_plugin_name = extract_plugin_name(plugin, spec.plugin_index)
+        if spec.plugin_name != actual_plugin_name:
+            message = (
+                f"插件规则名称与当前 plugins.js 不匹配: plugin_index={spec.plugin_index}, "
+                f"规则={spec.plugin_name}, 当前={actual_plugin_name}"
+            )
+            raise ValueError(
+                message
+            )
         records.append(
             build_plugin_rule_record(
-                plugin_index=index,
-                plugin_name=normalized_plugin_name,
+                plugin_index=spec.plugin_index,
+                plugin_name=spec.plugin_name,
                 plugin=plugin,
-                path_templates=normalized_paths,
+                path_templates=spec.paths,
             )
         )
     return records
-
-
-def build_plugin_name_index(game_data: GameData) -> dict[str, tuple[int, dict[str, JsonValue]]]:
-    """按插件名索引当前 `$plugins` 数组。"""
-    plugin_index: dict[str, tuple[int, dict[str, JsonValue]]] = {}
-    for index, plugin in enumerate(game_data.plugins_js):
-        plugin_name = extract_plugin_name(plugin, index)
-        if plugin_name in plugin_index:
-            raise ValueError(f"plugins.js 中存在重复插件名，无法按名称导入规则: {plugin_name}")
-        plugin_index[plugin_name] = (index, plugin)
-    return plugin_index
 
 
 def build_plugin_rule_record(
@@ -117,6 +147,7 @@ def normalize_path_templates(path_templates: list[str]) -> list[str]:
 
 __all__: list[str] = [
     "PluginRuleImportFile",
+    "PluginRuleSpec",
     "build_plugin_rule_records_from_import",
     "load_plugin_rule_import_file",
     "parse_plugin_rule_import_text",

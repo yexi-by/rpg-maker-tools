@@ -17,6 +17,8 @@ from app.config.environment import (
 )
 from app.config.overrides import SettingOverrides, apply_setting_overrides
 from app.config.schemas import Setting
+from app.language import DEFAULT_SOURCE_LANGUAGE, SourceLanguage
+from app.language_profiles import apply_language_profile_to_raw_config
 from app.observability.logging import logger
 from app.runtime_paths import resolve_app_path
 
@@ -33,10 +35,15 @@ def resolve_setting_path(setting_path: str | Path | None = None) -> Path:
 def load_setting(
     setting_path: str | Path | None = None,
     overrides: SettingOverrides | None = None,
+    source_language: SourceLanguage = DEFAULT_SOURCE_LANGUAGE,
 ) -> Setting:
     """加载并校验当前配置。"""
     resolved_setting_path = resolve_setting_path(setting_path)
     raw_config = _read_toml_data(resolved_setting_path)
+    apply_language_profile_to_raw_config(
+        raw_config=raw_config,
+        source_language=source_language,
+    )
     _inject_prompt_texts(
         raw_config=raw_config,
         base_dir=resolved_setting_path.parent,
@@ -55,6 +62,7 @@ def load_setting(
             raw_config=raw_config_snapshot,
             overrides=overrides,
             environment_overrides=environment_overrides,
+            source_language=source_language,
         )
     )
     return setting
@@ -131,6 +139,7 @@ def _build_setting_summary(
     raw_config: dict[str, object],
     overrides: SettingOverrides | None,
     environment_overrides: EnvironmentOverrides,
+    source_language: SourceLanguage,
 ) -> str:
     """构造适合直接输出到日志的配置摘要。"""
     text_service = setting.llm
@@ -147,6 +156,7 @@ def _build_setting_summary(
         f"配置文件: [tag.path]{setting_path}[/tag.path]",
         f"正文接口: OpenAI 兼容 / 模型 [tag.count]{text_service.model}[/tag.count] / 地址 [tag.path]{text_service.base_url}[/tag.path] / 超时 [tag.count]{text_service.timeout}[/tag.count] 秒",
         f"模型请求额外参数: [tag.count]{len(text_service.request_body_extra)}[/tag.count] 项",
+        f"源语言: [tag.count]{source_language}[/tag.count] / 目标语言 [tag.count]zh-Hans[/tag.count]",
         f"正文切块: 目标 [tag.count]{setting.translation_context.token_size}[/tag.count] token，换算系数 [tag.count]{setting.translation_context.factor}[/tag.count]，同角色最多连续 [tag.count]{setting.translation_context.max_command_items}[/tag.count] 条",
         f"正文翻译: [tag.count]{setting.text_translation.worker_count}[/tag.count] 个 worker，RPM [tag.count]{setting.text_translation.rpm or '不限'}[/tag.count]，失败重试 [tag.count]{setting.text_translation.retry_count}[/tag.count] 次，间隔 [tag.count]{setting.text_translation.retry_delay}[/tag.count] 秒",
         f"事件指令参数: 旧默认编码 [tag.count]{', '.join(map(str, setting.event_command_text.default_command_codes))}[/tag.count]，按引擎默认 [tag.count]{engine_code_label}[/tag.count]",

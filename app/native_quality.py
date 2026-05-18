@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from importlib import import_module
 from typing import Protocol, cast
 
-from app.rmmz.schema import COMMON_EVENTS_FILE_NAME, MAP_PATTERN, PLUGINS_FILE_NAME, TROOPS_FILE_NAME, JapaneseResidualRuleRecord, TranslationItem
+from app.rmmz.schema import COMMON_EVENTS_FILE_NAME, MAP_PATTERN, PLUGINS_FILE_NAME, TROOPS_FILE_NAME, SourceResidualRuleRecord, TranslationItem
 from app.rmmz.text_rules import JsonArray, JsonObject, JsonValue, TextRules, coerce_json_value, ensure_json_array, ensure_json_object
 
 
@@ -43,7 +43,7 @@ class NativeModule(Protocol):
 class NativeQualityDetails:
     """Rust 质检核心返回的问题明细。"""
 
-    japanese_residual_items: JsonArray
+    source_residual_items: JsonArray
     text_structure_items: JsonArray
     placeholder_risk_items: JsonArray
     overwide_line_items: JsonArray
@@ -53,20 +53,20 @@ def collect_native_quality_details(
     *,
     items: list[TranslationItem],
     text_rules: TextRules,
-    japanese_residual_rules: list[JapaneseResidualRuleRecord],
+    source_residual_rules: list[SourceResidualRuleRecord],
 ) -> NativeQualityDetails:
     """调用 Rust 多线程核心收集正文质量问题。"""
     native_module = _load_native_module()
     payload = {
         "items": [_build_item_payload(item) for item in items],
         "text_rules": _build_text_rules_payload(text_rules),
-        "japanese_residual_rules": [
+        "source_residual_rules": [
             {
                 "location_path": record.location_path,
                 "allowed_terms": list(record.allowed_terms),
                 "reason": record.reason,
             }
-            for record in japanese_residual_rules
+            for record in source_residual_rules
         ],
     }
     result_text = native_module.scan_quality(json.dumps(payload, ensure_ascii=False))
@@ -76,9 +76,9 @@ def collect_native_quality_details(
         "native_quality_result",
     )
     return NativeQualityDetails(
-        japanese_residual_items=ensure_json_array(
-            result["japanese_residual_items"],
-            "native_quality_result.japanese_residual_items",
+        source_residual_items=ensure_json_array(
+            result["source_residual_items"],
+            "native_quality_result.source_residual_items",
         ),
         text_structure_items=ensure_json_array(
             result["text_structure_items"],
@@ -337,9 +337,12 @@ def _build_text_rules_payload(text_rules: TextRules) -> JsonObject:
             }
             for rule in text_rules.custom_placeholder_rules
         ],
-        "allowed_japanese_chars": [char for char in setting.allowed_japanese_chars],
-        "allowed_japanese_tail_chars": [char for char in setting.allowed_japanese_tail_chars],
-        "japanese_segment_pattern": setting.japanese_segment_pattern,
+        "source_residual_allowed_chars": [char for char in setting.source_residual_allowed_chars],
+        "source_residual_allowed_tail_chars": [char for char in setting.source_residual_allowed_tail_chars],
+        "source_residual_segment_pattern": setting.source_residual_segment_pattern,
+        "source_residual_label": setting.source_residual_label,
+        "allowed_source_residual_terms": [term for term in setting.allowed_source_residual_terms],
+        "source_residual_terms_ignore_case": setting.source_residual_terms_ignore_case,
         "line_width_count_pattern": setting.line_width_count_pattern,
         "residual_escape_sequence_pattern": setting.residual_escape_sequence_pattern,
         "long_text_line_width_limit": setting.long_text_line_width_limit,

@@ -11,6 +11,7 @@ from typing import Self
 
 import aiosqlite
 
+from app.language import DEFAULT_TARGET_LANGUAGE, SourceLanguage, TargetLanguage, parse_source_language
 from app.terminology.schemas import TERMINOLOGY_CATEGORIES, TerminologyCategory, TerminologyGlossary, TerminologyRegistry
 from app.rmmz.schema import (
     EngineKind,
@@ -20,12 +21,12 @@ from app.rmmz.schema import (
     FontReplacementRecord,
     GameData,
     GameLayout,
-    JapaneseResidualRuleRecord,
     LlmFailureCategory,
     LlmFailureRecord,
     NoteTagTextRuleRecord,
     PlaceholderRuleRecord,
     PluginTextRuleRecord,
+    SourceResidualRuleRecord,
     TranslationErrorItem,
     TranslationItem,
     TranslationRunRecord,
@@ -48,12 +49,13 @@ from .sql import (
     CREATE_EVENT_COMMAND_TEXT_RULE_GROUPS_TABLE,
     CREATE_EVENT_COMMAND_TEXT_RULE_PATHS_TABLE,
     CREATE_FONT_REPLACEMENT_RECORDS_TABLE,
-    CREATE_JAPANESE_RESIDUAL_RULES_TABLE,
+    CREATE_LANGUAGE_SETTINGS_TABLE,
     CREATE_LLM_FAILURES_TABLE,
     CREATE_METADATA_TABLE,
     CREATE_NOTE_TAG_TEXT_RULES_TABLE,
     CREATE_PLACEHOLDER_RULES_TABLE,
     CREATE_PLUGIN_TEXT_RULES_TABLE,
+    CREATE_SOURCE_RESIDUAL_RULES_TABLE,
     CREATE_TRANSLATION_QUALITY_ERRORS_TABLE,
     CREATE_TRANSLATION_RUNS_TABLE,
     CREATE_TRANSLATION_TABLE,
@@ -64,10 +66,10 @@ from .sql import (
     DELETE_ALL_EVENT_COMMAND_TEXT_RULE_GROUPS,
     DELETE_ALL_EVENT_COMMAND_TEXT_RULE_PATHS,
     DELETE_ALL_FONT_REPLACEMENT_RECORDS,
-    DELETE_ALL_JAPANESE_RESIDUAL_RULES,
     DELETE_ALL_NOTE_TAG_TEXT_RULES,
     DELETE_ALL_PLACEHOLDER_RULES,
     DELETE_ALL_PLUGIN_TEXT_RULES,
+    DELETE_ALL_SOURCE_RESIDUAL_RULES,
     DELETE_ALL_TRANSLATION_QUALITY_ERRORS,
     DELETE_ALL_TERMINOLOGY_TERMS,
     DELETE_ALL_TERMINOLOGY_GLOSSARY_TERMS,
@@ -77,11 +79,12 @@ from .sql import (
     INSERT_EVENT_COMMAND_TEXT_RULE_GROUP,
     INSERT_EVENT_COMMAND_TEXT_RULE_PATH,
     INSERT_FONT_REPLACEMENT_RECORD,
-    INSERT_JAPANESE_RESIDUAL_RULE,
+    LANGUAGE_SETTINGS_KEY,
     INSERT_LLM_FAILURE,
     INSERT_NOTE_TAG_TEXT_RULE,
     INSERT_PLACEHOLDER_RULE,
     INSERT_PLUGIN_TEXT_RULE,
+    INSERT_SOURCE_RESIDUAL_RULE,
     INSERT_TRANSLATION_QUALITY_ERROR,
     INSERT_TRANSLATION,
     METADATA_KEY,
@@ -91,7 +94,7 @@ from .sql import (
     SELECT_TERMINOLOGY_GLOSSARY_TERMS,
     SELECT_LATEST_TRANSLATION_RUN,
     SELECT_FONT_REPLACEMENT_RECORDS,
-    SELECT_JAPANESE_RESIDUAL_RULES,
+    SELECT_LANGUAGE_SETTINGS,
     SELECT_LLM_FAILURES_BY_RUN,
     SELECT_EVENT_COMMAND_TEXT_RULE_FILTERS,
     SELECT_EVENT_COMMAND_TEXT_RULE_GROUPS,
@@ -100,6 +103,7 @@ from .sql import (
     SELECT_NOTE_TAG_TEXT_RULES,
     SELECT_PLACEHOLDER_RULES,
     SELECT_PLUGIN_TEXT_RULES,
+    SELECT_SOURCE_RESIDUAL_RULES,
     SELECT_TRANSLATION_QUALITY_ERRORS_BY_RUN,
     SELECT_TRANSLATION_RUN,
     SELECT_TRANSLATED_ITEMS,
@@ -107,6 +111,7 @@ from .sql import (
     SELECT_TERMINOLOGY_TERMS,
     TERMINOLOGY_IMPORT_STATE_KEY,
     TRANSLATION_QUALITY_ERRORS_TABLE_NAME,
+    UPSERT_LANGUAGE_SETTINGS,
     UPSERT_METADATA,
     UPSERT_TERMINOLOGY_IMPORT_STATE,
     UPSERT_TRANSLATION_RUN,
@@ -161,6 +166,7 @@ async def create_static_tables(connection: aiosqlite.Connection) -> None:
     """初始化当前数据库要求的全部静态表。"""
     _ = await connection.execute(CREATE_TRANSLATION_TABLE)
     _ = await connection.execute(CREATE_METADATA_TABLE)
+    _ = await connection.execute(CREATE_LANGUAGE_SETTINGS_TABLE)
     _ = await connection.execute(CREATE_PLUGIN_TEXT_RULES_TABLE)
     _ = await connection.execute(CREATE_NOTE_TAG_TEXT_RULES_TABLE)
     _ = await connection.execute(CREATE_EVENT_COMMAND_TEXT_RULE_GROUPS_TABLE)
@@ -170,7 +176,7 @@ async def create_static_tables(connection: aiosqlite.Connection) -> None:
     _ = await connection.execute(CREATE_TERMINOLOGY_GLOSSARY_TERMS_TABLE)
     _ = await connection.execute(CREATE_TERMINOLOGY_IMPORT_STATE_TABLE)
     _ = await connection.execute(CREATE_PLACEHOLDER_RULES_TABLE)
-    _ = await connection.execute(CREATE_JAPANESE_RESIDUAL_RULES_TABLE)
+    _ = await connection.execute(CREATE_SOURCE_RESIDUAL_RULES_TABLE)
     _ = await connection.execute(CREATE_FONT_REPLACEMENT_RECORDS_TABLE)
     _ = await connection.execute(CREATE_TRANSLATION_RUNS_TABLE)
     _ = await connection.execute(CREATE_LLM_FAILURES_TABLE)
@@ -199,6 +205,23 @@ async def write_metadata(
     await connection.commit()
 
 
+async def write_language_settings(
+    connection: aiosqlite.Connection,
+    source_language: SourceLanguage,
+    target_language: TargetLanguage = DEFAULT_TARGET_LANGUAGE,
+) -> None:
+    """保存当前游戏的源语言和目标语言设置。"""
+    _ = await connection.execute(
+        UPSERT_LANGUAGE_SETTINGS,
+        (
+            LANGUAGE_SETTINGS_KEY,
+            source_language,
+            target_language,
+        ),
+    )
+    await connection.commit()
+
+
 @dataclass(slots=True)
 class GameMetadata:
     """数据库中保存的游戏绑定元数据。"""
@@ -208,6 +231,14 @@ class GameMetadata:
     engine_kind: EngineKind
     content_root: Path
     engine_version: str
+
+
+@dataclass(slots=True)
+class LanguageSettings:
+    """数据库中保存的当前游戏语言设置。"""
+
+    source_language: SourceLanguage
+    target_language: TargetLanguage
 
 
 async def read_metadata(connection: aiosqlite.Connection, db_path: Path) -> GameMetadata:
@@ -248,6 +279,26 @@ async def read_metadata(connection: aiosqlite.Connection, db_path: Path) -> Game
     )
 
 
+async def read_language_settings(connection: aiosqlite.Connection, db_path: Path) -> LanguageSettings:
+    """读取当前游戏语言设置；缺失时要求先执行一次性迁移。"""
+    try:
+        async with connection.execute(SELECT_LANGUAGE_SETTINGS, (LANGUAGE_SETTINGS_KEY,)) as cursor:
+            row = await cursor.fetchone()
+    except aiosqlite.Error as error:
+        raise RuntimeError(
+            f"数据库缺少语言设置表，请先运行一次性迁移脚本把旧库标记为日文游戏: {db_path}"
+        ) from error
+    if row is None:
+        raise RuntimeError(
+            f"数据库缺少语言设置记录，请先运行一次性迁移脚本把旧库标记为日文游戏: {db_path}"
+        )
+    source_language = parse_source_language(row_str(row, "source_language", db_path))
+    target_language = row_str(row, "target_language", db_path).strip()
+    if target_language != DEFAULT_TARGET_LANGUAGE:
+        raise RuntimeError(f"数据库 target_language 非法: {db_path}")
+    return LanguageSettings(source_language=source_language, target_language=DEFAULT_TARGET_LANGUAGE)
+
+
 @dataclass(slots=True)
 class GameRecord:
     """单个已注册游戏的数据库元数据。"""
@@ -258,6 +309,8 @@ class GameRecord:
     engine_kind: EngineKind
     content_root: Path
     engine_version: str
+    source_language: SourceLanguage
+    target_language: TargetLanguage
 
 
 class GameRegistry:
@@ -276,6 +329,7 @@ class GameRegistry:
             try:
                 await check_connection_readable(connection=connection, db_path=db_path)
                 metadata = await read_metadata(connection=connection, db_path=db_path)
+                language_settings = await read_language_settings(connection=connection, db_path=db_path)
                 records.append(
                     GameRecord(
                         game_title=metadata.game_title,
@@ -284,13 +338,19 @@ class GameRegistry:
                         engine_kind=metadata.engine_kind,
                         content_root=metadata.content_root,
                         engine_version=metadata.engine_version,
+                        source_language=language_settings.source_language,
+                        target_language=language_settings.target_language,
                     )
                 )
             finally:
                 await connection.close()
         return sorted(records, key=lambda record: record.game_title)
 
-    async def register_game(self, game_path: str | Path) -> GameRecord:
+    async def register_game(
+        self,
+        game_path: str | Path,
+        source_language: SourceLanguage,
+    ) -> GameRecord:
         """创建或更新单个游戏数据库绑定。"""
         _ = ensure_db_directory(self.db_directory)
         resolved_game_path = resolve_game_directory(game_path)
@@ -315,6 +375,7 @@ class GameRegistry:
                     )
             await create_static_tables(connection)
             await write_metadata(connection, game_title, resolved_game_path, layout)
+            await write_language_settings(connection, source_language)
         except Exception:
             await connection.close()
             if not db_already_exists and db_path.exists():
@@ -333,6 +394,8 @@ class GameRegistry:
             engine_kind=layout.engine_kind,
             content_root=layout.content_root,
             engine_version=layout.engine_version,
+            source_language=source_language,
+            target_language=DEFAULT_TARGET_LANGUAGE,
         )
 
     async def open_game(self, game_title: str) -> "TargetGameSession":
@@ -345,11 +408,12 @@ class GameRegistry:
         connection = await open_connection(db_path)
         try:
             await check_connection_readable(connection=connection, db_path=db_path)
-            await create_static_tables(connection)
             metadata = await read_metadata(
                 connection=connection,
                 db_path=db_path,
             )
+            language_settings = await read_language_settings(connection=connection, db_path=db_path)
+            await create_static_tables(connection)
             if metadata.game_title != game_title:
                 raise RuntimeError(
                     f"数据库元数据标题不匹配: 期望 {game_title}，实际 {metadata.game_title}"
@@ -362,6 +426,8 @@ class GameRegistry:
                     engine_kind=metadata.engine_kind,
                     content_root=metadata.content_root,
                     engine_version=metadata.engine_version,
+                    source_language=language_settings.source_language,
+                    target_language=language_settings.target_language,
                 ),
                 connection=connection,
             )
@@ -417,6 +483,16 @@ class TargetGameSession:
     def engine_version(self) -> str:
         """返回当前游戏注册时识别到的引擎版本。"""
         return self.record.engine_version
+
+    @property
+    def source_language(self) -> SourceLanguage:
+        """返回当前游戏注册时选择的源语言。"""
+        return self.record.source_language
+
+    @property
+    def target_language(self) -> TargetLanguage:
+        """返回当前游戏固定目标语言。"""
+        return self.record.target_language
 
     async def __aenter__(self) -> Self:
         """进入命令级数据库会话。"""
@@ -734,15 +810,15 @@ class TargetGameSession:
             for row in rows
         ]
 
-    async def replace_japanese_residual_rules(
+    async def replace_source_residual_rules(
         self,
-        rules: list[JapaneseResidualRuleRecord],
+        rules: list[SourceResidualRuleRecord],
     ) -> None:
-        """用当前游戏专用规则替换日文残留例外规则。"""
-        _ = await self.connection.execute(DELETE_ALL_JAPANESE_RESIDUAL_RULES)
+        """用当前游戏专用规则替换源文残留例外规则。"""
+        _ = await self.connection.execute(DELETE_ALL_SOURCE_RESIDUAL_RULES)
         for rule in rules:
             _ = await self.connection.execute(
-                INSERT_JAPANESE_RESIDUAL_RULE,
+                INSERT_SOURCE_RESIDUAL_RULE,
                 (
                     rule.location_path,
                     json.dumps(rule.allowed_terms, ensure_ascii=False),
@@ -751,12 +827,12 @@ class TargetGameSession:
             )
         await self.connection.commit()
 
-    async def read_japanese_residual_rules(self) -> list[JapaneseResidualRuleRecord]:
-        """读取当前游戏专用日文残留例外规则。"""
-        async with self.connection.execute(SELECT_JAPANESE_RESIDUAL_RULES) as cursor:
+    async def read_source_residual_rules(self) -> list[SourceResidualRuleRecord]:
+        """读取当前游戏专用源文残留例外规则。"""
+        async with self.connection.execute(SELECT_SOURCE_RESIDUAL_RULES) as cursor:
             rows = await cursor.fetchall()
         return [
-            JapaneseResidualRuleRecord(
+            SourceResidualRuleRecord(
                 location_path=row_str(row, "location_path", self.db_path),
                 allowed_terms=decode_string_list(
                     row_str(row, "allowed_terms", self.db_path),
@@ -1099,7 +1175,7 @@ def parse_error_type(value: str, db_path: Path) -> ErrorType:
         "AI漏翻",
         "文本结构不匹配",
         "控制符不匹配",
-        "日文残留",
+        "源文残留",
         "选项行数不匹配",
     }
     if value in allowed:
@@ -1119,6 +1195,7 @@ __all__: list[str] = [
     "GameMetadata",
     "GameRecord",
     "GameRegistry",
+    "LanguageSettings",
     "TargetGameSession",
     "build_db_path",
     "ensure_db_directory",

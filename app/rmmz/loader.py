@@ -138,7 +138,7 @@ def resolve_game_directory(game_path: str | Path) -> Path:
 
 
 def read_game_title(game_path: Path) -> str:
-    """按 package.json、System.json 顺序读取游戏标题。"""
+    """按 package.json、System.json、目录名顺序读取游戏标题。"""
     layout = resolve_game_layout(game_path)
     package_title = read_game_title_from_package(layout.package_path)
     if package_title is not None:
@@ -148,8 +148,12 @@ def read_game_title(game_path: Path) -> str:
     if system_title is not None:
         return system_title
 
+    directory_title = layout.game_root.name.strip()
+    if directory_title:
+        return directory_title
+
     raise ValueError(
-        f"游戏标题为空，请确认 package.json.window.title 或 data/System.json.gameTitle 有效: {layout.game_root}"
+        f"游戏标题为空，请确认 package.json.window.title、data/System.json.gameTitle 或游戏目录名有效: {layout.game_root}"
     )
 
 

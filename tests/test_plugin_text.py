@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from app.application.file_writer import reset_writable_copies
 from app.plugin_text import (
@@ -13,6 +13,7 @@ from app.plugin_text import (
     build_plugin_rule_records_from_import,
     export_plugins_json_file,
     load_plugin_rule_import_file,
+    parse_plugin_rule_import_text,
     resolve_plugin_leaves,
 )
 from app.plugin_text.write_back import write_plugin_text
@@ -39,14 +40,18 @@ async def test_plugin_json_export_writes_raw_plugins_array(minimal_game_dir: Pat
 
 @pytest.mark.asyncio
 async def test_plugin_rule_import_validates_external_file(minimal_game_dir: Path, tmp_path: Path) -> None:
-    """外部插件规则文件使用插件名到路径数组的简单映射。"""
+    """外部插件规则文件使用插件索引、插件名和路径数组定位插件。"""
     game_data = await load_game_data(minimal_game_dir)
     input_path = tmp_path / "plugin-rules.json"
     _ = input_path.write_text(
         json.dumps(
-            {
-                "TestPlugin": ["$['parameters']['Message']"],
-            },
+            [
+                {
+                    "plugin_index": 0,
+                    "plugin_name": "TestPlugin",
+                    "paths": ["$['parameters']['Message']"],
+                }
+            ],
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -59,8 +64,101 @@ async def test_plugin_rule_import_validates_external_file(minimal_game_dir: Path
     )
 
     assert len(records) == 1
+    assert records[0].plugin_index == 0
     assert records[0].plugin_name == "TestPlugin"
     assert records[0].path_templates == ["$['parameters']['Message']"]
+
+
+@pytest.mark.asyncio
+async def test_plugin_rule_import_ignores_duplicate_names_outside_referenced_index(minimal_game_dir: Path) -> None:
+    """重复插件名不再阻断校验，规则只按显式 plugin_index 定位。"""
+    game_data = await load_game_data(minimal_game_dir)
+    duplicate_plugin: dict[str, JsonValue] = {
+        "name": "DuplicatePlugin",
+        "status": False,
+        "description": "关闭的重复插件",
+        "parameters": {"Message": "重复插件文本"},
+    }
+    game_data.plugins_js.extend([dict(duplicate_plugin), dict(duplicate_plugin)])
+
+    empty_records = build_plugin_rule_records_from_import(
+        game_data=game_data,
+        import_file=parse_plugin_rule_import_text("[]"),
+    )
+    records = build_plugin_rule_records_from_import(
+        game_data=game_data,
+        import_file=parse_plugin_rule_import_text(
+            json.dumps(
+                [
+                    {
+                        "plugin_index": 0,
+                        "plugin_name": "TestPlugin",
+                        "paths": ["$['parameters']['Message']"],
+                    }
+                ],
+                ensure_ascii=False,
+            )
+        ),
+    )
+
+    assert empty_records == []
+    assert len(records) == 1
+    assert records[0].plugin_index == 0
+
+
+@pytest.mark.asyncio
+async def test_plugin_rule_import_rejects_plugin_index_name_mismatch(minimal_game_dir: Path) -> None:
+    """插件索引和插件名必须同时匹配当前 plugins.js，避免规则写到错误插件。"""
+    game_data = await load_game_data(minimal_game_dir)
+    import_file = parse_plugin_rule_import_text(
+        json.dumps(
+            [
+                {
+                    "plugin_index": 0,
+                    "plugin_name": "WrongPlugin",
+                    "paths": ["$['parameters']['Message']"],
+                }
+            ],
+            ensure_ascii=False,
+        )
+    )
+
+    with pytest.raises(ValueError, match="名称与当前 plugins.js 不匹配"):
+        _ = build_plugin_rule_records_from_import(game_data=game_data, import_file=import_file)
+
+
+def test_plugin_rule_import_rejects_non_integer_plugin_index() -> None:
+    """插件索引只接受 JSON 整数，避免字符串或布尔值被隐式转换成下标。"""
+    invalid_payloads = [
+        [
+            {
+                "plugin_index": "0",
+                "plugin_name": "TestPlugin",
+                "paths": ["$['parameters']['Message']"],
+            }
+        ],
+        [
+            {
+                "plugin_index": True,
+                "plugin_name": "TestPlugin",
+                "paths": ["$['parameters']['Message']"],
+            }
+        ],
+    ]
+
+    for payload in invalid_payloads:
+        with pytest.raises(ValidationError):
+            _ = parse_plugin_rule_import_text(json.dumps(payload, ensure_ascii=False))
+
+
+def test_plugin_rule_import_rejects_legacy_name_mapping_schema() -> None:
+    """旧的插件名映射格式不再属于插件规则外部协议。"""
+    legacy_payload = {
+        "TestPlugin": ["$['parameters']['Message']"],
+    }
+
+    with pytest.raises(TypeError, match="顶层必须是数组"):
+        _ = parse_plugin_rule_import_text(json.dumps(legacy_payload, ensure_ascii=False))
 
 
 @pytest.mark.asyncio

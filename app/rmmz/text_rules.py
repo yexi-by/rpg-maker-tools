@@ -1,14 +1,14 @@
 """
 文本规则服务模块。
 
-本模块把 RPG Maker 标准控制符保护、自定义正则占位符、日文残留检查和提取阶段
+本模块把 RPG Maker 标准控制符保护、自定义正则占位符、源文残留检查和提取阶段
 文本正规化统一收敛到 `TextRules`。
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from app.config.schemas import TextRulesSetting
@@ -42,7 +42,7 @@ class TextRules:
     custom_placeholder_rules: tuple[CustomPlaceholderRule, ...]
     placeholder_token_pattern: re.Pattern[str]
     source_text_required_pattern: re.Pattern[str]
-    japanese_segment_pattern: re.Pattern[str]
+    source_residual_segment_pattern: re.Pattern[str]
     line_width_count_pattern: re.Pattern[str]
     residual_escape_sequence_pattern: re.Pattern[str]
 
@@ -58,7 +58,7 @@ class TextRules:
             custom_placeholder_rules=custom_placeholder_rules,
             placeholder_token_pattern=ALL_PLACEHOLDER_PATTERN,
             source_text_required_pattern=re.compile(setting.source_text_required_pattern),
-            japanese_segment_pattern=re.compile(setting.japanese_segment_pattern),
+            source_residual_segment_pattern=re.compile(setting.source_residual_segment_pattern),
             line_width_count_pattern=re.compile(setting.line_width_count_pattern),
             residual_escape_sequence_pattern=re.compile(setting.residual_escape_sequence_pattern),
         )
@@ -122,6 +122,11 @@ class TextRules:
         normalized_text = self.normalize_extraction_text(text)
         if not normalized_text:
             return False
+        if (
+            self.setting.source_text_exclusion_profile == "english_protocol_noise"
+            and self._is_english_protocol_noise_text(normalized_text)
+        ):
+            return False
         return self.source_text_required_pattern.search(normalized_text) is not None
 
     def should_translate_source_lines(self, lines: list[str]) -> bool:
@@ -178,30 +183,40 @@ class TextRules:
                 )
         return spans
 
-    def check_japanese_residual(self, translation_lines: list[str]) -> None:
-        """检查译文中是否残留明显日文。"""
-        allowed_chars = set(self.setting.allowed_japanese_chars)
-        allowed_tail_chars = set(self.setting.allowed_japanese_tail_chars)
+    def check_source_residual(
+        self,
+        translation_lines: list[str],
+        *,
+        allowed_terms: Sequence[str] = (),
+    ) -> None:
+        """检查译文中是否残留当前源语言文本。"""
+        allowed_chars = set(self.setting.source_residual_allowed_chars)
+        allowed_tail_chars = set(self.setting.source_residual_allowed_tail_chars)
+        masked_lines = self.mask_source_residual_terms(
+            translation_lines,
+            [*allowed_terms, *self.setting.allowed_source_residual_terms],
+        )
         for index, line in enumerate(translation_lines, start=1):
+            line = masked_lines[index - 1]
             cleaned_line = self._strip_non_content_for_residual(line)
-            segments = [match.group(0) for match in self.japanese_segment_pattern.finditer(cleaned_line)]
+            segments = [match.group(0) for match in self.source_residual_segment_pattern.finditer(cleaned_line)]
             if not segments:
                 continue
 
-            has_non_japanese_content = self._has_non_japanese_content(cleaned_line)
+            has_non_source_content = self._has_non_source_content(cleaned_line)
             real_residual: list[str] = []
             for segment in segments:
                 filtered_segment = [char for char in segment if char not in allowed_chars]
                 if not filtered_segment:
-                    if not has_non_japanese_content:
+                    if not has_non_source_content:
                         real_residual.extend(segment)
                     continue
-                if has_non_japanese_content and all(char in allowed_tail_chars for char in filtered_segment):
+                if has_non_source_content and all(char in allowed_tail_chars for char in filtered_segment):
                     continue
                 real_residual.extend(filtered_segment)
 
             if real_residual:
-                raise ValueError(f"发现日文残留(第 {index} 行): {real_residual}")
+                raise ValueError(f"发现{self.setting.source_residual_label}残留(第 {index} 行): {real_residual}")
 
     def _strip_non_content_for_residual(self, text: str) -> str:
         """在残留校验前剥离控制符和占位符噪音。"""
@@ -209,10 +224,74 @@ class TextRules:
         cleaned_text = self.placeholder_token_pattern.sub("", cleaned_text)
         return self.residual_escape_sequence_pattern.sub(" ", cleaned_text)
 
-    def _has_non_japanese_content(self, text: str) -> bool:
-        """判断残留检查文本中是否存在日文片段之外的正文内容。"""
-        text_without_japanese = self.japanese_segment_pattern.sub("", text)
-        return any(char.isalnum() for char in text_without_japanese)
+    def _has_non_source_content(self, text: str) -> bool:
+        """判断残留检查文本中是否存在源语言片段之外的正文内容。"""
+        text_without_source = self.source_residual_segment_pattern.sub("", text)
+        return any(char.isalnum() for char in text_without_source)
+
+    def mask_source_residual_terms(
+        self,
+        lines: list[str],
+        allowed_terms: Sequence[str],
+    ) -> list[str]:
+        """遮蔽允许保留的源语言片段，供源文残留检测复用。"""
+        allowed_terms = [term for term in allowed_terms if term]
+        if not allowed_terms:
+            return list(lines)
+        sorted_terms = sorted(allowed_terms, key=len, reverse=True)
+        masked_lines: list[str] = []
+        for line in lines:
+            masked_line = line
+            for term in sorted_terms:
+                if self.setting.source_residual_terms_ignore_case:
+                    masked_line = re.sub(
+                        rf"(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])",
+                        " ",
+                        masked_line,
+                        flags=re.IGNORECASE,
+                    )
+                else:
+                    masked_line = masked_line.replace(term, " ")
+            masked_lines.append(masked_line)
+        return masked_lines
+
+    def _is_english_protocol_noise_text(self, text: str) -> bool:
+        """排除英文游戏中常见的资源路径、脚本片段和机器协议值。"""
+        stripped_text = self.strip_rm_control_sequences(text).strip()
+        if not stripped_text:
+            return True
+        lowered_text = stripped_text.lower()
+        if lowered_text in {
+            "true",
+            "false",
+            "null",
+            "none",
+            "auto",
+            "left",
+            "right",
+            "center",
+            "default",
+            "gamefont",
+        }:
+            return True
+        if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", stripped_text):
+            return True
+        if re.search(r"(?:^|[\\/])(?:img|audio|fonts|icon|js|data)[\\/]", lowered_text):
+            return True
+        if re.search(r"\.(?:png|jpe?g|webp|gif|ogg|m4a|mp3|wav|webm|json|js|css|html|ttf|otf|woff2?|rpgmvp|rpgmvo|rpgmvm)$", lowered_text):
+            return True
+        if re.search(r"[$;{}]|=>|\b(?:var|let|const|function|return|this|console|math)\b", lowered_text):
+            return True
+        if re.search(r"[+\-*/<>=]=?|&&|\|\|", stripped_text) and not re.search(r"\s[A-Za-z]{2,}\s", stripped_text):
+            return True
+        if re.fullmatch(r"[A-Za-z0-9_./\\:-]+", stripped_text):
+            if re.search(r"\d", stripped_text) and not re.search(r"\s", stripped_text):
+                return True
+            if "_" in stripped_text or "/" in stripped_text or "\\" in stripped_text:
+                return True
+            if re.search(r"[a-z][A-Z]", stripped_text):
+                return True
+        return False
 
 
 _DEFAULT_TEXT_RULES = TextRules.from_setting(TextRulesSetting())

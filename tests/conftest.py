@@ -385,3 +385,159 @@ def minimal_mv_game_dir(tmp_path: Path) -> Path:
     plugins_text = f"var $plugins = {json.dumps(plugins, ensure_ascii=False, indent=2)};\n"
     _ = (js_dir / "plugins.js").write_text(plugins_text, encoding="utf-8")
     return game_root
+
+
+@pytest.fixture
+def minimal_english_game_dir(tmp_path: Path) -> Path:
+    """创建只含英文玩家可见文本的最小 MZ 游戏目录。"""
+    game_root = tmp_path / "english-mini-game"
+    data_dir = game_root / "data"
+    js_dir = game_root / "js"
+    data_dir.mkdir(parents=True)
+    js_dir.mkdir(parents=True)
+
+    write_json(game_root / "package.json", {"window": {"title": "English Fixture Game"}})
+    write_json(
+        data_dir / "System.json",
+        {
+            "gameTitle": "English Fixture Game",
+            "terms": {
+                "basic": ["", "HP", "MP"],
+                "commands": ["", "Fight", "Escape"],
+                "params": ["Attack"],
+                "messages": {"alwaysDash": "Always Dash"},
+            },
+            "elements": ["", "Fire"],
+            "skillTypes": ["", "Magic"],
+            "weaponTypes": ["", "Sword"],
+            "armorTypes": ["", "Shield"],
+            "equipTypes": ["", "Weapon"],
+        },
+    )
+    write_json(
+        data_dir / "CommonEvents.json",
+        [
+            None,
+            {
+                "id": 1,
+                "list": [
+                    {"code": 101, "parameters": [0, 0, 0, 2, "Guide"]},
+                    {"code": 401, "parameters": ["Are you really going in there?"]},
+                    {"code": 102, "parameters": [["Open the door", "Leave"], 0, 0, 2, 0]},
+                    {
+                        "code": 357,
+                        "parameters": [
+                            "VisiblePlugin",
+                            "Show",
+                            0,
+                            {
+                                "message": "Plugin visible line",
+                                "file": "img/pictures/Window.png",
+                                "enabled": "true",
+                            },
+                        ],
+                    },
+                    {"code": 0, "parameters": []},
+                ],
+            },
+        ],
+    )
+    write_json(
+        data_dir / "Map001.json",
+        {
+            "displayName": "Old Gate",
+            "note": "<Flavor:Ancient warning>",
+            "events": [
+                None,
+                {
+                    "id": 1,
+                    "name": "Gatekeeper",
+                    "note": "",
+                    "pages": [
+                        {
+                            "list": [
+                                {"code": 101, "parameters": [0, 0, 0, 2, "Gatekeeper"]},
+                                {"code": 401, "parameters": ["The bridge is closed tonight."]},
+                                {"code": 0, "parameters": []},
+                            ]
+                        }
+                    ],
+                },
+            ],
+        },
+    )
+    write_json(
+        data_dir / "Troops.json",
+        [
+            None,
+            {
+                "id": 1,
+                "pages": [
+                    {
+                        "list": [
+                            {"code": 101, "parameters": [0, 0, 0, 2, "Enemy"]},
+                            {"code": 401, "parameters": ["You cannot pass."]},
+                            {"code": 0, "parameters": []},
+                        ]
+                    }
+                ],
+            },
+        ],
+    )
+    write_json(
+        data_dir / "Actors.json",
+        [
+            None,
+            {
+                "id": 1,
+                "name": "Mira",
+                "note": "<Profile:Village guard>",
+                "nickname": "Rookie",
+                "profile": "A guard who knows every alley.",
+            },
+        ],
+    )
+    write_json(
+        data_dir / "Skills.json",
+        [
+            None,
+            {
+                "id": 1,
+                "name": "Flame",
+                "note": "",
+                "description": "Deals fire damage to one enemy.",
+                "message1": " casts Flame!",
+                "damage": {"formula": "a.mat * 4 - b.mdf * 2"},
+            },
+        ],
+    )
+    write_json(
+        data_dir / "Items.json",
+        [
+            None,
+            {
+                "id": 1,
+                "name": "Potion",
+                "note": "",
+                "description": "Restores 50 HP.",
+            },
+        ],
+    )
+
+    plugins: list[JsonValue] = [
+        {
+            "name": "VisiblePlugin",
+            "status": True,
+            "description": "Plugin test",
+            "parameters": {
+                "Message": "Welcome to the old gate.",
+                "Title": "Gate Menu",
+                "Image": "img/pictures/Gate.png",
+                "Formula": "a.hpRate() >= 0.5",
+                "Enabled": "true",
+            },
+        }
+    ]
+    plugins_text = f"var $plugins = {json.dumps(plugins, ensure_ascii=False, indent=2)};\n"
+    _ = (js_dir / "plugins.js").write_text(plugins_text, encoding="utf-8")
+    return game_root

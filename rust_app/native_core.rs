@@ -42,9 +42,12 @@ mod tests {
     fn minimal_text_rules() -> Value {
         json!({
             "custom_placeholder_rules": [],
-            "allowed_japanese_chars": [],
-            "allowed_japanese_tail_chars": [],
-            "japanese_segment_pattern": r"[\p{Hiragana}\p{Katakana}\p{Han}ー]+",
+            "source_residual_allowed_chars": [],
+            "source_residual_allowed_tail_chars": [],
+            "source_residual_segment_pattern": r"[\p{Hiragana}\p{Katakana}\p{Han}ー]+",
+            "source_residual_label": "日文",
+            "allowed_source_residual_terms": [],
+            "source_residual_terms_ignore_case": false,
             "line_width_count_pattern": r"[^\s]",
             "residual_escape_sequence_pattern": r"\\[A-Za-z0-9_]+\[[^\]]*\]",
             "long_text_line_width_limit": 999
@@ -64,7 +67,7 @@ mod tests {
                 }
             ],
             "text_rules": minimal_text_rules(),
-            "japanese_residual_rules": []
+            "source_residual_rules": []
         });
         let output = scan_quality_impl(&payload.to_string()).expect("质检应成功");
         let value: Value = serde_json::from_str(&output).expect("输出应是 JSON");

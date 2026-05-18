@@ -23,6 +23,8 @@ rpm = 200
 retry_count = 3
 retry_delay = 2
 system_prompt_file = "prompts/text_translation_system.md"
+# 注册游戏时必须显式使用 `add-game --source-language ja|en`；运行时会自动切换到对应提示词。
+# 如果这里填写自定义提示词文件，语言档案不会覆盖该文件；CLI 的 --system-prompt 仍是最高优先级。
 
 [event_command_text]
 default_command_codes = [357]
@@ -38,14 +40,17 @@ replacement_font_path = "fonts/NotoSansSC-Regular.ttf"
 [text_rules]
 strip_wrapping_punctuation_pairs = [["「", "」"]]
 preserve_wrapping_punctuation_pairs = [["「", "」"], ["『", "』"]]
-allowed_japanese_chars = ["っ", "ッ", "ー", "・", "。", "～", "…"]
-allowed_japanese_tail_chars = ["あ", "い", "う", "え", "お", "っ", "ッ", "ん", "ー", "よ", "ね", "な", "か"]
 line_split_punctuations = [
   "，", "。", "、", "；", "：", "！", "？", "…", "～", "—", "♪", "♡",
   "）", "】", "」", "』", ",", ".", ";", ":", "!", "?",
 ]
 long_text_line_width_limit = 26
 line_width_count_pattern = "\\S"
+# 源语言识别和源文残留规则会按游戏注册时的 source_language 自动套用。
+source_residual_allowed_chars = ["っ", "ッ", "ー", "・", "。", "～", "…"]
+source_residual_allowed_tail_chars = ["あ", "い", "う", "え", "お", "っ", "ッ", "ん", "ー", "よ", "ね", "な", "か"]
 source_text_required_pattern = "[\\u3040-\\u309F\\u30A0-\\u30FF\\u3400-\\u4DBF\\u4E00-\\u9FFF\\uF900-\\uFAFF]+"
-japanese_segment_pattern = "[\\u3040-\\u309F\\u30A0-\\u30FF]+"
+source_text_exclusion_profile = "none"
+source_residual_segment_pattern = "[\\u3040-\\u309F\\u30A0-\\u30FF]+"
+source_residual_terms_ignore_case = false
 residual_escape_sequence_pattern = "\\\\[nrt]"

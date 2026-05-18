@@ -23,13 +23,13 @@ class SettingOverrides:
     write_back_replacement_font_path: str | None = None
     strip_wrapping_punctuation_pairs: list[tuple[str, str]] | None = None
     preserve_wrapping_punctuation_pairs: list[tuple[str, str]] | None = None
-    allowed_japanese_chars: list[str] | None = None
-    allowed_japanese_tail_chars: list[str] | None = None
+    source_residual_allowed_chars: list[str] | None = None
+    source_residual_allowed_tail_chars: list[str] | None = None
     line_split_punctuations: list[str] | None = None
     long_text_line_width_limit: int | None = None
     line_width_count_pattern: str | None = None
     source_text_required_pattern: str | None = None
-    japanese_segment_pattern: str | None = None
+    source_residual_segment_pattern: str | None = None
     residual_escape_sequence_pattern: str | None = None
 
     def has_any(self) -> bool:
@@ -50,13 +50,13 @@ class SettingOverrides:
                 self.write_back_replacement_font_path is not None,
                 self.strip_wrapping_punctuation_pairs is not None,
                 self.preserve_wrapping_punctuation_pairs is not None,
-                self.allowed_japanese_chars is not None,
-                self.allowed_japanese_tail_chars is not None,
+                self.source_residual_allowed_chars is not None,
+                self.source_residual_allowed_tail_chars is not None,
                 self.line_split_punctuations is not None,
                 self.long_text_line_width_limit is not None,
                 self.line_width_count_pattern is not None,
                 self.source_text_required_pattern is not None,
-                self.japanese_segment_pattern is not None,
+                self.source_residual_segment_pattern is not None,
                 self.residual_escape_sequence_pattern is not None,
             )
         )
@@ -122,11 +122,15 @@ def apply_setting_overrides(
         "preserve_wrapping_punctuation_pairs",
         overrides.preserve_wrapping_punctuation_pairs,
     )
-    _set_if_present(text_rules, "allowed_japanese_chars", overrides.allowed_japanese_chars)
     _set_if_present(
         text_rules,
-        "allowed_japanese_tail_chars",
-        overrides.allowed_japanese_tail_chars,
+        "source_residual_allowed_chars",
+        overrides.source_residual_allowed_chars,
+    )
+    _set_if_present(
+        text_rules,
+        "source_residual_allowed_tail_chars",
+        overrides.source_residual_allowed_tail_chars,
     )
     _set_if_present(text_rules, "line_split_punctuations", overrides.line_split_punctuations)
     _set_if_present(
@@ -140,7 +144,11 @@ def apply_setting_overrides(
         "source_text_required_pattern",
         overrides.source_text_required_pattern,
     )
-    _set_if_present(text_rules, "japanese_segment_pattern", overrides.japanese_segment_pattern)
+    _set_if_present(
+        text_rules,
+        "source_residual_segment_pattern",
+        overrides.source_residual_segment_pattern,
+    )
     _set_if_present(
         text_rules,
         "residual_escape_sequence_pattern",

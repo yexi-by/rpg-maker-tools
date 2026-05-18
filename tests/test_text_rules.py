@@ -119,7 +119,7 @@ def test_text_rules_filter_resource_and_japanese_residual() -> None:
     rules = get_default_text_rules()
 
     with pytest.raises(ValueError, match="日文残留"):
-        rules.check_japanese_residual(["你好カ"])
+        rules.check_source_residual(["你好カ"])
 
 
 def test_japanese_tail_allowlist_does_not_hide_untranslated_short_lines() -> None:
@@ -127,12 +127,12 @@ def test_japanese_tail_allowlist_does_not_hide_untranslated_short_lines() -> Non
     rules = get_default_text_rules()
 
     with pytest.raises(ValueError, match="日文残留"):
-        rules.check_japanese_residual(["「なっ……」"])
+        rules.check_source_residual(["「なっ……」"])
 
     with pytest.raises(ValueError, match="日文残留"):
-        rules.check_japanese_residual(['"え？"'])
+        rules.check_source_residual(['"え？"'])
 
-    rules.check_japanese_residual(["已经好了よ"])
+    rules.check_source_residual(["已经好了よ"])
 
 
 def test_text_rules_requires_configured_source_characters_for_translation() -> None:
@@ -146,6 +146,54 @@ def test_text_rules_requires_configured_source_characters_for_translation() -> N
     assert not rules.should_translate_source_text("Back")
     assert not rules.should_translate_source_text("123")
     assert not rules.should_translate_source_text("img/pictures/Actor1.png")
+
+
+def test_english_text_rules_extract_visible_text_and_skip_protocol_noise() -> None:
+    """英文档案只提取玩家可见英文，跳过资源路径和脚本噪音。"""
+    rules = TextRules.from_setting(
+        TextRulesSetting(
+            source_language="en",
+            source_residual_label="英文",
+            source_text_required_pattern=r"[A-Za-z][A-Za-z0-9'’_-]*",
+            source_text_exclusion_profile="english_protocol_noise",
+            source_residual_segment_pattern=r"[A-Za-z][A-Za-z0-9'’_-]*",
+            allowed_source_residual_terms=["HP", "MP", "TP", "OK"],
+            source_residual_terms_ignore_case=True,
+        )
+    )
+
+    assert rules.should_translate_source_text("Are you really going in there?")
+    assert rules.should_translate_source_text("Open the old chest")
+    assert rules.should_translate_source_text("Inventory")
+    assert not rules.should_translate_source_text("img/pictures/Actor1.png")
+    assert not rules.should_translate_source_text("audio/se/Decision1.ogg")
+    assert not rules.should_translate_source_text("damageFormula")
+    assert not rules.should_translate_source_text("a.hpRate() >= 0.5")
+    assert not rules.should_translate_source_text("true")
+    assert not rules.should_translate_source_text("123")
+
+
+def test_english_source_residual_allows_default_ui_abbreviations() -> None:
+    """英文源文残留会拦截漏翻句子，并允许默认 UI 缩写保留。"""
+    rules = TextRules.from_setting(
+        TextRulesSetting(
+            source_language="en",
+            source_residual_label="英文",
+            source_text_required_pattern=r"[A-Za-z][A-Za-z0-9'’_-]*",
+            source_residual_segment_pattern=r"[A-Za-z][A-Za-z0-9'’_-]*",
+            allowed_source_residual_terms=["HP", "MP", "TP", "OK"],
+            source_residual_terms_ignore_case=True,
+        )
+    )
+
+    with pytest.raises(ValueError, match="英文残留"):
+        rules.check_source_residual(["Are you really going in there?"])
+
+    with pytest.raises(ValueError, match="英文残留"):
+        rules.check_source_residual(["你好 Alice"])
+
+    rules.check_source_residual(["HP 恢复 10 点"])
+    rules.check_source_residual(["OK"])
 
 
 def test_text_rules_keep_book_title_quote_during_extraction() -> None:
@@ -195,6 +243,29 @@ def test_text_rules_can_apply_custom_placeholder_json_rules() -> None:
     assert item.translation_lines == ["你好@V[1]<tag:abc>\\V[2]"]
     assert rules.count_line_width_chars("@@中文") == 2
     assert rules.is_line_width_counted_char("@")
+
+
+def test_custom_prefix_control_keeps_adjacent_dialogue_translatable() -> None:
+    """无参数插件控制符可以只保护前缀，后面紧贴的正文继续交给模型。"""
+    rules = TextRules.from_setting(
+        TextRulesSetting(),
+        custom_placeholder_rules=(
+            CustomPlaceholderRule.create(r"\\Shake", "[CUSTOM_PLUGIN_SHAKE_MARKER_{index}]"),
+        ),
+    )
+    item = TranslationItem(
+        location_path="CommonEvents.json/1/0",
+        item_type="short_text",
+        original_lines=[r"\ShakeStop this!!!"],
+    )
+
+    item.build_placeholders(rules)
+    assert item.original_lines_with_placeholders == ["[CUSTOM_PLUGIN_SHAKE_MARKER_1]Stop this!!!"]
+
+    item.translation_lines_with_placeholders = ["[CUSTOM_PLUGIN_SHAKE_MARKER_1]住手！！！"]
+    item.verify_placeholders(rules)
+    item.restore_placeholders()
+    assert item.translation_lines == [r"\Shake住手！！！"]
 
 
 def test_unprotected_control_sequences_must_stay_exact() -> None:

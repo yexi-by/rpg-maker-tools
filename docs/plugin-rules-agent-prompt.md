@@ -20,21 +20,25 @@
 ## 输出
 
 - 唯一可写文件：`<工作区>/plugin-rules.json`。
-- 顶层必须是对象，格式为 `{插件名: [JSONPath, ...]}`。
-- 插件名必须与 `plugins.json` 中的插件名完全一致。
+- 顶层必须是数组，格式为 `[{plugin_index, plugin_name, paths}]`。
+- `plugin_index` 必须是插件在 `plugins.json` 数组中的下标；`plugin_name` 必须与该下标插件的 `name` 完全一致。
 - JSONPath 必须使用括号路径语法，并从 `$['parameters']` 开始。
 - 禁止使用 `$.xxx` 点号路径。
-- 合法空结果是 `{}`，表示已确认没有可导入插件文本规则。
+- 合法空结果是 `[]`，表示已确认没有可导入插件文本规则。
 
 中性格式示例：
 
 ```json
-{
-  "<插件名>": [
-    "$['parameters']['<玩家可见文本字段>']",
-    "$['parameters']['<列表字段>'][*]['<玩家可见名称字段>']"
-  ]
-}
+[
+  {
+    "plugin_index": 0,
+    "plugin_name": "<插件名>",
+    "paths": [
+      "$['parameters']['<玩家可见文本字段>']",
+      "$['parameters']['<列表字段>'][*]['<玩家可见名称字段>']"
+    ]
+  }
+]
 ```
 
 ## 校验
